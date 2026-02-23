@@ -430,4 +430,142 @@ UTEST( query, mutate_during_iteration )
     veDestroyWorld( w );
 }
 
+UTEST( clone, basic )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity src = veCreate( w );
+    veSet<Position>( w, src, { 5.0f, 10.0f } );
+    veSet<Velocity>( w, src, { 1.0f, 2.0f } );
+
+    veEntity dst = veClone( w, src );
+    ASSERT_NE( dst, src );
+    ASSERT_TRUE( veAlive( w, dst ) );
+    ASSERT_TRUE( veHas<Position>( w, dst ) );
+    ASSERT_TRUE( veHas<Velocity>( w, dst ) );
+
+    Position* p = veGet<Position>( w, dst );
+    ASSERT_EQ( p->x, 5.0f );
+    ASSERT_EQ( p->y, 10.0f );
+    p->x = 99.0f;
+    ASSERT_EQ( veGet<Position>( w, src )->x, 5.0f );
+
+    veDestroyWorld( w );
+}
+
+UTEST( clone, no_components )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity src = veCreate( w );
+    veEntity dst = veClone( w, src );
+    ASSERT_TRUE( veAlive( w, dst ) );
+    ASSERT_FALSE( veHas<Position>( w, dst ) );
+    veDestroyWorld( w );
+}
+
+UTEST( cmdbuf, deferred_create )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veCommandBuffer* cb = veCreateCommandBuffer( w );
+
+    uint32_t idx0 = veCmdCreate( cb );
+    uint32_t idx1 = veCmdCreate( cb );
+    ASSERT_EQ( veCount( w ), 0u );
+
+    veFlush( cb );
+    ASSERT_EQ( veCount( w ), 2u );
+    veEntity e0 = veCmdGetCreated( cb, idx0 );
+    veEntity e1 = veCmdGetCreated( cb, idx1 );
+    ASSERT_TRUE( veAlive( w, e0 ) );
+    ASSERT_TRUE( veAlive( w, e1 ) );
+    ASSERT_NE( e0, e1 );
+
+    veDestroyCommandBuffer( cb );
+    veDestroyWorld( w );
+}
+
+UTEST( cmdbuf, deferred_destroy )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    veSet<Position>( w, e, { 1, 2 } );
+
+    veCommandBuffer* cb = veCreateCommandBuffer( w );
+    veCmdDestroy( cb, e );
+    ASSERT_TRUE( veAlive( w, e ) );
+    veFlush( cb );
+    ASSERT_FALSE( veAlive( w, e ) );
+
+    veDestroyCommandBuffer( cb );
+    veDestroyWorld( w );
+}
+
+UTEST( cmdbuf, deferred_set_component )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+
+    veCommandBuffer* cb = veCreateCommandBuffer( w );
+    veCmdSet<Position>( cb, e, { 3.0f, 4.0f } );
+    ASSERT_FALSE( veHas<Position>( w, e ) );
+    veFlush( cb );
+    ASSERT_TRUE( veHas<Position>( w, e ) );
+    ASSERT_EQ( veGet<Position>( w, e )->x, 3.0f );
+
+    veDestroyCommandBuffer( cb );
+    veDestroyWorld( w );
+}
+
+UTEST( cmdbuf, deferred_unset_component )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    veSet<Position>( w, e, { 1, 2 } );
+
+    veCommandBuffer* cb = veCreateCommandBuffer( w );
+    veCmdUnset<Position>( cb, e );
+    ASSERT_TRUE( veHas<Position>( w, e ) );
+    veFlush( cb );
+    ASSERT_FALSE( veHas<Position>( w, e ) );
+
+    veDestroyCommandBuffer( cb );
+    veDestroyWorld( w );
+}
+
+UTEST( cmdbuf, destroy_during_iteration )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    for ( int i = 0; i < 10; i++ )
+    {
+        veEntity e = veCreate( w );
+        veSet<Health>( w, e, { i * 10 } );
+    }
+
+    veCommandBuffer* cb = veCreateCommandBuffer( w );
+    veEach<Health>( w, [&]( veEntity e, Health& h )
+    {
+        if ( h.hp < 50 )
+        {
+            veCmdDestroy( cb, e );
+        }
+    } );
+    veFlush( cb );
+    ASSERT_EQ( veCount( w ), 5u );
+
+    veDestroyCommandBuffer( cb );
+    veDestroyWorld( w );
+}
+
+UTEST( batch, create )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity entities[100];
+    veCreateBatch( w, entities, 100u );
+    ASSERT_EQ( veCount( w ), 100u );
+    for ( int i = 0; i < 100; i++ )
+    {
+        ASSERT_TRUE( veAlive( w, entities[i] ) );
+    }
+    veDestroyWorld( w );
+}
+
 UTEST_MAIN();

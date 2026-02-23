@@ -559,6 +559,29 @@ inline bool veHas( veWorld* w, veEntity e )
     return vePoolHas( w->pools[id], veEntityIndex( e ) );
 }
 
+inline veEntity veClone( veWorld* w, veEntity src )
+{
+    assert( veAlive( w, src ) );
+    veEntity dst = veCreate( w );
+    if ( dst == VECS_INVALID_ENTITY )
+    {
+        return VECS_INVALID_ENTITY;
+    }
+
+    uint32_t srcIdx = veEntityIndex( src );
+    uint32_t dstIdx = veEntityIndex( dst );
+    for ( uint32_t i = 0; i < VECS_MAX_COMPONENTS; i++ )
+    {
+        vePool* pool = w->pools[i];
+        if ( pool && vePoolHas( pool, srcIdx ) )
+        {
+            void* srcData = vePoolGet( pool, srcIdx );
+            vePoolSet( pool, dstIdx, srcData );
+        }
+    }
+    return dst;
+}
+
 // --------------------------------------------------------------------------
 // Query
 // --------------------------------------------------------------------------
@@ -712,6 +735,254 @@ inline T* veGetSingleton( veWorld* w )
 // --------------------------------------------------------------------------
 // Command Buffer
 // --------------------------------------------------------------------------
+
+struct veCommand
+{
+    enum Type : uint8_t
+    {
+        CREATE,
+        DESTROY,
+        SET_COMPONENT,
+        UNSET_COMPONENT
+    };
+
+    Type type;
+    veEntity entity;
+    uint32_t componentId;
+    uint32_t dataOffset;
+    uint32_t dataSize;
+    uint32_t createdIndex;
+    vePool* pool;
+};
+
+struct veCommandBuffer
+{
+    veWorld* world;
+    veCommand* commands;
+    uint32_t commandCount;
+    uint32_t commandCapacity;
+    uint8_t* dataBuffer;
+    uint32_t dataSize;
+    uint32_t dataCapacity;
+    veEntity* created;
+    uint32_t createdCount;
+    uint32_t createdCapacity;
+};
+
+inline void veCmdGrowCommands( veCommandBuffer* cb )
+{
+    uint32_t cap = cb->commandCapacity ? cb->commandCapacity * 2u : 64u;
+    veCommand* ptr = ( veCommand* )std::realloc( cb->commands, ( size_t )cap * sizeof( veCommand ) );
+    assert( ptr );
+    cb->commands = ptr;
+    cb->commandCapacity = cap;
+}
+
+inline void veCmdGrowData( veCommandBuffer* cb, uint32_t minExtra )
+{
+    uint32_t need = cb->dataSize + minExtra;
+    if ( cb->dataCapacity >= need )
+    {
+        return;
+    }
+    uint32_t cap = cb->dataCapacity ? cb->dataCapacity * 2u : 256u;
+    while ( cap < need )
+    {
+        cap *= 2u;
+    }
+    uint8_t* ptr = ( uint8_t* )std::realloc( cb->dataBuffer, cap );
+    assert( ptr );
+    cb->dataBuffer = ptr;
+    cb->dataCapacity = cap;
+}
+
+inline void veCmdGrowCreated( veCommandBuffer* cb )
+{
+    uint32_t cap = cb->createdCapacity ? cb->createdCapacity * 2u : 32u;
+    veEntity* ptr = ( veEntity* )std::realloc( cb->created, ( size_t )cap * sizeof( veEntity ) );
+    assert( ptr );
+    cb->created = ptr;
+    cb->createdCapacity = cap;
+}
+
+inline veCommandBuffer* veCreateCommandBuffer( veWorld* w )
+{
+    veCommandBuffer* cb = ( veCommandBuffer* )std::malloc( sizeof( veCommandBuffer ) );
+    assert( cb );
+    cb->world = w;
+    cb->commands = nullptr;
+    cb->commandCount = 0;
+    cb->commandCapacity = 0;
+    cb->dataBuffer = nullptr;
+    cb->dataSize = 0;
+    cb->dataCapacity = 0;
+    cb->created = nullptr;
+    cb->createdCount = 0;
+    cb->createdCapacity = 0;
+    return cb;
+}
+
+inline void veDestroyCommandBuffer( veCommandBuffer* cb )
+{
+    if ( !cb )
+    {
+        return;
+    }
+    std::free( cb->commands );
+    std::free( cb->dataBuffer );
+    std::free( cb->created );
+    std::free( cb );
+}
+
+inline uint32_t veCmdCreate( veCommandBuffer* cb )
+{
+    assert( cb );
+    if ( cb->createdCount == cb->createdCapacity )
+    {
+        veCmdGrowCreated( cb );
+    }
+    uint32_t index = cb->createdCount++;
+    cb->created[index] = VECS_INVALID_ENTITY;
+
+    if ( cb->commandCount == cb->commandCapacity )
+    {
+        veCmdGrowCommands( cb );
+    }
+    veCommand& cmd = cb->commands[cb->commandCount++];
+    cmd.type = veCommand::CREATE;
+    cmd.entity = VECS_INVALID_ENTITY;
+    cmd.componentId = VECS_INVALID_INDEX;
+    cmd.dataOffset = 0;
+    cmd.dataSize = 0;
+    cmd.createdIndex = index;
+    cmd.pool = nullptr;
+    return index;
+}
+
+inline void veCmdDestroy( veCommandBuffer* cb, veEntity e )
+{
+    assert( cb );
+    if ( cb->commandCount == cb->commandCapacity )
+    {
+        veCmdGrowCommands( cb );
+    }
+    veCommand& cmd = cb->commands[cb->commandCount++];
+    cmd.type = veCommand::DESTROY;
+    cmd.entity = e;
+    cmd.componentId = VECS_INVALID_INDEX;
+    cmd.dataOffset = 0;
+    cmd.dataSize = 0;
+    cmd.createdIndex = VECS_INVALID_INDEX;
+    cmd.pool = nullptr;
+}
+
+template< typename T >
+inline void veCmdSet( veCommandBuffer* cb, veEntity e, const T& val )
+{
+    assert( cb );
+    vePool* pool = veEnsurePool<T>( cb->world );
+    if ( cb->commandCount == cb->commandCapacity )
+    {
+        veCmdGrowCommands( cb );
+    }
+    veCmdGrowData( cb, sizeof( T ) );
+    veCommand& cmd = cb->commands[cb->commandCount++];
+    cmd.type = veCommand::SET_COMPONENT;
+    cmd.entity = e;
+    cmd.componentId = veTypeId<T>();
+    cmd.dataOffset = cb->dataSize;
+    cmd.dataSize = sizeof( T );
+    cmd.createdIndex = VECS_INVALID_INDEX;
+    cmd.pool = pool;
+    std::memcpy( cb->dataBuffer + cb->dataSize, &val, sizeof( T ) );
+    cb->dataSize += sizeof( T );
+}
+
+template< typename T >
+inline void veCmdUnset( veCommandBuffer* cb, veEntity e )
+{
+    assert( cb );
+    if ( cb->commandCount == cb->commandCapacity )
+    {
+        veCmdGrowCommands( cb );
+    }
+    veCommand& cmd = cb->commands[cb->commandCount++];
+    cmd.type = veCommand::UNSET_COMPONENT;
+    cmd.entity = e;
+    cmd.componentId = veTypeId<T>();
+    cmd.dataOffset = 0;
+    cmd.dataSize = 0;
+    cmd.createdIndex = VECS_INVALID_INDEX;
+    cmd.pool = veDetail::getPool<T>( cb->world );
+}
+
+inline void veFlush( veCommandBuffer* cb )
+{
+    assert( cb );
+    for ( uint32_t i = 0; i < cb->commandCount; i++ )
+    {
+        const veCommand& cmd = cb->commands[i];
+        switch ( cmd.type )
+        {
+            case veCommand::CREATE:
+                cb->created[cmd.createdIndex] = veCreate( cb->world );
+                break;
+            case veCommand::DESTROY:
+                if ( veAlive( cb->world, cmd.entity ) )
+                {
+                    veDestroy( cb->world, cmd.entity );
+                }
+                break;
+            case veCommand::SET_COMPONENT:
+                if ( veAlive( cb->world, cmd.entity ) )
+                {
+                    uint32_t idx = veEntityIndex( cmd.entity );
+                    void* data = cb->dataBuffer + cmd.dataOffset;
+                    if ( vePoolHas( cmd.pool, idx ) )
+                    {
+                        std::memcpy( vePoolGet( cmd.pool, idx ), data, cmd.dataSize );
+                    }
+                    else
+                    {
+                        vePoolSet( cmd.pool, idx, data );
+                    }
+                }
+                break;
+            case veCommand::UNSET_COMPONENT:
+                if ( veAlive( cb->world, cmd.entity ) && cmd.pool )
+                {
+                    uint32_t idx = veEntityIndex( cmd.entity );
+                    if ( vePoolHas( cmd.pool, idx ) )
+                    {
+                        vePoolUnset( cmd.pool, idx );
+                    }
+                }
+                break;
+            default:
+                assert( false );
+                break;
+        }
+    }
+    cb->commandCount = 0;
+    cb->dataSize = 0;
+}
+
+inline veEntity veCmdGetCreated( veCommandBuffer* cb, uint32_t index )
+{
+    assert( cb );
+    assert( index < cb->createdCount );
+    return cb->created[index];
+}
+
+inline void veCreateBatch( veWorld* w, veEntity* out, uint32_t count )
+{
+    assert( w );
+    assert( out );
+    for ( uint32_t i = 0; i < count; i++ )
+    {
+        out[i] = veCreate( w );
+    }
+}
 
 // --------------------------------------------------------------------------
 // SIMD
