@@ -3,6 +3,33 @@
 Vecs is a single-header, header-only C++ ECS using a two-level bitfield sparse index for fast
 `has()` checks and efficient multi-component joins.
 
+## Quick Start
+
+```cpp
+#include "vecs.h"
+
+struct Position { float x, y; };
+struct Velocity { float vx, vy; };
+
+int main()
+{
+    veWorld* w = veCreateWorld();
+    veEntity e = veCreate( w );
+
+    veSet<Position>( w, e, { 0.0f, 0.0f } );
+    veSet<Velocity>( w, e, { 1.0f, 0.5f } );
+
+    veEach<Position, Velocity>( w, []( veEntity, Position& p, Velocity& v )
+    {
+        p.x += v.vx;
+        p.y += v.vy;
+    } );
+
+    veDestroyWorld( w );
+    return 0;
+}
+```
+
 ## Build
 
 ### Windows (clang-cl)
