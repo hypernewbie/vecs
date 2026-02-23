@@ -27,6 +27,8 @@
 #include <new>
 #include <cstdlib>
 #include <type_traits>
+#include <tuple>
+#include <utility>
 
 #ifndef VECS_MAX_ENTITIES
 #define VECS_MAX_ENTITIES 65536
@@ -399,8 +401,16 @@ inline bool vePoolHas( const vePool* pool, uint32_t entityIndex )
 
 struct veWorld
 {
+    struct veSingletonSlot
+    {
+        uint8_t* data;
+        uint32_t size;
+        void ( *destructor )( void* );
+    };
+
     veEntityPool* entities;
     vePool* pools[VECS_MAX_COMPONENTS];
+    veSingletonSlot singletons[VECS_MAX_COMPONENTS];
     uint32_t maxEntities;
 };
 
@@ -424,6 +434,7 @@ inline veWorld* veCreateWorld( uint32_t maxEntities = VECS_MAX_ENTITIES )
     world->entities = veCreateEntityPool( maxEntities );
     world->maxEntities = maxEntities;
     std::memset( world->pools, 0, sizeof( world->pools ) );
+    std::memset( world->singletons, 0, sizeof( world->singletons ) );
     return world;
 }
 
@@ -436,6 +447,14 @@ inline void veDestroyWorld( veWorld* world )
     for ( uint32_t i = 0; i < VECS_MAX_COMPONENTS; i++ )
     {
         veDestroyPool( world->pools[i] );
+        if ( world->singletons[i].data )
+        {
+            if ( world->singletons[i].destructor )
+            {
+                world->singletons[i].destructor( world->singletons[i].data );
+            }
+            std::free( world->singletons[i].data );
+        }
     }
     veDestroyEntityPool( world->entities );
     std::free( world );
@@ -544,9 +563,151 @@ inline bool veHas( veWorld* w, veEntity e )
 // Query
 // --------------------------------------------------------------------------
 
+namespace veDetail
+{
+template< typename T >
+inline vePool* getPool( veWorld* w )
+{
+    uint32_t id = veTypeId<T>();
+    if ( id >= VECS_MAX_COMPONENTS )
+    {
+        return nullptr;
+    }
+    return w->pools[id];
+}
+
+template< typename T >
+inline T* getData( vePool* pool, uint32_t entityIdx )
+{
+    uint32_t dense = pool->sparse[entityIdx];
+    return ( T* )( pool->denseData + ( size_t )dense * pool->stride );
+}
+
+template< typename Tuple, typename Fn, size_t... I >
+inline void forEachPoolImpl( Tuple& pools, Fn&& fn, std::index_sequence<I...> )
+{
+    ( fn( std::get<I>( pools ) ), ... );
+}
+
+template< typename Tuple, typename Fn >
+inline void forEachPool( Tuple& pools, Fn&& fn )
+{
+    constexpr size_t N = std::tuple_size<Tuple>::value;
+    forEachPoolImpl( pools, std::forward<Fn>( fn ), std::make_index_sequence<N>() );
+}
+
+template< typename... Components, typename Tuple, typename Fn, size_t... I >
+inline void invokeJoin( veWorld* w, Tuple& pools, uint32_t entityIdx, Fn&& fn, std::index_sequence<I...> )
+{
+    veEntity entity = veMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+    fn( entity, *getData<Components>( std::get<I>( pools ), entityIdx )... );
+}
+}
+
+template< typename... Components, typename Fn >
+inline void veEach( veWorld* w, Fn&& fn )
+{
+    constexpr size_t N = sizeof...( Components );
+    static_assert( N >= 1, "veEach requires at least one component type" );
+
+    if constexpr ( N == 1 )
+    {
+        using First = std::tuple_element_t<0, std::tuple<Components...>>;
+        vePool* pool = veDetail::getPool<First>( w );
+        if ( !pool )
+        {
+            return;
+        }
+        for ( uint32_t i = 0; i < pool->count; i++ )
+        {
+            uint32_t entityIdx = pool->denseEntities[i];
+            veEntity entity = veMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+            First* data = ( First* )( pool->denseData + ( size_t )i * pool->stride );
+            fn( entity, *data );
+        }
+    }
+    else
+    {
+        auto pools = std::make_tuple( veDetail::getPool<Components>( w )... );
+        bool invalid = false;
+        veDetail::forEachPool( pools, [&]( vePool* pool )
+        {
+            if ( !pool || pool->count == 0 )
+            {
+                invalid = true;
+            }
+        } );
+        if ( invalid )
+        {
+            return;
+        }
+
+        for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti++ )
+        {
+            uint64_t top = UINT64_MAX;
+            veDetail::forEachPool( pools, [&]( vePool* pool ) { top &= pool->bitfield.topMasks[ti]; } );
+            while ( top )
+            {
+                uint32_t tb = veTzcnt( top );
+                uint32_t l2Idx = ti * 64u + tb;
+                uint64_t l2 = UINT64_MAX;
+                veDetail::forEachPool( pools, [&]( vePool* pool ) { l2 &= pool->bitfield.l2Masks[l2Idx]; } );
+                while ( l2 )
+                {
+                    uint32_t lb = veTzcnt( l2 );
+                    uint32_t entityIdx = l2Idx * 64u + lb;
+                    veDetail::invokeJoin<Components...>( w, pools, entityIdx, std::forward<Fn>( fn ), std::make_index_sequence<N>() );
+                    l2 &= l2 - 1;
+                }
+                top &= top - 1;
+            }
+        }
+    }
+}
+
 // --------------------------------------------------------------------------
 // Singleton
 // --------------------------------------------------------------------------
+
+template< typename T >
+inline T* veSetSingleton( veWorld* w, const T& val = {} )
+{
+    uint32_t id = veTypeId<T>();
+    assert( id < VECS_MAX_COMPONENTS );
+    auto& slot = w->singletons[id];
+    if ( !slot.data )
+    {
+        slot.data = ( uint8_t* )std::malloc( sizeof( T ) );
+        assert( slot.data );
+        slot.size = sizeof( T );
+        slot.destructor = nullptr;
+        if constexpr ( !std::is_trivially_destructible<T>::value )
+        {
+            slot.destructor = []( void* ptr ) { static_cast<T*>( ptr )->~T(); };
+        }
+    }
+    else
+    {
+        assert( slot.size == sizeof( T ) );
+        if ( slot.destructor )
+        {
+            slot.destructor( slot.data );
+        }
+    }
+    new ( slot.data ) T( val );
+    return ( T* )slot.data;
+}
+
+template< typename T >
+inline T* veGetSingleton( veWorld* w )
+{
+    uint32_t id = veTypeId<T>();
+    if ( id >= VECS_MAX_COMPONENTS || !w->singletons[id].data )
+    {
+        return nullptr;
+    }
+    return ( T* )w->singletons[id].data;
+}
 
 // --------------------------------------------------------------------------
 // Command Buffer
