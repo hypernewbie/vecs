@@ -146,6 +146,7 @@ struct vecsEntityPool
 {
     uint32_t* generations;
     uint32_t* freeList;
+    uint64_t* signatures[4];
     uint32_t freeCount;
     uint32_t maxEntities;
     uint32_t alive;
@@ -159,6 +160,13 @@ inline vecsEntityPool* vecsCreateEntityPool( uint32_t maxEntities )
     pool->freeList = ( uint32_t* )std::malloc( maxEntities * sizeof( uint32_t ) );
     assert( pool->generations );
     assert( pool->freeList );
+
+    for ( uint32_t i = 0; i < 4; i++ )
+    {
+        pool->signatures[i] = ( uint64_t* )std::calloc( maxEntities, sizeof( uint64_t ) );
+        assert( pool->signatures[i] );
+    }
+
     pool->freeCount = maxEntities;
     pool->maxEntities = maxEntities;
     pool->alive = 0;
@@ -177,6 +185,10 @@ inline void vecsDestroyEntityPool( vecsEntityPool* pool )
     }
     std::free( pool->generations );
     std::free( pool->freeList );
+    for ( uint32_t i = 0; i < 4; i++ )
+    {
+        std::free( pool->signatures[i] );
+    }
     std::free( pool );
 }
 
@@ -869,22 +881,30 @@ inline void vecsDestroyRecursive( vecsWorld* w, vecsEntity e )
     }
     
     uint32_t entityIndex = vecsEntityIndex( e );
-    for ( uint32_t i = 0; i < VECS_MAX_COMPONENTS; i++ )
+    for ( uint32_t k = 0; k < 4; k++ )
     {
-        vecsPool* pool = w->pools[i];
-        if ( pool && vecsPoolHas( pool, entityIndex ) )
+        uint64_t mask = w->entities->signatures[k][entityIndex];
+        while ( mask )
         {
+            uint32_t bit = vecsTzcnt( mask );
+            uint32_t componentId = ( k << 6 ) | bit;
+            vecsPool* pool = w->pools[componentId];
+            assert( pool );
+
             for ( uint32_t j = 0; j < w->observers->count; j++ )
             {
                 vecsObserver& obs = w->observers->observers[j];
-                if ( !obs.onAdd && obs.componentId == i )
+                if ( !obs.onAdd && obs.componentId == componentId )
                 {
                     obs.callback( w, e, nullptr );
                 }
             }
             vecsPoolUnset( pool, entityIndex );
+            mask &= ( mask - 1 );
         }
+        w->entities->signatures[k][entityIndex] = 0;
     }
+
     vecsEntityPoolDestroy( w->entities, e );
 }
 
@@ -949,6 +969,9 @@ inline T* vecsSet( vecsWorld* w, vecsEntity e, const T& val = {} )
     {
         result = ( T* )vecsPoolSet( pool, idx, &val );
     }
+
+    w->entities->signatures[componentId >> 6][idx] |= ( 1ULL << ( componentId & 63u ) );
+
     for ( uint32_t i = 0; i < w->observers->count; i++ )
     {
         vecsObserver& obs = w->observers->observers[i];
@@ -968,6 +991,9 @@ inline void vecsUnset( vecsWorld* w, vecsEntity e )
     uint32_t idx = vecsEntityIndex( e );
     assert( vecsPoolHas( pool, idx ) );
     uint32_t componentId = vecsTypeId<T>();
+
+    w->entities->signatures[componentId >> 6][idx] &= ~( 1ULL << ( componentId & 63u ) );
+
     for ( uint32_t i = 0; i < w->observers->count; i++ )
     {
         vecsObserver& obs = w->observers->observers[i];
@@ -1030,6 +1056,7 @@ inline vecsEntity vecsClone( vecsWorld* w, vecsEntity src )
         {
             void* srcData = vecsPoolGet( pool, srcIdx );
             vecsPoolSet( pool, dstIdx, srcData );
+            w->entities->signatures[i >> 6][dstIdx] |= ( 1ULL << ( i & 63u ) );
         }
     }
     return dst;
@@ -1045,6 +1072,7 @@ inline void vecsInstantiateBatch( vecsWorld* w, vecsEntity prefab, vecsEntity* o
     {
         vecsPool* pool;
         void* cachedData;
+        uint32_t componentId;
     };
 
     vecsPrefabPoolCopy active[VECS_MAX_COMPONENTS] = {};
@@ -1057,6 +1085,7 @@ inline void vecsInstantiateBatch( vecsWorld* w, vecsEntity prefab, vecsEntity* o
         if ( pool && vecsPoolHas( pool, prefabIdx ) )
         {
             active[activeCount].pool = pool;
+            active[activeCount].componentId = i;
             if ( !pool->noData )
             {
                 active[activeCount].cachedData = std::malloc( pool->stride );
@@ -1085,6 +1114,7 @@ inline void vecsInstantiateBatch( vecsWorld* w, vecsEntity prefab, vecsEntity* o
         for ( uint32_t j = 0; j < activeCount; j++ )
         {
             vecsPoolSet( active[j].pool, dstIdx, active[j].cachedData );
+            w->entities->signatures[active[j].componentId >> 6][dstIdx] |= ( 1ULL << ( active[j].componentId & 63u ) );
         }
     }
 
