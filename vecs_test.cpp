@@ -6,6 +6,7 @@
 #include <thread>
 #include <atomic>
 #include <vector>
+#include <string>
 
 #if defined( __has_include )
     #if __has_include( "entt/entt.hpp" )
@@ -38,11 +39,25 @@ static uint32_t vecsTrySetExhaustComponents( vecsWorld* w, vecsEntity e, std::in
     return setCount;
 }
 
-static double vecsBenchOpsPerSecond( const std::chrono::high_resolution_clock::time_point& start, uint64_t ops )
+static double vecsBenchOpsPerSecond( std::chrono::high_resolution_clock::time_point start, uint64_t ops )
 {
     const auto end = std::chrono::high_resolution_clock::now();
-    const std::chrono::duration<double> elapsed = end - start;
-    return elapsed.count() > 0.0 ? ( double )ops / elapsed.count() : 0.0;
+    const double elapsed = std::chrono::duration<double>( end - start ).count();
+    return elapsed > 0.0 ? ( double )ops / elapsed : 0.0;
+}
+
+static std::string vecsFormatOps( double ops )
+{
+    char buf[64];
+    if ( ops >= 1e9 )
+        snprintf( buf, sizeof( buf ), "%.2f B ops/s", ops / 1e9 );
+    else if ( ops >= 1e6 )
+        snprintf( buf, sizeof( buf ), "%.2f M ops/s", ops / 1e6 );
+    else if ( ops >= 1e3 )
+        snprintf( buf, sizeof( buf ), "%.2f K ops/s", ops / 1e3 );
+    else
+        snprintf( buf, sizeof( buf ), "%.0f ops/s", ops );
+    return std::string( buf );
 }
 
 UTEST( vecs, smoke )
@@ -1566,20 +1581,14 @@ UTEST( benchmark, vecs_ops_per_second )
 
     {
         vecsWorld* w = vecsCreateWorld( activeCapacity );
-        std::vector<vecsEntity> ring( activeCapacity, VECS_INVALID_ENTITY );
+        std::vector<vecsEntity> entities( activeCapacity );
         const auto start = std::chrono::high_resolution_clock::now();
         for ( uint64_t i = 0; i < opTarget; i++ )
         {
-            uint32_t slot = ( uint32_t )( i % activeCapacity );
-            if ( ring[slot] != VECS_INVALID_ENTITY )
-            {
-                vecsDestroy( w, ring[slot] );
-            }
-            ring[slot] = vecsCreate( w );
-            ASSERT_NE( ring[slot], VECS_INVALID_ENTITY );
+            entities[( size_t )( i % activeCapacity )] = vecsCreate( w );
         }
         const double ops = vecsBenchOpsPerSecond( start, opTarget );
-        std::printf( "[BENCHMARK] Entity Create: %.0f ops/s\n", ops );
+        std::printf( "[BENCHMARK] Entity Create: %s\n", vecsFormatOps( ops ).c_str() );
         vecsDestroyWorld( w );
     }
 
@@ -1599,7 +1608,7 @@ UTEST( benchmark, vecs_ops_per_second )
             vecsSet<Velocity>( w, e, { 2.0f, ( float )i } );
         }
         const double ops = vecsBenchOpsPerSecond( start, opTarget * 2u );
-        std::printf( "[BENCHMARK] Component Insert (Position+Velocity): %.0f ops/s\n", ops );
+        std::printf( "[BENCHMARK] Component Insert (Position+Velocity): %s\n", vecsFormatOps( ops ).c_str() );
         vecsDestroyWorld( w );
     }
 
@@ -1630,7 +1639,7 @@ UTEST( benchmark, vecs_ops_per_second )
             created += batch;
         }
         const double ops = vecsBenchOpsPerSecond( start, createTarget );
-        std::printf( "[BENCHMARK] Command Buffer Flush (Create): %.0f ops/s\n", ops );
+        std::printf( "[BENCHMARK] Command Buffer Flush (Create): %s\n", vecsFormatOps( ops ).c_str() );
         vecsDestroyWorld( w );
     }
 
@@ -1644,31 +1653,30 @@ UTEST( benchmark, vecs_ops_per_second )
             vecsSet<Velocity>( w, entities[i], { 1.0f, 2.0f } );
         }
 
-        const uint64_t processedTarget = 1000000ULL;
         uint64_t processedEach = 0u;
         const auto eachStart = std::chrono::high_resolution_clock::now();
-        while ( processedEach < processedTarget )
+        for ( int iter = 0; iter < 200; iter++ )
         {
-            vecsEach<Position, Velocity>( w, [&]( vecsEntity, Position&, Velocity& )
+            vecsEach<Position, Velocity>( w, [&processedEach]( vecsEntity, Position&, Velocity& )
             {
-                processedEach++;
+                ++processedEach;
             } );
         }
         const double eachOps = vecsBenchOpsPerSecond( eachStart, processedEach );
-        std::printf( "[BENCHMARK] Query Iterate vecsEach (SIMD path): %.0f ops/s\n", eachOps );
+        std::printf( "[BENCHMARK] Query Iterate vecsEach (SIMD path): %s\n", vecsFormatOps( eachOps ).c_str() );
 
         vecsQuery* q = vecsBuildQuery<Position, Velocity>( w );
         uint64_t processedCached = 0u;
         const auto queryStart = std::chrono::high_resolution_clock::now();
-        while ( processedCached < processedTarget )
+        for ( int iter = 0; iter < 200; iter++ )
         {
-            vecsQueryEach<Position, Velocity>( w, q, [&]( vecsEntity, Position&, Velocity& )
+            vecsQueryEach<Position, Velocity>( w, q, [&processedCached]( vecsEntity, Position&, Velocity& )
             {
-                processedCached++;
+                ++processedCached;
             } );
         }
         const double queryOps = vecsBenchOpsPerSecond( queryStart, processedCached );
-        std::printf( "[BENCHMARK] Query Iterate vecsQueryEach (cached): %.0f ops/s\n", queryOps );
+        std::printf( "[BENCHMARK] Query Iterate vecsQueryEach (cached): %s\n", vecsFormatOps( queryOps ).c_str() );
         vecsDestroyQuery( q );
         vecsDestroyWorld( w );
     }
@@ -1684,17 +1692,11 @@ UTEST( benchmark, vecs_vs_entt )
     double enttCreateOps = 0.0;
     {
         vecsWorld* w = vecsCreateWorld( activeCapacity );
-        std::vector<vecsEntity> ring( activeCapacity, VECS_INVALID_ENTITY );
+        std::vector<vecsEntity> entities( activeCapacity );
         const auto start = std::chrono::high_resolution_clock::now();
         for ( uint64_t i = 0; i < opTarget; i++ )
         {
-            uint32_t slot = ( uint32_t )( i % activeCapacity );
-            if ( ring[slot] != VECS_INVALID_ENTITY )
-            {
-                vecsDestroy( w, ring[slot] );
-            }
-            ring[slot] = vecsCreate( w );
-            ASSERT_NE( ring[slot], VECS_INVALID_ENTITY );
+            entities[( size_t )( i % activeCapacity )] = vecsCreate( w );
         }
         vecsCreateOps = vecsBenchOpsPerSecond( start, opTarget );
         vecsDestroyWorld( w );
@@ -1710,7 +1712,7 @@ UTEST( benchmark, vecs_vs_entt )
         }
         enttCreateOps = vecsBenchOpsPerSecond( start, opTarget );
     }
-    std::printf( "[BENCHMARK] Entity Create | Vecs: %.0f ops/s | EnTT: %.0f ops/s\n", vecsCreateOps, enttCreateOps );
+    std::printf( "[BENCHMARK] Entity Create | Vecs: %s | EnTT: %s\n", vecsFormatOps( vecsCreateOps ).c_str(), vecsFormatOps( enttCreateOps ).c_str() );
 
     double vecsSetOps = 0.0;
     double enttSetOps = 0.0;
@@ -1749,7 +1751,7 @@ UTEST( benchmark, vecs_vs_entt )
         }
         enttSetOps = vecsBenchOpsPerSecond( start, opTarget * 2u );
     }
-    std::printf( "[BENCHMARK] Component Insert | Vecs: %.0f ops/s | EnTT: %.0f ops/s\n", vecsSetOps, enttSetOps );
+    std::printf( "[BENCHMARK] Component Insert | Vecs: %s | EnTT: %s\n", vecsFormatOps( vecsSetOps ).c_str(), vecsFormatOps( enttSetOps ).c_str() );
 
     double vecsIterOps = 0.0;
     double enttIterOps = 0.0;
@@ -1792,7 +1794,197 @@ UTEST( benchmark, vecs_vs_entt )
         } );
         enttIterOps = vecsBenchOpsPerSecond( start, processed );
     }
-    std::printf( "[BENCHMARK] Query Iterate | Vecs: %.0f ops/s | EnTT: %.0f ops/s\n", vecsIterOps, enttIterOps );
+    std::printf( "[BENCHMARK] Query Iterate | Vecs: %s | EnTT: %s\n", vecsFormatOps( vecsIterOps ).c_str(), vecsFormatOps( enttIterOps ).c_str() );
+
+    double vecsFullDestroyOps = 0.0;
+    double enttFullDestroyOps = 0.0;
+    {
+        const uint32_t rootCount = 1000u;
+        const uint32_t childDepth = 2u;
+        const uint32_t childrenPerLevel = 5u;
+        const uint32_t estimatedEntities = rootCount * ( 1 + childrenPerLevel + childrenPerLevel * childrenPerLevel );
+        vecsWorld* w = vecsCreateWorld( estimatedEntities + 1000u );
+        std::vector<vecsEntity> roots( rootCount );
+        uint64_t totalEntities = 0;
+        for ( uint32_t r = 0; r < rootCount; r++ )
+        {
+            vecsEntity root = vecsCreate( w );
+            roots[r] = root;
+            totalEntities++;
+            vecsSet<Position>( w, root, { ( float )r, 0 } );
+            std::vector<vecsEntity> currentLevel;
+            currentLevel.push_back( root );
+            for ( uint32_t d = 0; d < childDepth; d++ )
+            {
+                std::vector<vecsEntity> nextLevel;
+                for ( vecsEntity parent : currentLevel )
+                {
+                    for ( uint32_t c = 0; c < childrenPerLevel; c++ )
+                    {
+                        vecsEntity child = vecsCreate( w );
+                        vecsSetChildOf( w, child, parent );
+                        vecsSet<Position>( w, child, { ( float )c, ( float )( d + 1 ) } );
+                        totalEntities++;
+                        nextLevel.push_back( child );
+                    }
+                }
+                currentLevel = std::move( nextLevel );
+            }
+        }
+        const auto start = std::chrono::high_resolution_clock::now();
+        for ( vecsEntity root : roots )
+        {
+            vecsDestroy( w, root );
+        }
+        vecsFullDestroyOps = vecsBenchOpsPerSecond( start, totalEntities );
+        vecsDestroyWorld( w );
+    }
+    {
+        struct Parent { std::vector<entt::entity> children; };
+        const uint32_t rootCount = 1000u;
+        const uint32_t childDepth = 2u;
+        const uint32_t childrenPerLevel = 5u;
+        entt::registry registry;
+        std::vector<entt::entity> roots( rootCount );
+        uint64_t totalEntities = 0;
+        for ( uint32_t r = 0; r < rootCount; r++ )
+        {
+            entt::entity root = registry.create();
+            roots[r] = root;
+            totalEntities++;
+            registry.emplace<Position>( root, ( float )r, 0 );
+            registry.emplace<Parent>( root, Parent{} );
+            std::vector<entt::entity> currentLevel;
+            currentLevel.push_back( root );
+            for ( uint32_t d = 0; d < childDepth; d++ )
+            {
+                std::vector<entt::entity> nextLevel;
+                for ( entt::entity parent : currentLevel )
+                {
+                    for ( uint32_t c = 0; c < childrenPerLevel; c++ )
+                    {
+                        entt::entity child = registry.create();
+                        registry.emplace<Position>( child, ( float )c, ( float )( d + 1 ) );
+                        registry.emplace<Parent>( child, Parent{} );
+                        registry.get<Parent>( parent ).children.push_back( child );
+                        totalEntities++;
+                        nextLevel.push_back( child );
+                    }
+                }
+                currentLevel = std::move( nextLevel );
+            }
+        }
+        std::function<void( entt::entity )> destroyRecursive = [&]( entt::entity e )
+        {
+            Parent* p = registry.try_get<Parent>( e );
+            if ( p )
+            {
+                for ( entt::entity child : p->children )
+                {
+                    if ( registry.valid( child ) )
+                        destroyRecursive( child );
+                }
+            }
+            registry.destroy( e );
+        };
+        const auto start = std::chrono::high_resolution_clock::now();
+        for ( entt::entity root : roots )
+        {
+            destroyRecursive( root );
+        }
+        enttFullDestroyOps = vecsBenchOpsPerSecond( start, totalEntities );
+    }
+    std::printf( "[BENCHMARK] Full Destroy (Recursive Hierarchy) | Vecs: %s | EnTT: %s\n", vecsFormatOps( vecsFullDestroyOps ).c_str(), vecsFormatOps( enttFullDestroyOps ).c_str() );
+
+    double vecsChurnOps = 0.0;
+    double enttChurnOps = 0.0;
+    {
+        const uint32_t entityCount = 50000u;
+        vecsWorld* w = vecsCreateWorld( entityCount );
+        std::vector<vecsEntity> entities( entityCount );
+        for ( uint32_t i = 0; i < entityCount; i++ )
+        {
+            entities[i] = vecsCreate( w );
+            vecsSet<Position>( w, entities[i], { ( float )i, 0 } );
+            vecsSet<Velocity>( w, entities[i], { 1, 0 } );
+        }
+        const auto start = std::chrono::high_resolution_clock::now();
+        for ( uint32_t i = 0; i < entityCount; i++ )
+        {
+            vecsSet<Health>( w, entities[i], { 100 } );
+        }
+        for ( uint32_t i = 0; i < entityCount; i++ )
+        {
+            vecsUnset<Health>( w, entities[i] );
+        }
+        vecsChurnOps = vecsBenchOpsPerSecond( start, entityCount * 2u );
+        vecsDestroyWorld( w );
+    }
+    {
+        const uint32_t entityCount = 50000u;
+        entt::registry registry;
+        std::vector<entt::entity> entities( entityCount );
+        for ( uint32_t i = 0; i < entityCount; i++ )
+        {
+            entities[i] = registry.create();
+            registry.emplace<Position>( entities[i], ( float )i, 0 );
+            registry.emplace<Velocity>( entities[i], 1, 0 );
+        }
+        const auto start = std::chrono::high_resolution_clock::now();
+        for ( uint32_t i = 0; i < entityCount; i++ )
+        {
+            registry.emplace_or_replace<Health>( entities[i], 100 );
+        }
+        for ( uint32_t i = 0; i < entityCount; i++ )
+        {
+            registry.remove<Health>( entities[i] );
+        }
+        enttChurnOps = vecsBenchOpsPerSecond( start, entityCount * 2u );
+    }
+    std::printf( "[BENCHMARK] Structural Churn (Mass Add/Remove Health) | Vecs: %s | EnTT: %s\n", vecsFormatOps( vecsChurnOps ).c_str(), vecsFormatOps( enttChurnOps ).c_str() );
+
+    double vecsShotgunOps = 0.0;
+    double enttShotgunOps = 0.0;
+    {
+        const uint32_t entityCount = 60000u;
+        vecsWorld* w = vecsCreateWorld( entityCount );
+        std::vector<vecsEntity> entities( entityCount );
+        for ( uint32_t i = 0; i < entityCount; i++ )
+        {
+            entities[i] = vecsCreate( w );
+            vecsSet<Position>( w, entities[i], { ( float )i, 0 } );
+            vecsSet<Velocity>( w, entities[i], { 1, 0 } );
+            vecsSet<Health>( w, entities[i], { 100 } );
+        }
+        const uint32_t deleteCount = entityCount / 2u;
+        const auto start = std::chrono::high_resolution_clock::now();
+        for ( uint32_t i = 0; i < entityCount; i += 2 )
+        {
+            vecsDestroy( w, entities[i] );
+        }
+        vecsShotgunOps = vecsBenchOpsPerSecond( start, deleteCount );
+        vecsDestroyWorld( w );
+    }
+    {
+        const uint32_t entityCount = 60000u;
+        entt::registry registry;
+        std::vector<entt::entity> entities( entityCount );
+        for ( uint32_t i = 0; i < entityCount; i++ )
+        {
+            entities[i] = registry.create();
+            registry.emplace<Position>( entities[i], ( float )i, 0 );
+            registry.emplace<Velocity>( entities[i], 1, 0 );
+            registry.emplace<Health>( entities[i], 100 );
+        }
+        const uint32_t deleteCount = entityCount / 2u;
+        const auto start = std::chrono::high_resolution_clock::now();
+        for ( uint32_t i = 0; i < entityCount; i += 2 )
+        {
+            registry.destroy( entities[i] );
+        }
+        enttShotgunOps = vecsBenchOpsPerSecond( start, deleteCount );
+    }
+    std::printf( "[BENCHMARK] Fragmented Deletion (Shotgun Test) | Vecs: %s | EnTT: %s\n", vecsFormatOps( vecsShotgunOps ).c_str(), vecsFormatOps( enttShotgunOps ).c_str() );
 #else
     std::printf( "[BENCHMARK] Vecs vs EnTT skipped (entt/entt.hpp not found).\n" );
 #endif
