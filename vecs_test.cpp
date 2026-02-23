@@ -1,10 +1,21 @@
 #include "utest.h"
 #include "vecs.h"
+#include <chrono>
+#include <cstdio>
+#include <vector>
 
 struct Position { float x, y; };
 struct Velocity { float vx, vy; };
 struct Health { int hp; };
 struct IsEnemy {};
+struct Dead {};
+
+static double veBenchOpsPerSecond( const std::chrono::high_resolution_clock::time_point& start, uint64_t ops )
+{
+    const auto end = std::chrono::high_resolution_clock::now();
+    const std::chrono::duration<double> elapsed = end - start;
+    return elapsed.count() > 0.0 ? ( double )ops / elapsed.count() : 0.0;
+}
 
 UTEST( vecs, smoke )
 {
@@ -1049,6 +1060,389 @@ UTEST( query, parallel_chunked_matches_full )
 
     veDestroyQuery( q );
     veDestroyWorld( w );
+}
+
+UTEST( entity, exhaustion_and_reuse )
+{
+    veWorld* w = veCreateWorld( VECS_MAX_ENTITIES );
+    std::vector<veEntity> entities( VECS_MAX_ENTITIES );
+
+    for ( uint32_t i = 0; i < VECS_MAX_ENTITIES; i++ )
+    {
+        entities[i] = veCreate( w );
+        ASSERT_NE( entities[i], VECS_INVALID_ENTITY );
+    }
+    ASSERT_EQ( veCount( w ), ( uint32_t )VECS_MAX_ENTITIES );
+    ASSERT_EQ( veCreate( w ), VECS_INVALID_ENTITY );
+
+    for ( uint32_t i = 0; i < 512u; i++ )
+    {
+        veDestroy( w, entities[i] );
+    }
+    ASSERT_EQ( veCount( w ), VECS_MAX_ENTITIES - 512u );
+
+    for ( uint32_t i = 0; i < 512u; i++ )
+    {
+        veEntity reused = veCreate( w );
+        ASSERT_NE( reused, VECS_INVALID_ENTITY );
+        ASSERT_TRUE( veAlive( w, reused ) );
+    }
+    ASSERT_EQ( veCount( w ), ( uint32_t )VECS_MAX_ENTITIES );
+
+    veDestroyWorld( w );
+}
+
+UTEST( cmdbuf, empty_flush_is_safe )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veCommandBuffer* cb = veCreateCommandBuffer( w );
+    veFlush( cb );
+    ASSERT_EQ( veCount( w ), 0u );
+    veDestroyCommandBuffer( cb );
+    veDestroyWorld( w );
+}
+
+UTEST( cmdbuf, set_then_destroy_same_frame )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    veCommandBuffer* cb = veCreateCommandBuffer( w );
+
+    veCmdSet<Position>( cb, e, { 3.0f, 4.0f } );
+    veCmdDestroy( cb, e );
+    veFlush( cb );
+
+    ASSERT_FALSE( veAlive( w, e ) );
+    ASSERT_EQ( veCount( w ), 0u );
+
+    veDestroyCommandBuffer( cb );
+    veDestroyWorld( w );
+}
+
+UTEST( cmdbuf, multiple_sets_last_wins )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    veCommandBuffer* cb = veCreateCommandBuffer( w );
+
+    veCmdSet<Position>( cb, e, { 1.0f, 2.0f } );
+    veCmdSet<Position>( cb, e, { 9.0f, 7.0f } );
+    veFlush( cb );
+
+    Position* p = veGet<Position>( w, e );
+    ASSERT_TRUE( p != nullptr );
+    ASSERT_EQ( p->x, 9.0f );
+    ASSERT_EQ( p->y, 7.0f );
+
+    veDestroyCommandBuffer( cb );
+    veDestroyWorld( w );
+}
+
+UTEST( query, optional_component_pointer_behaviour )
+{
+    veWorld* w = veCreateWorld( 2048u );
+    for ( uint32_t i = 0; i < 256u; i++ )
+    {
+        veEntity e = veCreate( w );
+        veSet<Position>( w, e, { ( float )i, 0.0f } );
+        if ( ( i & 1u ) == 0u )
+        {
+            veSet<Velocity>( w, e, { ( float )i, 1.0f } );
+        }
+    }
+
+    veQuery* q = veBuildQuery<Position>( w );
+    uint32_t withVelocity = 0u;
+    uint32_t withoutVelocity = 0u;
+    veQueryEach<Position>( w, q, [&]( veEntity e, Position& )
+    {
+        Velocity* v = veGet<Velocity>( w, e );
+        if ( v )
+        {
+            withVelocity++;
+            ASSERT_EQ( ( uint32_t )v->vy, 1u );
+        }
+        else
+        {
+            withoutVelocity++;
+        }
+    } );
+
+    ASSERT_EQ( withVelocity, 128u );
+    ASSERT_EQ( withoutVelocity, 128u );
+
+    veDestroyQuery( q );
+    veDestroyWorld( w );
+}
+
+UTEST( query, without_filter_can_remove_all )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    for ( uint32_t i = 0; i < 128u; i++ )
+    {
+        veEntity e = veCreate( w );
+        veSet<Position>( w, e, { ( float )i, 0 } );
+        veSet<Dead>( w, e, {} );
+    }
+
+    veQuery* q = veBuildQuery<Position>( w );
+    veQueryAddWithout( q, veTypeId<Dead>() );
+
+    uint32_t count = 0u;
+    veQueryEach<Position>( w, q, [&]( veEntity, Position& ) { count++; } );
+    ASSERT_EQ( count, 0u );
+
+    veDestroyQuery( q );
+    veDestroyWorld( w );
+}
+
+UTEST( query, simd_scalar_boundaries )
+{
+    const uint32_t sizes[] = { 63u, 64u, 65u, 255u, 256u, 257u };
+    for ( uint32_t n : sizes )
+    {
+        veWorld* w = veCreateWorld( 1024u );
+        for ( uint32_t i = 0; i < n; i++ )
+        {
+            veEntity e = veCreate( w );
+            veSet<Position>( w, e, { ( float )i, 0 } );
+            veSet<Velocity>( w, e, { 1.0f, 0 } );
+        }
+
+        uint32_t eachCount = 0u;
+        veEach<Position, Velocity>( w, [&]( veEntity, Position&, Velocity& ) { eachCount++; } );
+        ASSERT_EQ( eachCount, n );
+
+        veQuery* q = veBuildQuery<Position, Velocity>( w );
+        uint32_t queryCount = 0u;
+        veQueryEach<Position, Velocity>( w, q, [&]( veEntity, Position&, Velocity& ) { queryCount++; } );
+        ASSERT_EQ( queryCount, n );
+
+        veDestroyQuery( q );
+        veDestroyWorld( w );
+    }
+}
+
+UTEST( relationships, deep_nesting_destroy_chain )
+{
+    veWorld* w = veCreateWorld( 2048u );
+    std::vector<veEntity> chain;
+    chain.reserve( 100u );
+    for ( uint32_t i = 0; i < 100u; i++ )
+    {
+        chain.push_back( veCreate( w ) );
+        if ( i > 0u )
+        {
+            veSetChildOf( w, chain[i], chain[i - 1u] );
+        }
+    }
+
+    veDestroy( w, chain[0] );
+    for ( veEntity e : chain )
+    {
+        ASSERT_FALSE( veAlive( w, e ) );
+    }
+    ASSERT_EQ( veCount( w ), 0u );
+
+    veDestroyWorld( w );
+}
+
+UTEST( relationships, repeated_reparenting_keeps_counts_correct )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity p1 = veCreate( w );
+    veEntity p2 = veCreate( w );
+    veEntity p3 = veCreate( w );
+    veEntity child = veCreate( w );
+
+    veSetChildOf( w, child, p1 );
+    ASSERT_EQ( veGetChildEntityCount( w, p1 ), 1u );
+    ASSERT_EQ( veGetParentEntity( w, child ), p1 );
+
+    veSetChildOf( w, child, p2 );
+    ASSERT_EQ( veGetChildEntityCount( w, p1 ), 0u );
+    ASSERT_EQ( veGetChildEntityCount( w, p2 ), 1u );
+    ASSERT_EQ( veGetParentEntity( w, child ), p2 );
+
+    veSetChildOf( w, child, p3 );
+    ASSERT_EQ( veGetChildEntityCount( w, p2 ), 0u );
+    ASSERT_EQ( veGetChildEntityCount( w, p3 ), 1u );
+    ASSERT_EQ( veGetParentEntity( w, child ), p3 );
+
+    veSetChildOf( w, child, VECS_INVALID_ENTITY );
+    ASSERT_EQ( veGetChildEntityCount( w, p3 ), 0u );
+    ASSERT_EQ( veGetParentEntity( w, child ), VECS_INVALID_ENTITY );
+
+    veDestroyWorld( w );
+}
+
+static int g_cascadeAddPosition = 0;
+static int g_cascadeAddVelocity = 0;
+static void onCascadeVelocityAdd( veWorld*, veEntity, Velocity* )
+{
+    g_cascadeAddVelocity++;
+}
+static void onCascadePositionAdd( veWorld* w, veEntity e, Position* )
+{
+    g_cascadeAddPosition++;
+    veSet<Velocity>( w, e, { 42.0f, 1.0f } );
+}
+
+UTEST( observer, cascading_add_callbacks )
+{
+    g_cascadeAddPosition = 0;
+    g_cascadeAddVelocity = 0;
+    veWorld* w = veCreateWorld( 1024u );
+    veOnAdd<Position>( w, onCascadePositionAdd );
+    veOnAdd<Velocity>( w, onCascadeVelocityAdd );
+
+    veEntity e = veCreate( w );
+    veSet<Position>( w, e, { 1.0f, 2.0f } );
+
+    ASSERT_EQ( g_cascadeAddPosition, 1 );
+    ASSERT_EQ( g_cascadeAddVelocity, 1 );
+    ASSERT_TRUE( veHas<Velocity>( w, e ) );
+
+    veDestroyWorld( w );
+}
+
+static int g_destroyRemovePosition = 0;
+static int g_destroyRemoveVelocity = 0;
+static void onDestroyRemovePosition( veWorld*, veEntity, Position* ) { g_destroyRemovePosition++; }
+static void onDestroyRemoveVelocity( veWorld*, veEntity, Velocity* ) { g_destroyRemoveVelocity++; }
+
+UTEST( observer, destroy_fires_remove_for_all_components )
+{
+    g_destroyRemovePosition = 0;
+    g_destroyRemoveVelocity = 0;
+    veWorld* w = veCreateWorld( 1024u );
+    veOnRemove<Position>( w, onDestroyRemovePosition );
+    veOnRemove<Velocity>( w, onDestroyRemoveVelocity );
+
+    veEntity e = veCreate( w );
+    veSet<Position>( w, e, { 0.0f, 0.0f } );
+    veSet<Velocity>( w, e, { 0.0f, 0.0f } );
+    veDestroy( w, e );
+
+    ASSERT_EQ( g_destroyRemovePosition, 1 );
+    ASSERT_EQ( g_destroyRemoveVelocity, 1 );
+
+    veDestroyWorld( w );
+}
+
+UTEST( benchmark, vecs_ops_per_second )
+{
+    const uint32_t activeCapacity = VECS_MAX_ENTITIES;
+    const uint64_t opTarget = 1000000ULL;
+
+    {
+        veWorld* w = veCreateWorld( activeCapacity );
+        std::vector<veEntity> ring( activeCapacity, VECS_INVALID_ENTITY );
+        const auto start = std::chrono::high_resolution_clock::now();
+        for ( uint64_t i = 0; i < opTarget; i++ )
+        {
+            uint32_t slot = ( uint32_t )( i % activeCapacity );
+            if ( ring[slot] != VECS_INVALID_ENTITY )
+            {
+                veDestroy( w, ring[slot] );
+            }
+            ring[slot] = veCreate( w );
+            ASSERT_NE( ring[slot], VECS_INVALID_ENTITY );
+        }
+        const double ops = veBenchOpsPerSecond( start, opTarget );
+        std::printf( "[BENCHMARK] Entity Create: %.0f ops/s\n", ops );
+        veDestroyWorld( w );
+    }
+
+    {
+        veWorld* w = veCreateWorld( activeCapacity );
+        std::vector<veEntity> entities( activeCapacity );
+        for ( uint32_t i = 0; i < activeCapacity; i++ )
+        {
+            entities[i] = veCreate( w );
+        }
+
+        const auto start = std::chrono::high_resolution_clock::now();
+        for ( uint64_t i = 0; i < opTarget; i++ )
+        {
+            veEntity e = entities[( uint32_t )( i % activeCapacity )];
+            veSet<Position>( w, e, { ( float )i, 1.0f } );
+            veSet<Velocity>( w, e, { 2.0f, ( float )i } );
+        }
+        const double ops = veBenchOpsPerSecond( start, opTarget * 2u );
+        std::printf( "[BENCHMARK] Component Insert (Position+Velocity): %.0f ops/s\n", ops );
+        veDestroyWorld( w );
+    }
+
+    {
+        veWorld* w = veCreateWorld( activeCapacity );
+        const uint64_t createTarget = 100000ULL;
+        const uint32_t batchSize = 20000u;
+        uint64_t created = 0u;
+        const auto start = std::chrono::high_resolution_clock::now();
+        while ( created < createTarget )
+        {
+            uint32_t batch = ( uint32_t )( ( createTarget - created ) < batchSize ? ( createTarget - created ) : batchSize );
+            veCommandBuffer* cb = veCreateCommandBuffer( w );
+            for ( uint32_t i = 0; i < batch; i++ )
+            {
+                veCmdCreate( cb );
+            }
+            veFlush( cb );
+            for ( uint32_t i = 0; i < batch; i++ )
+            {
+                veEntity e = veCmdGetCreated( cb, i );
+                if ( e != VECS_INVALID_ENTITY )
+                {
+                    veDestroy( w, e );
+                }
+            }
+            veDestroyCommandBuffer( cb );
+            created += batch;
+        }
+        const double ops = veBenchOpsPerSecond( start, createTarget );
+        std::printf( "[BENCHMARK] Command Buffer Flush (Create): %.0f ops/s\n", ops );
+        veDestroyWorld( w );
+    }
+
+    {
+        veWorld* w = veCreateWorld( activeCapacity );
+        std::vector<veEntity> entities( activeCapacity );
+        for ( uint32_t i = 0; i < activeCapacity; i++ )
+        {
+            entities[i] = veCreate( w );
+            veSet<Position>( w, entities[i], { ( float )i, 0.0f } );
+            veSet<Velocity>( w, entities[i], { 1.0f, 2.0f } );
+        }
+
+        const uint64_t processedTarget = 1000000ULL;
+        uint64_t processedEach = 0u;
+        const auto eachStart = std::chrono::high_resolution_clock::now();
+        while ( processedEach < processedTarget )
+        {
+            veEach<Position, Velocity>( w, [&]( veEntity, Position&, Velocity& )
+            {
+                processedEach++;
+            } );
+        }
+        const double eachOps = veBenchOpsPerSecond( eachStart, processedEach );
+        std::printf( "[BENCHMARK] Query Iterate veEach (SIMD path): %.0f ops/s\n", eachOps );
+
+        veQuery* q = veBuildQuery<Position, Velocity>( w );
+        uint64_t processedCached = 0u;
+        const auto queryStart = std::chrono::high_resolution_clock::now();
+        while ( processedCached < processedTarget )
+        {
+            veQueryEach<Position, Velocity>( w, q, [&]( veEntity, Position&, Velocity& )
+            {
+                processedCached++;
+            } );
+        }
+        const double queryOps = veBenchOpsPerSecond( queryStart, processedCached );
+        std::printf( "[BENCHMARK] Query Iterate veQueryEach (cached): %.0f ops/s\n", queryOps );
+        veDestroyQuery( q );
+        veDestroyWorld( w );
+    }
 }
 
 UTEST_MAIN();

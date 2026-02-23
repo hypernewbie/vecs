@@ -1022,7 +1022,7 @@ inline void veInstantiateBatch( veWorld* w, veEntity prefab, veEntity* out, uint
     struct vePrefabPoolCopy
     {
         vePool* pool;
-        const void* srcData;
+        uint32_t srcDense;
     };
 
     vePrefabPoolCopy active[VECS_MAX_COMPONENTS] = {};
@@ -1035,7 +1035,7 @@ inline void veInstantiateBatch( veWorld* w, veEntity prefab, veEntity* out, uint
         if ( pool && vePoolHas( pool, prefabIdx ) )
         {
             active[activeCount].pool = pool;
-            active[activeCount].srcData = pool->noData ? nullptr : vePoolGet( pool, prefabIdx );
+            active[activeCount].srcDense = pool->sparse[prefabIdx];
             activeCount++;
         }
     }
@@ -1058,7 +1058,9 @@ inline void veInstantiateBatch( veWorld* w, veEntity prefab, veEntity* out, uint
             }
             else
             {
-                vePoolSet( active[j].pool, dstIdx, active[j].srcData );
+                vePool* pool = active[j].pool;
+                const void* srcData = pool->denseData + ( size_t )active[j].srcDense * pool->stride;
+                vePoolSet( pool, dstIdx, srcData );
             }
         }
     }
