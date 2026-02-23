@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            cc: clang-cl
+            cxx: clang-cl
+            test_cmd: .\build\vecs_test.exe
+          - os: ubuntu-latest
+            cc: clang
+            cxx: clang++
+            test_cmd: ./build/vecs_test
+          - os: macos-14
+            cc: clang
+            cxx: clang++
+            test_cmd: ./build/vecs_test
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup CMake
+        uses: lukka/get-cmake@latest
+
+      - name: Setup MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Setup Ninja (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ninja --no-progress --yes
+
+      - name: Setup Ninja (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Setup Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Configure (Windows clang-cl)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cmake -G Ninja -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} -B build .
+
+      - name: Configure (Linux/macOS clang)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: cmake -G Ninja -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} -B build .
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ${{ matrix.test_cmd }}
+
+      - name: Test (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ${{ matrix.test_cmd }}
