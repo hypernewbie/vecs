@@ -669,4 +669,262 @@ UTEST( simd, scalar_simd_parity )
     veDestroyWorld( w );
 }
 
+UTEST( query, cached_query_with_without )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    for ( uint32_t i = 0; i < 10u; i++ )
+    {
+        veEntity e = veCreate( w );
+        veSet<Position>( w, e, { ( float )i, 0 } );
+        if ( i % 2u == 0u )
+        {
+            veSet<Velocity>( w, e, { ( float )i * 10.0f, 0 } );
+        }
+        if ( i % 3u == 0u )
+        {
+            veSet<Health>( w, e, { ( int )i } );
+        }
+    }
+    
+    veQuery* q = veBuildQuery<Position, Velocity, Health>( w );
+    uint32_t count = 0;
+    veQueryEach<Position, Velocity, Health>( w, q, [&]( veEntity, Position&, Velocity&, Health& )
+    {
+        count++;
+    } );
+    ASSERT_EQ( count, 2u );
+    
+    veDestroyQuery( q );
+    veDestroyWorld( w );
+}
+
+UTEST( query, without_filter )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e1 = veCreate( w );
+    veEntity e2 = veCreate( w );
+    veEntity e3 = veCreate( w );
+    
+    veSet<Position>( w, e1, { 1, 0 } );
+    veSet<Position>( w, e2, { 2, 0 } );
+    veSet<Position>( w, e3, { 3, 0 } );
+    veSet<Velocity>( w, e2, { 10, 0 } );
+    veSet<Health>( w, e3, { 100 } );
+    
+    veQuery* q = veBuildQuery<Position, Velocity>( w );
+    uint32_t count = 0;
+    float sumX = 0.0f;
+    veQueryEach<Position, Velocity>( w, q, [&]( veEntity, Position& p, Velocity& )
+    {
+        count++;
+        sumX += p.x;
+    } );
+    ASSERT_EQ( count, 1u );
+    ASSERT_EQ( sumX, 2.0f );
+    
+    veDestroyQuery( q );
+    veDestroyWorld( w );
+}
+
+static int g_observerAddCount = 0;
+static int g_observerRemoveCount = 0;
+
+static void onPositionAdd( veWorld*, veEntity, Position* )
+{
+    g_observerAddCount++;
+}
+
+static void onPositionRemove( veWorld*, veEntity, Position* )
+{
+    g_observerRemoveCount++;
+}
+
+UTEST( observer, on_add_callback )
+{
+    g_observerAddCount = 0;
+    veWorld* w = veCreateWorld( 1024u );
+    
+    veOnAdd<Position>( w, onPositionAdd );
+    
+    veEntity e = veCreate( w );
+    veSet<Position>( w, e, { 1, 2 } );
+    ASSERT_EQ( g_observerAddCount, 1 );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( observer, on_remove_callback )
+{
+    g_observerRemoveCount = 0;
+    veWorld* w = veCreateWorld( 1024u );
+    
+    veOnRemove<Position>( w, onPositionRemove );
+    
+    veEntity e = veCreate( w );
+    veSet<Position>( w, e, { 1, 2 } );
+    veUnset<Position>( w, e );
+    ASSERT_EQ( g_observerRemoveCount, 1 );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( relationships, set_parent_child )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    
+    veEntity parent = veCreate( w );
+    veEntity child1 = veCreate( w );
+    veEntity child2 = veCreate( w );
+    
+    veSetChildOf( w, child1, parent );
+    veSetChildOf( w, child2, parent );
+    
+    ASSERT_EQ( veGetParentEntity( w, child1 ), parent );
+    ASSERT_EQ( veGetParentEntity( w, child2 ), parent );
+    ASSERT_EQ( veGetChildEntityCount( w, parent ), 2u );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( relationships, get_children )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    
+    veEntity parent = veCreate( w );
+    veEntity child1 = veCreate( w );
+    veEntity child2 = veCreate( w );
+    veEntity child3 = veCreate( w );
+    
+    veSetChildOf( w, child1, parent );
+    veSetChildOf( w, child2, parent );
+    veSetChildOf( w, child3, parent );
+    
+    ASSERT_EQ( veGetChildEntityCount( w, parent ), 3u );
+    ASSERT_EQ( veGetChildEntity( w, parent, 0 ), child1 );
+    ASSERT_EQ( veGetChildEntity( w, parent, 1 ), child2 );
+    ASSERT_EQ( veGetChildEntity( w, parent, 2 ), child3 );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( relationships, destroy_parent_destroys_children )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    
+    veEntity parent = veCreate( w );
+    veEntity child1 = veCreate( w );
+    veEntity child2 = veCreate( w );
+    veEntity grandchild = veCreate( w );
+    
+    veSet<Position>( w, parent, { 0, 0 } );
+    veSet<Position>( w, child1, { 1, 0 } );
+    veSet<Position>( w, child2, { 2, 0 } );
+    veSet<Position>( w, grandchild, { 3, 0 } );
+    
+    veSetChildOf( w, child1, parent );
+    veSetChildOf( w, child2, parent );
+    veSetChildOf( w, grandchild, child1 );
+    
+    ASSERT_TRUE( veAlive( w, parent ) );
+    ASSERT_TRUE( veAlive( w, child1 ) );
+    ASSERT_TRUE( veAlive( w, child2 ) );
+    ASSERT_TRUE( veAlive( w, grandchild ) );
+    ASSERT_EQ( veCount( w ), 4u );
+    
+    veDestroy( w, parent );
+    
+    ASSERT_FALSE( veAlive( w, parent ) );
+    ASSERT_FALSE( veAlive( w, child1 ) );
+    ASSERT_FALSE( veAlive( w, child2 ) );
+    ASSERT_FALSE( veAlive( w, grandchild ) );
+    ASSERT_EQ( veCount( w ), 0u );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( relationships, no_parent_returns_invalid )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    
+    veEntity e = veCreate( w );
+    ASSERT_EQ( veGetParentEntity( w, e ), VECS_INVALID_ENTITY );
+    ASSERT_EQ( veGetChildEntityCount( w, e ), 0u );
+    
+    veDestroyWorld( w );
+}
+
+struct alignas( 32 ) AlignedMat4
+{
+    float m[16];
+};
+
+UTEST( alignment, aligned_component )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    
+    AlignedMat4 mat = {};
+    veSet<AlignedMat4>( w, e, mat );
+    
+    AlignedMat4* ptr = veGet<AlignedMat4>( w, e );
+    ASSERT_TRUE( ptr != nullptr );
+    ASSERT_EQ( ( uintptr_t )ptr % 32u, 0u );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( cmdbuf, deferred_set_parent )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity parent = veCreate( w );
+    veEntity child = veCreate( w );
+    
+    veCommandBuffer* cb = veCreateCommandBuffer( w );
+    veCmdSetParent( cb, child, parent );
+    
+    ASSERT_EQ( veGetParentEntity( w, child ), VECS_INVALID_ENTITY );
+    
+    veFlush( cb );
+    
+    ASSERT_EQ( veGetParentEntity( w, child ), parent );
+    ASSERT_EQ( veGetChildEntityCount( w, parent ), 1u );
+    
+    veDestroyCommandBuffer( cb );
+    veDestroyWorld( w );
+}
+
+UTEST( query, simd_query_parity )
+{
+    veWorld* w = veCreateWorld();
+    for ( uint32_t i = 0; i < 500u; i++ )
+    {
+        veEntity e = veCreate( w );
+        veSet<Position>( w, e, { ( float )i, 0 } );
+        if ( i % 2u == 0u )
+        {
+            veSet<Velocity>( w, e, { ( float )i * 10.0f, 0 } );
+        }
+        if ( i % 3u == 0u )
+        {
+            veSet<Health>( w, e, { ( int )i } );
+        }
+    }
+    
+    veQuery* q = veBuildQuery<Position, Velocity>( w );
+    
+    uint32_t count = 0;
+    float sumX = 0.0f;
+    veQueryEach<Position, Velocity>( w, q, [&]( veEntity, Position& p, Velocity& )
+    {
+        count++;
+        sumX += p.x;
+    } );
+    
+    ASSERT_EQ( count, 250u );
+    ASSERT_GT( sumX, 0.0f );
+    
+    veDestroyQuery( q );
+    veDestroyWorld( w );
+}
+
 UTEST_MAIN();
