@@ -1415,7 +1415,7 @@ UTEST( simd, scalar_fallback_exact_match )
     simdResults.reserve( 10000u );
     scalarResults.reserve( 10000u );
 
-    g_veDisableSimd = false;
+    g_vecsSimdConfig = VECS_SIMD_AUTO;
     vecsQueryEach<Position, Velocity>( w, q, [&]( vecsEntity e, Position& p, Velocity& v )
     {
         uint64_t h = vecsEntityIndex( e );
@@ -1423,14 +1423,14 @@ UTEST( simd, scalar_fallback_exact_match )
         simdResults.push_back( h );
     } );
 
-    g_veDisableSimd = true;
+    g_vecsSimdConfig = VECS_SIMD_SCALAR;
     vecsQueryEach<Position, Velocity>( w, q, [&]( vecsEntity e, Position& p, Velocity& v )
     {
         uint64_t h = vecsEntityIndex( e );
         h = ( h * 1315423911u ) ^ ( uint64_t )( p.x * 1000.0f ) ^ ( ( uint64_t )( v.vx * 1000.0f ) << 32 );
         scalarResults.push_back( h );
     } );
-    g_veDisableSimd = false;
+    g_vecsSimdConfig = VECS_SIMD_AUTO;
 
     ASSERT_EQ( scalarResults.size(), simdResults.size() );
     for ( size_t i = 0; i < simdResults.size(); i++ )
@@ -2406,6 +2406,121 @@ UTEST( each_no_entity, mutates_components )
     
     ASSERT_EQ( sum, 20.0f );
     
+    vecsDestroyWorld( w );
+}
+
+UTEST( benchmark, simd_test_matrix )
+{
+    const uint32_t entityCount = VECS_MAX_ENTITIES;
+    vecsWorld* w = vecsCreateWorld( entityCount );
+    
+    // Sparse setup: 100% have Position, 10% have Velocity
+    for ( uint32_t i = 0; i < entityCount; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { ( float )i, 0.0f } );
+        if ( i % 10 == 0 )
+        {
+            vecsSet<Velocity>( w, e, { 1.0f, 2.0f } );
+        }
+    }
+    
+    vecsQuery* q = vecsBuildQuery<Position, Velocity>( w );
+    
+    std::printf( "[BENCHMARK] SIMD Test Matrix (%u entities, 10%% density, 100 iterations):\n", entityCount );
+    
+    vecsSimdLevel savedConfig = g_vecsSimdConfig;
+    
+    g_vecsSimdConfig = VECS_SIMD_AUTO;
+    vecsSimdLevel supported = vecsRuntimeSimdSupported();
+    
+    auto runBenchmark = [&]( vecsSimdLevel level, const char* name ) -> double
+    {
+        g_vecsSimdConfig = level;
+        uint64_t processed = 0u;
+        const auto start = std::chrono::high_resolution_clock::now();
+        for ( int iter = 0; iter < 100; iter++ )
+        {
+            vecsQueryEach<Position, Velocity>( w, q, [&]( vecsEntity, Position&, Velocity& )
+            {
+                processed++;
+            } );
+        }
+        return vecsBenchOpsPerSecond( start, processed );
+    };
+    
+    double scalarOps = runBenchmark( VECS_SIMD_SCALAR, "Scalar" );
+    std::printf( "  %-10s: %s\n", "Scalar", vecsFormatOps( scalarOps ).c_str() );
+    
+#if defined( VECS_SSE2 )
+    if ( supported >= VECS_SIMD_SSE2 )
+    {
+        double sse2Ops = runBenchmark( VECS_SIMD_SSE2, "SSE2" );
+        std::printf( "  %-10s: %s (%.2fx faster than scalar)\n", "SSE2", vecsFormatOps( sse2Ops ).c_str(), sse2Ops / scalarOps );
+    }
+    else
+    {
+        std::printf( "  %-10s: Skipped (CPU unsupported)\n", "SSE2" );
+    }
+#endif
+    
+#if defined( VECS_AVX2 )
+    if ( supported >= VECS_SIMD_AVX2 )
+    {
+        double avx2Ops = runBenchmark( VECS_SIMD_AVX2, "AVX2" );
+        std::printf( "  %-10s: %s (%.2fx faster than scalar, %.2fx faster than SSE2)\n", "AVX2", vecsFormatOps( avx2Ops ).c_str(), avx2Ops / scalarOps, ( supported >= VECS_SIMD_SSE2 ? avx2Ops / scalarOps : 0.0 ) ); // approx comparison
+    }
+    else
+    {
+        std::printf( "  %-10s: Skipped (CPU unsupported)\n", "AVX2" );
+    }
+#endif
+    
+#if defined( VECS_NEON )
+    if ( supported >= VECS_SIMD_NEON )
+    {
+        double neonOps = runBenchmark( VECS_SIMD_NEON, "NEON" );
+        std::printf( "  %-10s: %s (%.2fx faster than scalar)\n", "NEON", vecsFormatOps( neonOps ).c_str(), neonOps / scalarOps );
+    }
+    else
+    {
+        std::printf( "  %-10s: Skipped (CPU unsupported)\n", "NEON" );
+    }
+#endif
+    
+    double autoOps = runBenchmark( VECS_SIMD_AUTO, "Auto" );
+    std::printf( "  %-10s: %s (runtime best)\n", "Auto", vecsFormatOps( autoOps ).c_str() );
+    
+#if defined( VECS_HAS_ENTT )
+    {
+        entt::registry registry;
+        std::vector<entt::entity> entities( entityCount );
+        for ( uint32_t i = 0; i < entityCount; i++ )
+        {
+            entities[i] = registry.create();
+            registry.emplace<Position>( entities[i], ( float )i, 0.0f );
+            if ( i % 10 == 0 )
+            {
+                registry.emplace<Velocity>( entities[i], 1.0f, 2.0f );
+            }
+        }
+        
+        uint64_t processed = 0u;
+        const auto start = std::chrono::high_resolution_clock::now();
+        for ( int iter = 0; iter < 100; iter++ )
+        {
+            registry.view<Position, Velocity>().each( [&]( Position&, Velocity& )
+            {
+                processed++;
+            } );
+        }
+        double enttOps = vecsBenchOpsPerSecond( start, processed );
+        std::printf( "  %-10s: %s (%.2fx vs Vecs Auto)\n", "EnTT", vecsFormatOps( enttOps ).c_str(), enttOps / autoOps );
+    }
+#endif
+    
+    g_vecsSimdConfig = savedConfig;
+    vecsDestroyQuery( q );
     vecsDestroyWorld( w );
 }
 
