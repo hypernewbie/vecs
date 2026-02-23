@@ -14,19 +14,19 @@ struct IsEnemy {};  // Zero-byte tag
 
 int main()
 {
-    veWorld* w = veCreateWorld();
-    veEntity e = veCreate( w );
+    vecsWorld* w = vecsCreateWorld();
+    vecsEntity e = vecsCreate( w );
 
-    veSet<Position>( w, e, { 0.0f, 0.0f } );
-    veSet<Velocity>( w, e, { 1.0f, 0.5f } );
+    vecsSet<Position>( w, e, { 0.0f, 0.0f } );
+    vecsSet<Velocity>( w, e, { 1.0f, 0.5f } );
 
-    veEach<Position, Velocity>( w, []( veEntity, Position& p, Velocity& v )
+    vecsEach<Position, Velocity>( w, []( vecsEntity, Position& p, Velocity& v )
     {
         p.x += v.vx;
         p.y += v.vy;
     } );
 
-    veDestroyWorld( w );
+    vecsDestroyWorld( w );
     return 0;
 }
 ```
@@ -36,30 +36,30 @@ int main()
 ### Entity Creation & Destruction
 
 ```cpp
-veEntity e = veCreate( w );           // Create entity
-veDestroy( w, e );                    // Destroy entity (recursively destroys children)
-bool alive = veAlive( w, e );         // Check if entity is alive
-uint32_t count = veCount( w );        // Get alive entity count
+vecsEntity e = vecsCreate( w );           // Create entity
+vecsDestroy( w, e );                    // Destroy entity (recursively destroys children)
+bool alive = vecsAlive( w, e );         // Check if entity is alive
+uint32_t count = vecsCount( w );        // Get alive entity count
 ```
 
 ### Component Operations
 
 ```cpp
 // Set component (copy-based)
-veSet<Position>( w, e, { x, y } );
+vecsSet<Position>( w, e, { x, y } );
 
 // Emplace component (in-place construction, no copy)
-veEmplace<Position>( w, e, x, y );    // Constructs Position(x, y) directly in pool
-veEmplace<std::string>( w, e, "hello", 5 );  // Works with complex types
+vecsEmplace<Position>( w, e, x, y );    // Constructs Position(x, y) directly in pool
+vecsEmplace<std::string>( w, e, "hello", 5 );  // Works with complex types
 
 // Get component pointer
-Position* p = veGet<Position>( w, e );
+Position* p = vecsGet<Position>( w, e );
 
 // Check if entity has component
-bool has = veHas<Position>( w, e );
+bool has = vecsHas<Position>( w, e );
 
 // Remove component
-veUnset<Position>( w, e );
+vecsUnset<Position>( w, e );
 ```
 
 ### Zero-Byte Tags
@@ -67,28 +67,28 @@ veUnset<Position>( w, e );
 ```cpp
 struct IsEnemy {};  // Empty struct = tag
 
-veAddTag<IsEnemy>( w, e );   // Clean API for tags
-bool isEnemy = veHas<IsEnemy>( w, e );
+vecsAddTag<IsEnemy>( w, e );   // Clean API for tags
+bool isEnemy = vecsHas<IsEnemy>( w, e );
 ```
 
 ### Variadic Helpers
 
 ```cpp
 // Check if entity has ALL components
-if ( veHasAll<Position, Velocity, Health>( w, e ) ) { ... }
+if ( vecsHasAll<Position, Velocity, Health>( w, e ) ) { ... }
 
 // Check if entity has ANY component
-if ( veHasAny<Position, Velocity>( w, e ) ) { ... }
+if ( vecsHasAny<Position, Velocity>( w, e ) ) { ... }
 
 // Remove multiple components at once
-veRemoveAll<Position, Velocity, Health>( w, e );
+vecsRemoveAll<Position, Velocity, Health>( w, e );
 ```
 
 ### Entity Handle (Ergonomic C++ Wrapper)
 
 ```cpp
 // Create entity with handle wrapper
-veHandle player = veCreateHandle( w );
+vecsHandle player = vecsCreateHandle( w );
 player.emplace<Position>( 10.0f, 20.0f );
 player.emplace<Velocity>( 1.0f, 0.0f );
 player.addTag<IsEnemy>();
@@ -99,7 +99,7 @@ if ( player.hasAll<Position, Velocity>() ) { ... }
 
 // Parent/child relationships
 player.setParent( parentEntity );
-veEntity parent = player.parent();
+vecsEntity parent = player.parent();
 
 // Cleanup
 player.destroy();
@@ -109,13 +109,13 @@ player.destroy();
 
 ```cpp
 // Full callback with entity ID
-veEach<Position, Velocity>( w, []( veEntity e, Position& p, Velocity& v )
+vecsEach<Position, Velocity>( w, []( vecsEntity e, Position& p, Velocity& v )
 {
     p.x += v.vx;
 } );
 
 // Simplified callback (no entity ID)
-veEachNoEntity<Position>( w, []( Position& p )
+vecsEachNoEntity<Position>( w, []( Position& p )
 {
     p.y -= 9.8f;  // Just mutate data, don't care about entity
 } );
@@ -124,52 +124,52 @@ veEachNoEntity<Position>( w, []( Position& p )
 ### Relationships (Parent/Child)
 
 ```cpp
-veSetChildOf( w, child, parent );            // Set parent
-veEntity parent = veGetParentEntity( w, child );
-uint32_t n = veGetChildEntityCount( w, parent );
-veEntity c = veGetChildEntity( w, parent, 0 );
+vecsSetChildOf( w, child, parent );            // Set parent
+vecsEntity parent = vecsGetParentEntity( w, child );
+uint32_t n = vecsGetChildEntityCount( w, parent );
+vecsEntity c = vecsGetChildEntity( w, parent, 0 );
 
-// veDestroy recursively destroys all children
-veDestroy( w, parent );  // Destroys parent + all descendants
+// vecsDestroy recursively destroys all children
+vecsDestroy( w, parent );  // Destroys parent + all descendants
 ```
 
 ### Observers (Reactive Events)
 
 ```cpp
-void onPositionAdded( veWorld* w, veEntity e, Position* p ) { ... }
+void onPositionAdded( vecsWorld* w, vecsEntity e, Position* p ) { ... }
 
-veOnAdd<Position>( w, onPositionAdded );
-veOnRemove<Position>( w, onPositionRemoved );
+vecsOnAdd<Position>( w, onPositionAdded );
+vecsOnRemove<Position>( w, onPositionRemoved );
 ```
 
 ### Command Buffers (Deferred Operations)
 
 ```cpp
-veCommandBuffer* cb = veCreateCommandBuffer( w );
+vecsCommandBuffer* cb = vecsCreateCommandBuffer( w );
 
-uint32_t idx = veCmdCreate( cb );
-veCmdSetCreated<Position>( cb, idx, { 1, 2 } );
-veCmdDestroy( cb, someEntity );
-veCmdSetParent( cb, child, parent );
+uint32_t idx = vecsCmdCreate( cb );
+vecsCmdSetCreated<Position>( cb, idx, { 1, 2 } );
+vecsCmdDestroy( cb, someEntity );
+vecsCmdSetParent( cb, child, parent );
 
-veFlush( cb );  // Execute all commands
-veEntity e = veCmdGetCreated( cb, idx );
+vecsFlush( cb );  // Execute all commands
+vecsEntity e = vecsCmdGetCreated( cb, idx );
 
-veDestroyCommandBuffer( cb );
+vecsDestroyCommandBuffer( cb );
 ```
 
 ### Cached Queries
 
 ```cpp
-veQuery* q = veBuildQuery<Position, Velocity>( w );
-veQueryAddWithout( q, veTypeId<Dead>() );  // Exclude entities with Dead tag
+vecsQuery* q = vecsBuildQuery<Position, Velocity>( w );
+vecsQueryAddWithout( q, vecsTypeId<Dead>() );  // Exclude entities with Dead tag
 
-veQueryEach<Position, Velocity>( w, q, []( veEntity, Position& p, Velocity& v )
+vecsQueryEach<Position, Velocity>( w, q, []( vecsEntity, Position& p, Velocity& v )
 {
     p.x += v.vx;
 } );
 
-veDestroyQuery( q );
+vecsDestroyQuery( q );
 ```
 
 ## Build

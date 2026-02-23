@@ -61,13 +61,13 @@ constexpr uint32_t VECS_INVALID_INDEX  = UINT32_MAX;
 // Bit Intrinsics
 // --------------------------------------------------------------------------
 
-inline uint32_t veTzcnt( uint64_t v )
+inline uint32_t vecsTzcnt( uint64_t v )
 {
     assert( v != 0 );
     return ( uint32_t )__builtin_ctzll( v );
 }
 
-inline uint32_t vePopcnt( uint64_t v )
+inline uint32_t vecsPopcnt( uint64_t v )
 {
     return ( uint32_t )__builtin_popcountll( v );
 }
@@ -76,7 +76,7 @@ inline uint32_t vePopcnt( uint64_t v )
 // Aligned Memory
 // --------------------------------------------------------------------------
 
-inline void* veAlignedAlloc( size_t size, size_t alignment )
+inline void* vecsAlignedAlloc( size_t size, size_t alignment )
 {
     assert( alignment > 0 && ( alignment & ( alignment - 1 ) ) == 0 );
 #if defined( _MSC_VER ) || defined( _WIN32 )
@@ -90,7 +90,7 @@ inline void* veAlignedAlloc( size_t size, size_t alignment )
 #endif
 }
 
-inline void veAlignedFree( void* ptr )
+inline void vecsAlignedFree( void* ptr )
 {
 #if defined( _MSC_VER ) || defined( _WIN32 )
     _aligned_free( ptr );
@@ -99,16 +99,16 @@ inline void veAlignedFree( void* ptr )
 #endif
 }
 
-inline void* veAlignedRealloc( void* ptr, size_t size, size_t alignment )
+inline void* vecsAlignedRealloc( void* ptr, size_t size, size_t alignment )
 {
 #if defined( _MSC_VER ) || defined( _WIN32 )
     return _aligned_realloc( ptr, size, alignment );
 #else
-    void* newPtr = veAlignedAlloc( size, alignment );
+    void* newPtr = vecsAlignedAlloc( size, alignment );
     if ( newPtr && ptr )
     {
         std::memcpy( newPtr, ptr, size );
-        veAlignedFree( ptr );
+        vecsAlignedFree( ptr );
     }
     return newPtr;
 #endif
@@ -118,24 +118,24 @@ inline void* veAlignedRealloc( void* ptr, size_t size, size_t alignment )
 // Entity
 // --------------------------------------------------------------------------
 
-typedef uint64_t veEntity;
+typedef uint64_t vecsEntity;
 
-inline veEntity veMakeEntity( uint32_t index, uint32_t generation )
+inline vecsEntity vecsMakeEntity( uint32_t index, uint32_t generation )
 {
     return ( ( uint64_t )generation << 32 ) | ( uint64_t )index;
 }
 
-inline uint32_t veEntityIndex( veEntity e )
+inline uint32_t vecsEntityIndex( vecsEntity e )
 {
     return ( uint32_t )( e & 0xFFFFFFFFu );
 }
 
-inline uint32_t veEntityGeneration( veEntity e )
+inline uint32_t vecsEntityGeneration( vecsEntity e )
 {
     return ( uint32_t )( e >> 32 );
 }
 
-struct veEntityPool
+struct vecsEntityPool
 {
     uint32_t* generations;
     uint32_t* freeList;
@@ -144,9 +144,9 @@ struct veEntityPool
     uint32_t alive;
 };
 
-inline veEntityPool* veCreateEntityPool( uint32_t maxEntities )
+inline vecsEntityPool* vecsCreateEntityPool( uint32_t maxEntities )
 {
-    veEntityPool* pool = ( veEntityPool* )std::malloc( sizeof( veEntityPool ) );
+    vecsEntityPool* pool = ( vecsEntityPool* )std::malloc( sizeof( vecsEntityPool ) );
     assert( pool );
     pool->generations = ( uint32_t* )std::calloc( maxEntities, sizeof( uint32_t ) );
     pool->freeList = ( uint32_t* )std::malloc( maxEntities * sizeof( uint32_t ) );
@@ -162,7 +162,7 @@ inline veEntityPool* veCreateEntityPool( uint32_t maxEntities )
     return pool;
 }
 
-inline void veDestroyEntityPool( veEntityPool* pool )
+inline void vecsDestroyEntityPool( vecsEntityPool* pool )
 {
     if ( !pool )
     {
@@ -173,7 +173,7 @@ inline void veDestroyEntityPool( veEntityPool* pool )
     std::free( pool );
 }
 
-inline veEntity veEntityPoolCreate( veEntityPool* pool )
+inline vecsEntity vecsEntityPoolCreate( vecsEntityPool* pool )
 {
     assert( pool );
     if ( pool->freeCount == 0 )
@@ -182,15 +182,15 @@ inline veEntity veEntityPoolCreate( veEntityPool* pool )
     }
     uint32_t index = pool->freeList[--pool->freeCount];
     pool->alive++;
-    return veMakeEntity( index, pool->generations[index] );
+    return vecsMakeEntity( index, pool->generations[index] );
 }
 
-inline void veEntityPoolDestroy( veEntityPool* pool, veEntity entity )
+inline void vecsEntityPoolDestroy( vecsEntityPool* pool, vecsEntity entity )
 {
     assert( pool );
-    uint32_t index = veEntityIndex( entity );
+    uint32_t index = vecsEntityIndex( entity );
     assert( index < pool->maxEntities );
-    assert( pool->generations[index] == veEntityGeneration( entity ) );
+    assert( pool->generations[index] == vecsEntityGeneration( entity ) );
     assert( pool->freeCount < pool->maxEntities );
     pool->generations[index]++;
     pool->freeList[pool->freeCount++] = index;
@@ -198,34 +198,34 @@ inline void veEntityPoolDestroy( veEntityPool* pool, veEntity entity )
     pool->alive--;
 }
 
-inline bool veEntityPoolAlive( veEntityPool* pool, veEntity entity )
+inline bool vecsEntityPoolAlive( vecsEntityPool* pool, vecsEntity entity )
 {
     assert( pool );
-    uint32_t index = veEntityIndex( entity );
+    uint32_t index = vecsEntityIndex( entity );
     if ( index >= pool->maxEntities )
     {
         return false;
     }
-    return pool->generations[index] == veEntityGeneration( entity );
+    return pool->generations[index] == vecsEntityGeneration( entity );
 }
 
 // --------------------------------------------------------------------------
 // Bitfield
 // --------------------------------------------------------------------------
 
-struct veBitfield
+struct vecsBitfield
 {
     uint64_t topMasks[VECS_TOP_COUNT];
     uint64_t l2Masks[VECS_L2_COUNT];
 };
 
-inline void veBitfieldClearAll( veBitfield* bf )
+inline void vecsBitfieldClearAll( vecsBitfield* bf )
 {
     assert( bf );
-    std::memset( bf, 0, sizeof( veBitfield ) );
+    std::memset( bf, 0, sizeof( vecsBitfield ) );
 }
 
-inline void veBitfieldSet( veBitfield* bf, uint32_t index )
+inline void vecsBitfieldSet( vecsBitfield* bf, uint32_t index )
 {
     assert( bf );
     assert( index < VECS_MAX_ENTITIES );
@@ -235,7 +235,7 @@ inline void veBitfieldSet( veBitfield* bf, uint32_t index )
     bf->topMasks[l2 >> 6] |= ( 1ULL << ( l2 & 63u ) );
 }
 
-inline void veBitfieldUnset( veBitfield* bf, uint32_t index )
+inline void vecsBitfieldUnset( vecsBitfield* bf, uint32_t index )
 {
     assert( bf );
     assert( index < VECS_MAX_ENTITIES );
@@ -248,7 +248,7 @@ inline void veBitfieldUnset( veBitfield* bf, uint32_t index )
     }
 }
 
-inline bool veBitfieldHas( const veBitfield* bf, uint32_t index )
+inline bool vecsBitfieldHas( const vecsBitfield* bf, uint32_t index )
 {
     assert( bf );
     assert( index < VECS_MAX_ENTITIES );
@@ -257,19 +257,19 @@ inline bool veBitfieldHas( const veBitfield* bf, uint32_t index )
     return ( bf->l2Masks[l2] & ( 1ULL << bit ) ) != 0;
 }
 
-inline uint32_t veBitfieldCount( const veBitfield* bf )
+inline uint32_t vecsBitfieldCount( const vecsBitfield* bf )
 {
     assert( bf );
     uint32_t total = 0;
     for ( uint32_t i = 0; i < VECS_L2_COUNT; i++ )
     {
-        total += vePopcnt( bf->l2Masks[i] );
+        total += vecsPopcnt( bf->l2Masks[i] );
     }
     return total;
 }
 
 template< typename Fn >
-inline void veBitfieldEach( const veBitfield* bf, Fn&& fn )
+inline void vecsBitfieldEach( const vecsBitfield* bf, Fn&& fn )
 {
     assert( bf );
     for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti++ )
@@ -277,12 +277,12 @@ inline void veBitfieldEach( const veBitfield* bf, Fn&& fn )
         uint64_t top = bf->topMasks[ti];
         while ( top )
         {
-            uint32_t tb = veTzcnt( top );
+            uint32_t tb = vecsTzcnt( top );
             uint32_t l2Idx = ti * 64u + tb;
             uint64_t l2 = bf->l2Masks[l2Idx];
             while ( l2 )
             {
-                uint32_t lb = veTzcnt( l2 );
+                uint32_t lb = vecsTzcnt( l2 );
                 fn( l2Idx * 64u + lb );
                 l2 &= l2 - 1;
             }
@@ -292,7 +292,7 @@ inline void veBitfieldEach( const veBitfield* bf, Fn&& fn )
 }
 
 template< typename Fn >
-inline void veBitfieldJoin( const veBitfield* a, const veBitfield* b, Fn&& fn )
+inline void vecsBitfieldJoin( const vecsBitfield* a, const vecsBitfield* b, Fn&& fn )
 {
     assert( a );
     assert( b );
@@ -301,12 +301,12 @@ inline void veBitfieldJoin( const veBitfield* a, const veBitfield* b, Fn&& fn )
         uint64_t top = a->topMasks[ti] & b->topMasks[ti];
         while ( top )
         {
-            uint32_t tb = veTzcnt( top );
+            uint32_t tb = vecsTzcnt( top );
             uint32_t l2Idx = ti * 64u + tb;
             uint64_t l2 = a->l2Masks[l2Idx] & b->l2Masks[l2Idx];
             while ( l2 )
             {
-                uint32_t lb = veTzcnt( l2 );
+                uint32_t lb = vecsTzcnt( l2 );
                 fn( l2Idx * 64u + lb );
                 l2 &= l2 - 1;
             }
@@ -319,9 +319,9 @@ inline void veBitfieldJoin( const veBitfield* a, const veBitfield* b, Fn&& fn )
 // Component Pool
 // --------------------------------------------------------------------------
 
-struct vePool
+struct vecsPool
 {
-    veBitfield bitfield;
+    vecsBitfield bitfield;
     uint32_t* sparse;
     uint32_t* denseEntities;
     uint8_t* denseData;
@@ -333,7 +333,7 @@ struct vePool
     void ( *destructor )( void* );
 };
 
-inline void vePoolGrow( vePool* pool )
+inline void vecsPoolGrow( vecsPool* pool )
 {
     assert( pool );
     uint32_t newCapacity = pool->capacity ? pool->capacity * 2u : 64u;
@@ -350,7 +350,7 @@ inline void vePoolGrow( vePool* pool )
     {
         if ( pool->alignment > 8 )
         {
-            uint8_t* newDenseData = ( uint8_t* )veAlignedRealloc( pool->denseData, ( size_t )newCapacity * pool->stride, pool->alignment );
+            uint8_t* newDenseData = ( uint8_t* )vecsAlignedRealloc( pool->denseData, ( size_t )newCapacity * pool->stride, pool->alignment );
             assert( newDenseData );
             pool->denseData = newDenseData;
         }
@@ -364,9 +364,9 @@ inline void vePoolGrow( vePool* pool )
     pool->capacity = newCapacity;
 }
 
-inline vePool* veCreatePool( uint32_t maxEntities, uint32_t stride, uint32_t alignment = 8u, void ( *dtor )( void* ) = nullptr, bool noData = false )
+inline vecsPool* vecsCreatePool( uint32_t maxEntities, uint32_t stride, uint32_t alignment = 8u, void ( *dtor )( void* ) = nullptr, bool noData = false )
 {
-    vePool* pool = ( vePool* )std::malloc( sizeof( vePool ) );
+    vecsPool* pool = ( vecsPool* )std::malloc( sizeof( vecsPool ) );
     assert( pool );
     pool->sparse = ( uint32_t* )std::malloc( maxEntities * sizeof( uint32_t ) );
     pool->denseEntities = ( uint32_t* )std::malloc( 64u * sizeof( uint32_t ) );
@@ -375,7 +375,7 @@ inline vePool* veCreatePool( uint32_t maxEntities, uint32_t stride, uint32_t ali
     {
         if ( alignment > 8 )
         {
-            pool->denseData = ( uint8_t* )veAlignedAlloc( ( size_t )64u * stride, alignment );
+            pool->denseData = ( uint8_t* )vecsAlignedAlloc( ( size_t )64u * stride, alignment );
         }
         else
         {
@@ -392,7 +392,7 @@ inline vePool* veCreatePool( uint32_t maxEntities, uint32_t stride, uint32_t ali
     {
         pool->sparse[i] = VECS_INVALID_INDEX;
     }
-    veBitfieldClearAll( &pool->bitfield );
+    vecsBitfieldClearAll( &pool->bitfield );
     pool->count = 0;
     pool->capacity = 64u;
     pool->stride = stride;
@@ -402,7 +402,7 @@ inline vePool* veCreatePool( uint32_t maxEntities, uint32_t stride, uint32_t ali
     return pool;
 }
 
-inline void veDestroyPool( vePool* pool )
+inline void vecsDestroyPool( vecsPool* pool )
 {
     if ( !pool )
     {
@@ -421,7 +421,7 @@ inline void veDestroyPool( vePool* pool )
     {
         if ( pool->alignment > 8 )
         {
-            veAlignedFree( pool->denseData );
+            vecsAlignedFree( pool->denseData );
         }
         else
         {
@@ -431,14 +431,14 @@ inline void veDestroyPool( vePool* pool )
     std::free( pool );
 }
 
-inline void* vePoolSet( vePool* pool, uint32_t entityIndex, const void* data )
+inline void* vecsPoolSet( vecsPool* pool, uint32_t entityIndex, const void* data )
 {
     assert( pool );
     assert( entityIndex < VECS_MAX_ENTITIES );
-    assert( !veBitfieldHas( &pool->bitfield, entityIndex ) );
+    assert( !vecsBitfieldHas( &pool->bitfield, entityIndex ) );
     if ( pool->count == pool->capacity )
     {
-        vePoolGrow( pool );
+        vecsPoolGrow( pool );
     }
     uint32_t denseIdx = pool->count++;
     pool->sparse[entityIndex] = denseIdx;
@@ -449,15 +449,15 @@ inline void* vePoolSet( vePool* pool, uint32_t entityIndex, const void* data )
         dst = pool->denseData + ( size_t )denseIdx * pool->stride;
         std::memcpy( dst, data, pool->stride );
     }
-    veBitfieldSet( &pool->bitfield, entityIndex );
+    vecsBitfieldSet( &pool->bitfield, entityIndex );
     return dst;
 }
 
-inline void vePoolUnset( vePool* pool, uint32_t entityIndex )
+inline void vecsPoolUnset( vecsPool* pool, uint32_t entityIndex )
 {
     assert( pool );
     assert( entityIndex < VECS_MAX_ENTITIES );
-    assert( veBitfieldHas( &pool->bitfield, entityIndex ) );
+    assert( vecsBitfieldHas( &pool->bitfield, entityIndex ) );
     uint32_t denseIdx = pool->sparse[entityIndex];
     uint32_t lastIdx = pool->count - 1u;
     if ( !pool->noData )
@@ -479,15 +479,15 @@ inline void vePoolUnset( vePool* pool, uint32_t entityIndex )
         pool->denseEntities[denseIdx] = movedEntity;
         pool->sparse[movedEntity] = denseIdx;
     }
-    veBitfieldUnset( &pool->bitfield, entityIndex );
+    vecsBitfieldUnset( &pool->bitfield, entityIndex );
     pool->sparse[entityIndex] = VECS_INVALID_INDEX;
     pool->count--;
 }
 
-inline void* vePoolGet( vePool* pool, uint32_t entityIndex )
+inline void* vecsPoolGet( vecsPool* pool, uint32_t entityIndex )
 {
     assert( pool );
-    if ( !veBitfieldHas( &pool->bitfield, entityIndex ) )
+    if ( !vecsBitfieldHas( &pool->bitfield, entityIndex ) )
     {
         return nullptr;
     }
@@ -499,42 +499,42 @@ inline void* vePoolGet( vePool* pool, uint32_t entityIndex )
     return pool->denseData + ( size_t )denseIdx * pool->stride;
 }
 
-inline bool vePoolHas( const vePool* pool, uint32_t entityIndex )
+inline bool vecsPoolHas( const vecsPool* pool, uint32_t entityIndex )
 {
     assert( pool );
-    return veBitfieldHas( &pool->bitfield, entityIndex );
+    return vecsBitfieldHas( &pool->bitfield, entityIndex );
 }
 
 // --------------------------------------------------------------------------
 // Observer (Reactive Events)
 // --------------------------------------------------------------------------
 
-struct veWorld;
+struct vecsWorld;
 
-struct veObserver
+struct vecsObserver
 {
-    void ( *callback )( veWorld*, veEntity, void* );
+    void ( *callback )( vecsWorld*, vecsEntity, void* );
     uint32_t componentId;
     bool onAdd;
 };
 
-struct veObserverList
+struct vecsObserverList
 {
-    veObserver* observers;
+    vecsObserver* observers;
     uint32_t count;
     uint32_t capacity;
 };
 
-inline void veObserverListGrow( veObserverList* list )
+inline void vecsObserverListGrow( vecsObserverList* list )
 {
     uint32_t cap = list->capacity ? list->capacity * 2u : 8u;
-    veObserver* ptr = ( veObserver* )std::realloc( list->observers, cap * sizeof( veObserver ) );
+    vecsObserver* ptr = ( vecsObserver* )std::realloc( list->observers, cap * sizeof( vecsObserver ) );
     assert( ptr );
     list->observers = ptr;
     list->capacity = cap;
 }
 
-inline void veObserverListDestroy( veObserverList* list )
+inline void vecsObserverListDestroy( vecsObserverList* list )
 {
     if ( list->observers )
     {
@@ -545,13 +545,13 @@ inline void veObserverListDestroy( veObserverList* list )
     list->capacity = 0;
 }
 
-inline void veAddObserver( veObserverList* list, uint32_t componentId, void ( *callback )( veWorld*, veEntity, void* ), bool onAdd )
+inline void vecsAddObserver( vecsObserverList* list, uint32_t componentId, void ( *callback )( vecsWorld*, vecsEntity, void* ), bool onAdd )
 {
     if ( list->count == list->capacity )
     {
-        veObserverListGrow( list );
+        vecsObserverListGrow( list );
     }
-    veObserver& obs = list->observers[list->count++];
+    vecsObserver& obs = list->observers[list->count++];
     obs.callback = callback;
     obs.componentId = componentId;
     obs.onAdd = onAdd;
@@ -561,26 +561,26 @@ inline void veAddObserver( veObserverList* list, uint32_t componentId, void ( *c
 // Relationships (ChildOf)
 // --------------------------------------------------------------------------
 
-struct veChildOf
+struct vecsChildOf
 {
-    veEntity parent;
+    vecsEntity parent;
 };
 
-struct veRelationshipData
+struct vecsRelationshipData
 {
-    veEntity* parents;
-    veEntity** children;
+    vecsEntity* parents;
+    vecsEntity** children;
     uint32_t* childCounts;
     uint32_t* childCapacities;
     uint32_t maxEntities;
 };
 
-inline veRelationshipData* veCreateRelationships( uint32_t maxEntities )
+inline vecsRelationshipData* vecsCreateRelationships( uint32_t maxEntities )
 {
-    veRelationshipData* rel = ( veRelationshipData* )std::malloc( sizeof( veRelationshipData ) );
+    vecsRelationshipData* rel = ( vecsRelationshipData* )std::malloc( sizeof( vecsRelationshipData ) );
     assert( rel );
-    rel->parents = ( veEntity* )std::calloc( maxEntities, sizeof( veEntity ) );
-    rel->children = ( veEntity** )std::calloc( maxEntities, sizeof( veEntity* ) );
+    rel->parents = ( vecsEntity* )std::calloc( maxEntities, sizeof( vecsEntity ) );
+    rel->children = ( vecsEntity** )std::calloc( maxEntities, sizeof( vecsEntity* ) );
     rel->childCounts = ( uint32_t* )std::calloc( maxEntities, sizeof( uint32_t ) );
     rel->childCapacities = ( uint32_t* )std::calloc( maxEntities, sizeof( uint32_t ) );
     assert( rel->children );
@@ -592,7 +592,7 @@ inline veRelationshipData* veCreateRelationships( uint32_t maxEntities )
     return rel;
 }
 
-inline void veDestroyRelationships( veRelationshipData* rel )
+inline void vecsDestroyRelationships( vecsRelationshipData* rel )
 {
     if ( !rel )
     {
@@ -612,7 +612,7 @@ inline void veDestroyRelationships( veRelationshipData* rel )
     std::free( rel );
 }
 
-inline void veRemoveChildFromParent( veRelationshipData* rel, uint32_t parentIdx, veEntity child )
+inline void vecsRemoveChildFromParent( vecsRelationshipData* rel, uint32_t parentIdx, vecsEntity child )
 {
     uint32_t count = rel->childCounts[parentIdx];
     for ( uint32_t i = 0; i < count; i++ )
@@ -627,13 +627,13 @@ inline void veRemoveChildFromParent( veRelationshipData* rel, uint32_t parentIdx
     }
 }
 
-inline void veSetParent( veRelationshipData* rel, veEntity child, veEntity parent )
+inline void vecsSetParent( vecsRelationshipData* rel, vecsEntity child, vecsEntity parent )
 {
     assert( rel );
-    uint32_t childIdx = veEntityIndex( child );
+    uint32_t childIdx = vecsEntityIndex( child );
     assert( childIdx < rel->maxEntities );
 
-    veEntity oldParent = rel->parents[childIdx];
+    vecsEntity oldParent = rel->parents[childIdx];
     if ( oldParent == parent )
     {
         return;
@@ -641,9 +641,9 @@ inline void veSetParent( veRelationshipData* rel, veEntity child, veEntity paren
 
     if ( oldParent != VECS_INVALID_ENTITY )
     {
-        uint32_t oldParentIdx = veEntityIndex( oldParent );
+        uint32_t oldParentIdx = vecsEntityIndex( oldParent );
         assert( oldParentIdx < rel->maxEntities );
-        veRemoveChildFromParent( rel, oldParentIdx, child );
+        vecsRemoveChildFromParent( rel, oldParentIdx, child );
     }
 
     rel->parents[childIdx] = parent;
@@ -653,12 +653,12 @@ inline void veSetParent( veRelationshipData* rel, veEntity child, veEntity paren
         return;
     }
 
-    uint32_t parentIdx = veEntityIndex( parent );
+    uint32_t parentIdx = vecsEntityIndex( parent );
     assert( parentIdx < rel->maxEntities );
     if ( rel->childCounts[parentIdx] >= rel->childCapacities[parentIdx] )
     {
         uint32_t newCap = rel->childCapacities[parentIdx] ? rel->childCapacities[parentIdx] * 2u : 4u;
-        veEntity* newChildren = ( veEntity* )std::realloc( rel->children[parentIdx], ( size_t )newCap * sizeof( veEntity ) );
+        vecsEntity* newChildren = ( vecsEntity* )std::realloc( rel->children[parentIdx], ( size_t )newCap * sizeof( vecsEntity ) );
         assert( newChildren );
         rel->children[parentIdx] = newChildren;
         rel->childCapacities[parentIdx] = newCap;
@@ -666,10 +666,10 @@ inline void veSetParent( veRelationshipData* rel, veEntity child, veEntity paren
     rel->children[parentIdx][rel->childCounts[parentIdx]++] = child;
 }
 
-inline void veClearChildren( veRelationshipData* rel, veEntity parent )
+inline void vecsClearChildren( vecsRelationshipData* rel, vecsEntity parent )
 {
     assert( rel );
-    uint32_t parentIdx = veEntityIndex( parent );
+    uint32_t parentIdx = vecsEntityIndex( parent );
     if ( parentIdx >= rel->maxEntities )
     {
         return;
@@ -678,8 +678,8 @@ inline void veClearChildren( veRelationshipData* rel, veEntity parent )
     uint32_t count = rel->childCounts[parentIdx];
     for ( uint32_t i = 0; i < count; i++ )
     {
-        veEntity child = rel->children[parentIdx][i];
-        uint32_t childIdx = veEntityIndex( child );
+        vecsEntity child = rel->children[parentIdx][i];
+        uint32_t childIdx = vecsEntityIndex( child );
         if ( childIdx < rel->maxEntities )
         {
             rel->parents[childIdx] = VECS_INVALID_ENTITY;
@@ -688,10 +688,10 @@ inline void veClearChildren( veRelationshipData* rel, veEntity parent )
     rel->childCounts[parentIdx] = 0;
 }
 
-inline veEntity veGetParent( veRelationshipData* rel, veEntity child )
+inline vecsEntity vecsGetParent( vecsRelationshipData* rel, vecsEntity child )
 {
     assert( rel );
-    uint32_t idx = veEntityIndex( child );
+    uint32_t idx = vecsEntityIndex( child );
     if ( idx >= rel->maxEntities )
     {
         return VECS_INVALID_ENTITY;
@@ -699,10 +699,10 @@ inline veEntity veGetParent( veRelationshipData* rel, veEntity child )
     return rel->parents[idx];
 }
 
-inline uint32_t veGetChildCount( veRelationshipData* rel, veEntity parent )
+inline uint32_t vecsGetChildCount( vecsRelationshipData* rel, vecsEntity parent )
 {
     assert( rel );
-    uint32_t idx = veEntityIndex( parent );
+    uint32_t idx = vecsEntityIndex( parent );
     if ( idx >= rel->maxEntities )
     {
         return 0;
@@ -710,10 +710,10 @@ inline uint32_t veGetChildCount( veRelationshipData* rel, veEntity parent )
     return rel->childCounts[idx];
 }
 
-inline veEntity veGetChild( veRelationshipData* rel, veEntity parent, uint32_t index )
+inline vecsEntity vecsGetChild( vecsRelationshipData* rel, vecsEntity parent, uint32_t index )
 {
     assert( rel );
-    uint32_t idx = veEntityIndex( parent );
+    uint32_t idx = vecsEntityIndex( parent );
     if ( idx >= rel->maxEntities || index >= rel->childCounts[idx] )
     {
         return VECS_INVALID_ENTITY;
@@ -725,76 +725,76 @@ inline veEntity veGetChild( veRelationshipData* rel, veEntity parent, uint32_t i
 // World
 // --------------------------------------------------------------------------
 
-struct veWorld
+struct vecsWorld
 {
-    struct veSingletonSlot
+    struct vecsSingletonSlot
     {
         uint8_t* data;
         uint32_t size;
         void ( *destructor )( void* );
     };
 
-    veEntityPool* entities;
-    vePool* pools[VECS_MAX_COMPONENTS];
-    veSingletonSlot singletons[VECS_MAX_COMPONENTS];
-    veObserverList* observers;
-    veRelationshipData* relationships;
+    vecsEntityPool* entities;
+    vecsPool* pools[VECS_MAX_COMPONENTS];
+    vecsSingletonSlot singletons[VECS_MAX_COMPONENTS];
+    vecsObserverList* observers;
+    vecsRelationshipData* relationships;
     uint32_t maxEntities;
 };
 
-inline uint32_t& veGetTypeIdCounterMutable()
+inline uint32_t& vecsGetTypeIdCounterMutable()
 {
     static uint32_t counter = 0;
     return counter;
 }
 
-inline uint32_t veNextTypeId()
+inline uint32_t vecsNextTypeId()
 {
-    return veGetTypeIdCounterMutable()++;
+    return vecsGetTypeIdCounterMutable()++;
 }
 
-inline uint32_t veGetTypeIdCounter()
+inline uint32_t vecsGetTypeIdCounter()
 {
-    return veGetTypeIdCounterMutable();
+    return vecsGetTypeIdCounterMutable();
 }
 
-inline void veSetTypeIdCounter( uint32_t value )
+inline void vecsSetTypeIdCounter( uint32_t value )
 {
-    veGetTypeIdCounterMutable() = value;
+    vecsGetTypeIdCounterMutable() = value;
 }
 
 template< typename T >
-inline uint32_t veTypeIdRaw()
+inline uint32_t vecsTypeIdRaw()
 {
-    static uint32_t id = veNextTypeId();
+    static uint32_t id = vecsNextTypeId();
     return id;
 }
 
 template< typename T >
-inline uint32_t veTypeId()
+inline uint32_t vecsTypeId()
 {
     using Raw = std::remove_cv_t<std::remove_reference_t<T>>;
-    return veTypeIdRaw<Raw>();
+    return vecsTypeIdRaw<Raw>();
 }
 
-inline veWorld* veCreateWorld( uint32_t maxEntities = VECS_MAX_ENTITIES )
+inline vecsWorld* vecsCreateWorld( uint32_t maxEntities = VECS_MAX_ENTITIES )
 {
-    veWorld* world = ( veWorld* )std::malloc( sizeof( veWorld ) );
+    vecsWorld* world = ( vecsWorld* )std::malloc( sizeof( vecsWorld ) );
     assert( world );
-    world->entities = veCreateEntityPool( maxEntities );
+    world->entities = vecsCreateEntityPool( maxEntities );
     world->maxEntities = maxEntities;
     std::memset( world->pools, 0, sizeof( world->pools ) );
     std::memset( world->singletons, 0, sizeof( world->singletons ) );
-    world->observers = ( veObserverList* )std::malloc( sizeof( veObserverList ) );
+    world->observers = ( vecsObserverList* )std::malloc( sizeof( vecsObserverList ) );
     assert( world->observers );
     world->observers->observers = nullptr;
     world->observers->count = 0;
     world->observers->capacity = 0;
-    world->relationships = veCreateRelationships( maxEntities );
+    world->relationships = vecsCreateRelationships( maxEntities );
     return world;
 }
 
-inline void veDestroyWorld( veWorld* world )
+inline void vecsDestroyWorld( vecsWorld* world )
 {
     if ( !world )
     {
@@ -802,7 +802,7 @@ inline void veDestroyWorld( veWorld* world )
     }
     for ( uint32_t i = 0; i < VECS_MAX_COMPONENTS; i++ )
     {
-        veDestroyPool( world->pools[i] );
+        vecsDestroyPool( world->pools[i] );
         if ( world->singletons[i].data )
         {
             if ( world->singletons[i].destructor )
@@ -814,88 +814,88 @@ inline void veDestroyWorld( veWorld* world )
     }
     if ( world->observers )
     {
-        veObserverListDestroy( world->observers );
+        vecsObserverListDestroy( world->observers );
         std::free( world->observers );
     }
-    veDestroyRelationships( world->relationships );
-    veDestroyEntityPool( world->entities );
+    vecsDestroyRelationships( world->relationships );
+    vecsDestroyEntityPool( world->entities );
     std::free( world );
 }
 
-inline veEntity veCreate( veWorld* w )
+inline vecsEntity vecsCreate( vecsWorld* w )
 {
     assert( w );
-    return veEntityPoolCreate( w->entities );
+    return vecsEntityPoolCreate( w->entities );
 }
 
-inline bool veAlive( veWorld* w, veEntity e )
+inline bool vecsAlive( vecsWorld* w, vecsEntity e )
 {
     assert( w );
-    return veEntityPoolAlive( w->entities, e );
+    return vecsEntityPoolAlive( w->entities, e );
 }
 
-inline void veDestroyRecursive( veWorld* w, veEntity e )
+inline void vecsDestroyRecursive( vecsWorld* w, vecsEntity e )
 {
     assert( w );
-    assert( veEntityPoolAlive( w->entities, e ) );
+    assert( vecsEntityPoolAlive( w->entities, e ) );
     
     if ( w->relationships )
     {
-        while ( veGetChildCount( w->relationships, e ) > 0u )
+        while ( vecsGetChildCount( w->relationships, e ) > 0u )
         {
-            veEntity child = veGetChild( w->relationships, e, 0u );
-            if ( child != VECS_INVALID_ENTITY && veAlive( w, child ) )
+            vecsEntity child = vecsGetChild( w->relationships, e, 0u );
+            if ( child != VECS_INVALID_ENTITY && vecsAlive( w, child ) )
             {
-                veDestroyRecursive( w, child );
+                vecsDestroyRecursive( w, child );
             }
             else if ( child != VECS_INVALID_ENTITY )
             {
-                veSetParent( w->relationships, child, VECS_INVALID_ENTITY );
+                vecsSetParent( w->relationships, child, VECS_INVALID_ENTITY );
             }
             else
             {
                 break;
             }
         }
-        veSetParent( w->relationships, e, VECS_INVALID_ENTITY );
-        veClearChildren( w->relationships, e );
+        vecsSetParent( w->relationships, e, VECS_INVALID_ENTITY );
+        vecsClearChildren( w->relationships, e );
     }
     
-    uint32_t entityIndex = veEntityIndex( e );
+    uint32_t entityIndex = vecsEntityIndex( e );
     for ( uint32_t i = 0; i < VECS_MAX_COMPONENTS; i++ )
     {
-        vePool* pool = w->pools[i];
-        if ( pool && vePoolHas( pool, entityIndex ) )
+        vecsPool* pool = w->pools[i];
+        if ( pool && vecsPoolHas( pool, entityIndex ) )
         {
             for ( uint32_t j = 0; j < w->observers->count; j++ )
             {
-                veObserver& obs = w->observers->observers[j];
+                vecsObserver& obs = w->observers->observers[j];
                 if ( !obs.onAdd && obs.componentId == i )
                 {
                     obs.callback( w, e, nullptr );
                 }
             }
-            vePoolUnset( pool, entityIndex );
+            vecsPoolUnset( pool, entityIndex );
         }
     }
-    veEntityPoolDestroy( w->entities, e );
+    vecsEntityPoolDestroy( w->entities, e );
 }
 
-inline void veDestroy( veWorld* w, veEntity e )
+inline void vecsDestroy( vecsWorld* w, vecsEntity e )
 {
-    veDestroyRecursive( w, e );
+    vecsDestroyRecursive( w, e );
 }
 
-inline uint32_t veCount( veWorld* w )
+inline uint32_t vecsCount( vecsWorld* w )
 {
     assert( w );
     return w->entities->alive;
 }
 
 template< typename T >
-inline vePool* veEnsurePool( veWorld* w )
+inline vecsPool* vecsEnsurePool( vecsWorld* w )
 {
-    uint32_t id = veTypeId<T>();
+    uint32_t id = vecsTypeId<T>();
     assert( id < VECS_MAX_COMPONENTS );
     if ( !w->pools[id] )
     {
@@ -905,19 +905,19 @@ inline vePool* veEnsurePool( veWorld* w )
         {
             dtor = []( void* ptr ) { static_cast<T*>( ptr )->~T(); };
         }
-        w->pools[id] = veCreatePool( w->maxEntities, kTag ? 0u : ( uint32_t )sizeof( T ), kTag ? 1u : ( uint32_t )alignof( T ), dtor, kTag );
+        w->pools[id] = vecsCreatePool( w->maxEntities, kTag ? 0u : ( uint32_t )sizeof( T ), kTag ? 1u : ( uint32_t )alignof( T ), dtor, kTag );
     }
     return w->pools[id];
 }
 
 template< typename T >
-inline T* veSet( veWorld* w, veEntity e, const T& val = {} )
+inline T* vecsSet( vecsWorld* w, vecsEntity e, const T& val = {} )
 {
-    assert( veAlive( w, e ) );
-    vePool* pool = veEnsurePool<T>( w );
-    uint32_t idx = veEntityIndex( e );
-    uint32_t componentId = veTypeId<T>();
-    if ( vePoolHas( pool, idx ) )
+    assert( vecsAlive( w, e ) );
+    vecsPool* pool = vecsEnsurePool<T>( w );
+    uint32_t idx = vecsEntityIndex( e );
+    uint32_t componentId = vecsTypeId<T>();
+    if ( vecsPoolHas( pool, idx ) )
     {
         if constexpr ( std::is_empty<T>::value )
         {
@@ -926,7 +926,7 @@ inline T* veSet( veWorld* w, veEntity e, const T& val = {} )
         }
         else
         {
-            T* ptr = ( T* )vePoolGet( pool, idx );
+            T* ptr = ( T* )vecsPoolGet( pool, idx );
             *ptr = val;
             return ptr;
         }
@@ -934,17 +934,17 @@ inline T* veSet( veWorld* w, veEntity e, const T& val = {} )
     T* result = nullptr;
     if constexpr ( std::is_empty<T>::value )
     {
-        vePoolSet( pool, idx, nullptr );
+        vecsPoolSet( pool, idx, nullptr );
         static T tagValue = {};
         result = &tagValue;
     }
     else
     {
-        result = ( T* )vePoolSet( pool, idx, &val );
+        result = ( T* )vecsPoolSet( pool, idx, &val );
     }
     for ( uint32_t i = 0; i < w->observers->count; i++ )
     {
-        veObserver& obs = w->observers->observers[i];
+        vecsObserver& obs = w->observers->observers[i];
         if ( obs.onAdd && obs.componentId == componentId )
         {
             obs.callback( w, e, result );
@@ -954,100 +954,100 @@ inline T* veSet( veWorld* w, veEntity e, const T& val = {} )
 }
 
 template< typename T >
-inline void veUnset( veWorld* w, veEntity e )
+inline void vecsUnset( vecsWorld* w, vecsEntity e )
 {
-    assert( veAlive( w, e ) );
-    vePool* pool = veEnsurePool<T>( w );
-    uint32_t idx = veEntityIndex( e );
-    assert( vePoolHas( pool, idx ) );
-    uint32_t componentId = veTypeId<T>();
+    assert( vecsAlive( w, e ) );
+    vecsPool* pool = vecsEnsurePool<T>( w );
+    uint32_t idx = vecsEntityIndex( e );
+    assert( vecsPoolHas( pool, idx ) );
+    uint32_t componentId = vecsTypeId<T>();
     for ( uint32_t i = 0; i < w->observers->count; i++ )
     {
-        veObserver& obs = w->observers->observers[i];
+        vecsObserver& obs = w->observers->observers[i];
         if ( !obs.onAdd && obs.componentId == componentId )
         {
             obs.callback( w, e, nullptr );
         }
     }
-    vePoolUnset( pool, idx );
+    vecsPoolUnset( pool, idx );
 }
 
 template< typename T >
-inline T* veGet( veWorld* w, veEntity e )
+inline T* vecsGet( vecsWorld* w, vecsEntity e )
 {
-    assert( veAlive( w, e ) );
-    uint32_t id = veTypeId<T>();
+    assert( vecsAlive( w, e ) );
+    uint32_t id = vecsTypeId<T>();
     if ( id >= VECS_MAX_COMPONENTS || !w->pools[id] )
     {
         return nullptr;
     }
-    vePool* pool = w->pools[id];
+    vecsPool* pool = w->pools[id];
     if constexpr ( std::is_empty<T>::value )
     {
-        if ( !vePoolHas( pool, veEntityIndex( e ) ) )
+        if ( !vecsPoolHas( pool, vecsEntityIndex( e ) ) )
         {
             return nullptr;
         }
         static T tagValue = {};
         return &tagValue;
     }
-    return ( T* )vePoolGet( pool, veEntityIndex( e ) );
+    return ( T* )vecsPoolGet( pool, vecsEntityIndex( e ) );
 }
 
 template< typename T >
-inline bool veHas( veWorld* w, veEntity e )
+inline bool vecsHas( vecsWorld* w, vecsEntity e )
 {
-    uint32_t id = veTypeId<T>();
+    uint32_t id = vecsTypeId<T>();
     if ( id >= VECS_MAX_COMPONENTS || !w->pools[id] )
     {
         return false;
     }
-    return vePoolHas( w->pools[id], veEntityIndex( e ) );
+    return vecsPoolHas( w->pools[id], vecsEntityIndex( e ) );
 }
 
-inline veEntity veClone( veWorld* w, veEntity src )
+inline vecsEntity vecsClone( vecsWorld* w, vecsEntity src )
 {
-    assert( veAlive( w, src ) );
-    veEntity dst = veCreate( w );
+    assert( vecsAlive( w, src ) );
+    vecsEntity dst = vecsCreate( w );
     if ( dst == VECS_INVALID_ENTITY )
     {
         return VECS_INVALID_ENTITY;
     }
 
-    uint32_t srcIdx = veEntityIndex( src );
-    uint32_t dstIdx = veEntityIndex( dst );
+    uint32_t srcIdx = vecsEntityIndex( src );
+    uint32_t dstIdx = vecsEntityIndex( dst );
     for ( uint32_t i = 0; i < VECS_MAX_COMPONENTS; i++ )
     {
-        vePool* pool = w->pools[i];
-        if ( pool && vePoolHas( pool, srcIdx ) )
+        vecsPool* pool = w->pools[i];
+        if ( pool && vecsPoolHas( pool, srcIdx ) )
         {
-            void* srcData = vePoolGet( pool, srcIdx );
-            vePoolSet( pool, dstIdx, srcData );
+            void* srcData = vecsPoolGet( pool, srcIdx );
+            vecsPoolSet( pool, dstIdx, srcData );
         }
     }
     return dst;
 }
 
-inline void veInstantiateBatch( veWorld* w, veEntity prefab, veEntity* out, uint32_t count )
+inline void vecsInstantiateBatch( vecsWorld* w, vecsEntity prefab, vecsEntity* out, uint32_t count )
 {
     assert( w );
-    assert( veAlive( w, prefab ) );
+    assert( vecsAlive( w, prefab ) );
     assert( out || count == 0u );
 
-    struct vePrefabPoolCopy
+    struct vecsPrefabPoolCopy
     {
-        vePool* pool;
+        vecsPool* pool;
         uint32_t srcDense;
     };
 
-    vePrefabPoolCopy active[VECS_MAX_COMPONENTS] = {};
+    vecsPrefabPoolCopy active[VECS_MAX_COMPONENTS] = {};
     uint32_t activeCount = 0;
-    uint32_t prefabIdx = veEntityIndex( prefab );
+    uint32_t prefabIdx = vecsEntityIndex( prefab );
 
     for ( uint32_t i = 0; i < VECS_MAX_COMPONENTS; i++ )
     {
-        vePool* pool = w->pools[i];
-        if ( pool && vePoolHas( pool, prefabIdx ) )
+        vecsPool* pool = w->pools[i];
+        if ( pool && vecsPoolHas( pool, prefabIdx ) )
         {
             active[activeCount].pool = pool;
             active[activeCount].srcDense = pool->sparse[prefabIdx];
@@ -1057,25 +1057,25 @@ inline void veInstantiateBatch( veWorld* w, veEntity prefab, veEntity* out, uint
 
     for ( uint32_t i = 0; i < count; i++ )
     {
-        veEntity e = veCreate( w );
+        vecsEntity e = vecsCreate( w );
         out[i] = e;
         if ( e == VECS_INVALID_ENTITY )
         {
             continue;
         }
 
-        uint32_t dstIdx = veEntityIndex( e );
+        uint32_t dstIdx = vecsEntityIndex( e );
         for ( uint32_t j = 0; j < activeCount; j++ )
         {
             if ( active[j].pool->noData )
             {
-                vePoolSet( active[j].pool, dstIdx, nullptr );
+                vecsPoolSet( active[j].pool, dstIdx, nullptr );
             }
             else
             {
-                vePool* pool = active[j].pool;
+                vecsPool* pool = active[j].pool;
                 const void* srcData = pool->denseData + ( size_t )active[j].srcDense * pool->stride;
-                vePoolSet( pool, dstIdx, srcData );
+                vecsPoolSet( pool, dstIdx, srcData );
             }
         }
     }
@@ -1085,10 +1085,10 @@ inline void veInstantiateBatch( veWorld* w, veEntity prefab, veEntity* out, uint
 // Cached Query
 // --------------------------------------------------------------------------
 
-struct veQuery
+struct vecsQuery
 {
-    veBitfield withMask;
-    veBitfield withoutMask;
+    vecsBitfield withMask;
+    vecsBitfield withoutMask;
     uint64_t readAccess[VECS_MAX_COMPONENTS / 64u];
     uint64_t writeAccess[VECS_MAX_COMPONENTS / 64u];
     uint32_t* withIds;
@@ -1102,12 +1102,12 @@ struct veQuery
     uint32_t optionalCapacity;
 };
 
-inline veQuery* veCreateQuery()
+inline vecsQuery* vecsCreateQuery()
 {
-    veQuery* q = ( veQuery* )std::malloc( sizeof( veQuery ) );
+    vecsQuery* q = ( vecsQuery* )std::malloc( sizeof( vecsQuery ) );
     assert( q );
-    veBitfieldClearAll( &q->withMask );
-    veBitfieldClearAll( &q->withoutMask );
+    vecsBitfieldClearAll( &q->withMask );
+    vecsBitfieldClearAll( &q->withoutMask );
     std::memset( q->readAccess, 0, sizeof( q->readAccess ) );
     std::memset( q->writeAccess, 0, sizeof( q->writeAccess ) );
     q->withIds = nullptr;
@@ -1122,7 +1122,7 @@ inline veQuery* veCreateQuery()
     return q;
 }
 
-inline void veDestroyQuery( veQuery* q )
+inline void vecsDestroyQuery( vecsQuery* q )
 {
     if ( !q )
     {
@@ -1134,31 +1134,31 @@ inline void veDestroyQuery( veQuery* q )
     std::free( q );
 }
 
-inline void veQueryMarkRead( veQuery* q, uint32_t typeId )
+inline void vecsQueryMarkRead( vecsQuery* q, uint32_t typeId )
 {
     assert( q );
     q->readAccess[typeId >> 6] |= ( 1ULL << ( typeId & 63u ) );
 }
 
-inline void veQueryMarkWrite( veQuery* q, uint32_t typeId )
+inline void vecsQueryMarkWrite( vecsQuery* q, uint32_t typeId )
 {
     assert( q );
     q->writeAccess[typeId >> 6] |= ( 1ULL << ( typeId & 63u ) );
 }
 
-inline bool veQueryReads( const veQuery* q, uint32_t typeId )
+inline bool vecsQueryReads( const vecsQuery* q, uint32_t typeId )
 {
     assert( q );
     return ( q->readAccess[typeId >> 6] & ( 1ULL << ( typeId & 63u ) ) ) != 0;
 }
 
-inline bool veQueryWrites( const veQuery* q, uint32_t typeId )
+inline bool vecsQueryWrites( const vecsQuery* q, uint32_t typeId )
 {
     assert( q );
     return ( q->writeAccess[typeId >> 6] & ( 1ULL << ( typeId & 63u ) ) ) != 0;
 }
 
-inline void veQueryAddWith( veQuery* q, uint32_t typeId, vePool* pool )
+inline void vecsQueryAddWith( vecsQuery* q, uint32_t typeId, vecsPool* pool )
 {
     assert( q );
     if ( q->withCount == q->withCapacity )
@@ -1184,7 +1184,7 @@ inline void veQueryAddWith( veQuery* q, uint32_t typeId, vePool* pool )
     }
 }
 
-inline void veQueryAddWithout( veQuery* q, uint32_t typeId )
+inline void vecsQueryAddWithout( vecsQuery* q, uint32_t typeId )
 {
     assert( q );
     if ( q->withoutCount == q->withoutCapacity )
@@ -1198,7 +1198,7 @@ inline void veQueryAddWithout( veQuery* q, uint32_t typeId )
     q->withoutIds[q->withoutCount++] = typeId;
 }
 
-inline void veQueryAddOptional( veQuery* q, uint32_t typeId )
+inline void vecsQueryAddOptional( vecsQuery* q, uint32_t typeId )
 {
     assert( q );
     if ( q->optionalCount == q->optionalCapacity )
@@ -1212,28 +1212,28 @@ inline void veQueryAddOptional( veQuery* q, uint32_t typeId )
     q->optionalIds[q->optionalCount++] = typeId;
 }
 
-namespace veDetail
+namespace vecsDetail
 {
 
 template< typename T >
-inline void buildQueryWithType( veWorld* w, veQuery* q )
+inline void buildQueryWithType( vecsWorld* w, vecsQuery* q )
 {
     using Raw = std::remove_cv_t<T>;
-    uint32_t id = veTypeId<Raw>();
-    vePool* pool = ( id < VECS_MAX_COMPONENTS ) ? w->pools[id] : nullptr;
-    veQueryAddWith( q, id, pool );
+    uint32_t id = vecsTypeId<Raw>();
+    vecsPool* pool = ( id < VECS_MAX_COMPONENTS ) ? w->pools[id] : nullptr;
+    vecsQueryAddWith( q, id, pool );
     if constexpr ( std::is_const<T>::value )
     {
-        veQueryMarkRead( q, id );
+        vecsQueryMarkRead( q, id );
     }
     else
     {
-        veQueryMarkWrite( q, id );
+        vecsQueryMarkWrite( q, id );
     }
 }
 
 template< typename... With >
-inline void buildQueryWith( veWorld* w, veQuery* q )
+inline void buildQueryWith( vecsWorld* w, vecsQuery* q )
 {
     if constexpr ( sizeof...( With ) > 0 )
     {
@@ -1242,29 +1242,29 @@ inline void buildQueryWith( veWorld* w, veQuery* q )
 }
 
 template< typename... Without >
-inline void buildQueryWithout( veWorld* w, veQuery* q )
+inline void buildQueryWithout( vecsWorld* w, vecsQuery* q )
 {
     if constexpr ( sizeof...( Without ) > 0 )
     {
-        uint32_t ids[] = { veTypeId<Without>()... };
+        uint32_t ids[] = { vecsTypeId<Without>()... };
         for ( size_t i = 0; i < sizeof...( Without ); i++ )
         {
-            veQueryAddWithout( q, ids[i] );
-            veQueryMarkRead( q, ids[i] );
+            vecsQueryAddWithout( q, ids[i] );
+            vecsQueryMarkRead( q, ids[i] );
         }
     }
 }
 
 template< typename... Optional >
-inline void buildQueryOptional( veWorld* w, veQuery* q )
+inline void buildQueryOptional( vecsWorld* w, vecsQuery* q )
 {
     if constexpr ( sizeof...( Optional ) > 0 )
     {
-        uint32_t ids[] = { veTypeId<Optional>()... };
+        uint32_t ids[] = { vecsTypeId<Optional>()... };
         for ( size_t i = 0; i < sizeof...( Optional ); i++ )
         {
-            veQueryAddOptional( q, ids[i] );
-            veQueryMarkRead( q, ids[i] );
+            vecsQueryAddOptional( q, ids[i] );
+            vecsQueryMarkRead( q, ids[i] );
         }
     }
 }
@@ -1272,9 +1272,9 @@ inline void buildQueryOptional( veWorld* w, veQuery* q )
 }
 
 template< typename... With, typename... Without, typename... Optional >
-inline veQuery* veBuildQuery( veWorld* w )
+inline vecsQuery* vecsBuildQuery( vecsWorld* w )
 {
-    veQuery* q = veCreateQuery();
+    vecsQuery* q = vecsCreateQuery();
     for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti++ )
     {
         q->withMask.topMasks[ti] = UINT64_MAX;
@@ -1283,9 +1283,9 @@ inline veQuery* veBuildQuery( veWorld* w )
             q->withMask.l2Masks[ti * 64u + i] = UINT64_MAX;
         }
     }
-    veDetail::buildQueryWith<With...>( w, q );
-    veDetail::buildQueryWithout<Without...>( w, q );
-    veDetail::buildQueryOptional<Optional...>( w, q );
+    vecsDetail::buildQueryWith<With...>( w, q );
+    vecsDetail::buildQueryWithout<Without...>( w, q );
+    vecsDetail::buildQueryOptional<Optional...>( w, q );
     return q;
 }
 
@@ -1293,13 +1293,13 @@ inline veQuery* veBuildQuery( veWorld* w )
 // Query
 // --------------------------------------------------------------------------
 
-namespace veDetail
+namespace vecsDetail
 {
 
 template< typename T >
-inline vePool* getPool( veWorld* w )
+inline vecsPool* getPool( vecsWorld* w )
 {
-    uint32_t id = veTypeId<T>();
+    uint32_t id = vecsTypeId<T>();
     if ( id >= VECS_MAX_COMPONENTS )
     {
         return nullptr;
@@ -1308,7 +1308,7 @@ inline vePool* getPool( veWorld* w )
 }
 
 template< typename T >
-inline T* getData( vePool* pool, uint32_t entityIdx )
+inline T* getData( vecsPool* pool, uint32_t entityIdx )
 {
     if constexpr ( std::is_empty<T>::value )
     {
@@ -1335,35 +1335,35 @@ inline void forEachPool( Tuple& pools, Fn&& fn )
 }
 
 template< typename... Components, typename Tuple, typename Fn, size_t... I >
-inline void invokeJoin( veWorld* w, Tuple& pools, uint32_t entityIdx, Fn&& fn, std::index_sequence<I...> )
+inline void invokeJoin( vecsWorld* w, Tuple& pools, uint32_t entityIdx, Fn&& fn, std::index_sequence<I...> )
 {
-    veEntity entity = veMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+    vecsEntity entity = vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
     fn( entity, *getData<Components>( std::get<I>( pools ), entityIdx )... );
 }
 
 template< typename... With, typename WithTuple, typename OptionalTuple, typename Fn, size_t... I >
-inline void invokeQueryCallback( veWorld* w, WithTuple& withPools, OptionalTuple& optionalPools, uint32_t entityIdx, veEntity entity, Fn&& fn, std::index_sequence<I...> )
+inline void invokeQueryCallback( vecsWorld* w, WithTuple& withPools, OptionalTuple& optionalPools, uint32_t entityIdx, vecsEntity entity, Fn&& fn, std::index_sequence<I...> )
 {
     fn( entity, *getData<With>( std::get<I>( withPools ), entityIdx )... );
 }
 
 template< typename... Components, typename Tuple, typename Fn >
-inline void eachJoinScalar( veWorld* w, Tuple& pools, Fn&& fn )
+inline void eachJoinScalar( vecsWorld* w, Tuple& pools, Fn&& fn )
 {
     constexpr size_t N = sizeof...( Components );
     for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti++ )
     {
         uint64_t top = UINT64_MAX;
-        forEachPool( pools, [&]( vePool* pool ) { top &= pool->bitfield.topMasks[ti]; } );
+        forEachPool( pools, [&]( vecsPool* pool ) { top &= pool->bitfield.topMasks[ti]; } );
         while ( top )
         {
-            uint32_t tb = veTzcnt( top );
+            uint32_t tb = vecsTzcnt( top );
             uint32_t l2Idx = ti * 64u + tb;
             uint64_t l2 = UINT64_MAX;
-            forEachPool( pools, [&]( vePool* pool ) { l2 &= pool->bitfield.l2Masks[l2Idx]; } );
+            forEachPool( pools, [&]( vecsPool* pool ) { l2 &= pool->bitfield.l2Masks[l2Idx]; } );
             while ( l2 )
             {
-                uint32_t lb = veTzcnt( l2 );
+                uint32_t lb = vecsTzcnt( l2 );
                 uint32_t entityIdx = l2Idx * 64u + lb;
                 invokeJoin<Components...>( w, pools, entityIdx, fn, std::make_index_sequence<N>() );
                 l2 &= l2 - 1;
@@ -1394,7 +1394,7 @@ inline uint64x2_t andTopMasksNeon( Tuple& pools, uint32_t ti, std::index_sequenc
 #endif
 
 template< typename... Components, typename Tuple, typename Fn >
-inline void eachJoinSimd( veWorld* w, Tuple& pools, Fn&& fn )
+inline void eachJoinSimd( vecsWorld* w, Tuple& pools, Fn&& fn )
 {
     constexpr size_t N = sizeof...( Components );
     constexpr size_t PoolCount = std::tuple_size<Tuple>::value;
@@ -1430,13 +1430,13 @@ inline void eachJoinSimd( veWorld* w, Tuple& pools, Fn&& fn )
             uint64_t top = vals[k];
             while ( top )
             {
-                uint32_t tb = veTzcnt( top );
+                uint32_t tb = vecsTzcnt( top );
                 uint32_t l2Idx = ( ti + k ) * 64u + tb;
                 uint64_t l2 = UINT64_MAX;
-                forEachPool( pools, [&]( vePool* pool ) { l2 &= pool->bitfield.l2Masks[l2Idx]; } );
+                forEachPool( pools, [&]( vecsPool* pool ) { l2 &= pool->bitfield.l2Masks[l2Idx]; } );
                 while ( l2 )
                 {
-                    uint32_t lb = veTzcnt( l2 );
+                    uint32_t lb = vecsTzcnt( l2 );
                     uint32_t entityIdx = l2Idx * 64u + lb;
                     invokeJoin<Components...>( w, pools, entityIdx, fn, std::make_index_sequence<N>() );
                     l2 &= l2 - 1;
@@ -1448,16 +1448,16 @@ inline void eachJoinSimd( veWorld* w, Tuple& pools, Fn&& fn )
     for ( ; ti < VECS_TOP_COUNT; ti++ )
     {
         uint64_t top = UINT64_MAX;
-        forEachPool( pools, [&]( vePool* pool ) { top &= pool->bitfield.topMasks[ti]; } );
+        forEachPool( pools, [&]( vecsPool* pool ) { top &= pool->bitfield.topMasks[ti]; } );
         while ( top )
         {
-            uint32_t tb = veTzcnt( top );
+            uint32_t tb = vecsTzcnt( top );
             uint32_t l2Idx = ti * 64u + tb;
             uint64_t l2 = UINT64_MAX;
-            forEachPool( pools, [&]( vePool* pool ) { l2 &= pool->bitfield.l2Masks[l2Idx]; } );
+            forEachPool( pools, [&]( vecsPool* pool ) { l2 &= pool->bitfield.l2Masks[l2Idx]; } );
             while ( l2 )
             {
-                uint32_t lb = veTzcnt( l2 );
+                uint32_t lb = vecsTzcnt( l2 );
                 uint32_t entityIdx = l2Idx * 64u + lb;
                 invokeJoin<Components...>( w, pools, entityIdx, fn, std::make_index_sequence<N>() );
                 l2 &= l2 - 1;
@@ -1470,7 +1470,7 @@ inline void eachJoinSimd( veWorld* w, Tuple& pools, Fn&& fn )
 
 inline bool g_veDisableSimd = false;
 
-inline bool veRuntimeSimdSupported()
+inline bool vecsRuntimeSimdSupported()
 {
     if ( g_veDisableSimd )
     {
@@ -1501,18 +1501,18 @@ inline bool veRuntimeSimdSupported()
 }
 
 template< typename... With, typename... Without, typename... Optional, typename Fn >
-inline void veQueryEach( veWorld* w, veQuery* q, Fn&& fn )
+inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
 {
-    static_assert( sizeof...( With ) >= 1, "veQueryEach requires at least one With component" );
+    static_assert( sizeof...( With ) >= 1, "vecsQueryEach requires at least one With component" );
     
     if ( q->withCount == 0 )
     {
         return;
     }
     
-    auto withPools = std::make_tuple( veDetail::getPool<With>( w )... );
+    auto withPools = std::make_tuple( vecsDetail::getPool<With>( w )... );
     bool invalid = false;
-    veDetail::forEachPool( withPools, [&]( vePool* pool )
+    vecsDetail::forEachPool( withPools, [&]( vecsPool* pool )
     {
         if ( !pool || pool->count == 0 )
         {
@@ -1524,13 +1524,13 @@ inline void veQueryEach( veWorld* w, veQuery* q, Fn&& fn )
         return;
     }
     
-    auto optionalPools = std::make_tuple( veDetail::getPool<Optional>( w )... );
-    auto withoutPools = std::make_tuple( veDetail::getPool<Without>( w )... );
+    auto optionalPools = std::make_tuple( vecsDetail::getPool<Optional>( w )... );
+    auto withoutPools = std::make_tuple( vecsDetail::getPool<Without>( w )... );
     
     uint32_t ti = 0;
     
 #if defined( VECS_SSE2 ) || defined( VECS_NEON )
-    if ( veRuntimeSimdSupported() )
+    if ( vecsRuntimeSimdSupported() )
     {
         for ( ; ti + 1 < VECS_TOP_COUNT; ti += 2 )
         {
@@ -1539,7 +1539,7 @@ inline void veQueryEach( veWorld* w, veQuery* q, Fn&& fn )
             __m128i joined = _mm_loadu_si128( ( const __m128i* )&q->withMask.topMasks[ti] );
             for ( uint32_t i = 0; i < q->withoutCount; i++ )
             {
-                vePool* wp = w->pools[q->withoutIds[i]];
+                vecsPool* wp = w->pools[q->withoutIds[i]];
                 if ( wp )
                 {
                     __m128i without = _mm_loadu_si128( ( const __m128i* )&wp->bitfield.topMasks[ti] );
@@ -1548,7 +1548,7 @@ inline void veQueryEach( veWorld* w, veQuery* q, Fn&& fn )
             }
             if constexpr ( sizeof...( Without ) > 0 )
             {
-                veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+                vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
                 {
                     if ( pool )
                     {
@@ -1571,7 +1571,7 @@ inline void veQueryEach( veWorld* w, veQuery* q, Fn&& fn )
             uint64x2_t joined = vld1q_u64( &q->withMask.topMasks[ti] );
             for ( uint32_t i = 0; i < q->withoutCount; i++ )
             {
-                vePool* wp = w->pools[q->withoutIds[i]];
+                vecsPool* wp = w->pools[q->withoutIds[i]];
                 if ( wp )
                 {
                     uint64x2_t without = vld1q_u64( &wp->bitfield.topMasks[ti] );
@@ -1580,7 +1580,7 @@ inline void veQueryEach( veWorld* w, veQuery* q, Fn&& fn )
             }
             if constexpr ( sizeof...( Without ) > 0 )
             {
-                veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+                vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
                 {
                     if ( pool )
                     {
@@ -1602,13 +1602,13 @@ inline void veQueryEach( veWorld* w, veQuery* q, Fn&& fn )
                 uint64_t top = vals[k];
                 while ( top )
                 {
-                    uint32_t tb = veTzcnt( top );
+                    uint32_t tb = vecsTzcnt( top );
                     uint32_t l2Idx = ( ti + k ) * 64u + tb;
                     uint64_t l2 = q->withMask.l2Masks[l2Idx];
                     
                     for ( uint32_t i = 0; i < q->withoutCount; i++ )
                     {
-                        vePool* wp = w->pools[q->withoutIds[i]];
+                        vecsPool* wp = w->pools[q->withoutIds[i]];
                         if ( wp )
                         {
                             l2 &= ~wp->bitfield.l2Masks[l2Idx];
@@ -1616,7 +1616,7 @@ inline void veQueryEach( veWorld* w, veQuery* q, Fn&& fn )
                     }
                     if constexpr ( sizeof...( Without ) > 0 )
                     {
-                        veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+                        vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
                         {
                             if ( pool )
                             {
@@ -1627,13 +1627,13 @@ inline void veQueryEach( veWorld* w, veQuery* q, Fn&& fn )
                     
                     while ( l2 )
                     {
-                        uint32_t lb = veTzcnt( l2 );
+                        uint32_t lb = vecsTzcnt( l2 );
                         uint32_t entityIdx = l2Idx * 64u + lb;
                         
                         bool excluded = false;
-                        veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+                        vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
                         {
-                            if ( pool && vePoolHas( pool, entityIdx ) )
+                            if ( pool && vecsPoolHas( pool, entityIdx ) )
                             {
                                 excluded = true;
                             }
@@ -1644,8 +1644,8 @@ inline void veQueryEach( veWorld* w, veQuery* q, Fn&& fn )
                             continue;
                         }
                         
-                        veEntity entity = veMakeEntity( entityIdx, w->entities->generations[entityIdx] );
-                        veDetail::invokeQueryCallback<With...>( w, withPools, optionalPools, entityIdx, entity, fn, std::make_index_sequence<sizeof...( With )>() );
+                        vecsEntity entity = vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+                        vecsDetail::invokeQueryCallback<With...>( w, withPools, optionalPools, entityIdx, entity, fn, std::make_index_sequence<sizeof...( With )>() );
                         l2 &= l2 - 1;
                     }
                     top &= top - 1;
@@ -1665,7 +1665,7 @@ inline void veQueryEach( veWorld* w, veQuery* q, Fn&& fn )
         
         for ( uint32_t i = 0; i < q->withoutCount; i++ )
         {
-            vePool* wp = w->pools[q->withoutIds[i]];
+            vecsPool* wp = w->pools[q->withoutIds[i]];
             if ( wp )
             {
                 top &= ~wp->bitfield.topMasks[ti];
@@ -1673,7 +1673,7 @@ inline void veQueryEach( veWorld* w, veQuery* q, Fn&& fn )
         }
         if constexpr ( sizeof...( Without ) > 0 )
         {
-            veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+            vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
             {
                 if ( pool )
                 {
@@ -1684,13 +1684,13 @@ inline void veQueryEach( veWorld* w, veQuery* q, Fn&& fn )
         
         while ( top )
         {
-            uint32_t tb = veTzcnt( top );
+            uint32_t tb = vecsTzcnt( top );
             uint32_t l2Idx = ti * 64u + tb;
             uint64_t l2 = q->withMask.l2Masks[l2Idx];
             
             for ( uint32_t i = 0; i < q->withoutCount; i++ )
             {
-                vePool* wp = w->pools[q->withoutIds[i]];
+                vecsPool* wp = w->pools[q->withoutIds[i]];
                 if ( wp )
                 {
                     l2 &= ~wp->bitfield.l2Masks[l2Idx];
@@ -1698,7 +1698,7 @@ inline void veQueryEach( veWorld* w, veQuery* q, Fn&& fn )
             }
             if constexpr ( sizeof...( Without ) > 0 )
             {
-                veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+                vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
                 {
                     if ( pool )
                     {
@@ -1709,13 +1709,13 @@ inline void veQueryEach( veWorld* w, veQuery* q, Fn&& fn )
             
             while ( l2 )
             {
-                uint32_t lb = veTzcnt( l2 );
+                uint32_t lb = vecsTzcnt( l2 );
                 uint32_t entityIdx = l2Idx * 64u + lb;
                 
                 bool excluded = false;
-                veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+                vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
                 {
-                    if ( pool && vePoolHas( pool, entityIdx ) )
+                    if ( pool && vecsPoolHas( pool, entityIdx ) )
                     {
                         excluded = true;
                     }
@@ -1726,8 +1726,8 @@ inline void veQueryEach( veWorld* w, veQuery* q, Fn&& fn )
                     continue;
                 }
                 
-                veEntity entity = veMakeEntity( entityIdx, w->entities->generations[entityIdx] );
-                veDetail::invokeQueryCallback<With...>( w, withPools, optionalPools, entityIdx, entity, fn, std::make_index_sequence<sizeof...( With )>() );
+                vecsEntity entity = vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+                vecsDetail::invokeQueryCallback<With...>( w, withPools, optionalPools, entityIdx, entity, fn, std::make_index_sequence<sizeof...( With )>() );
                 l2 &= l2 - 1;
             }
             top &= top - 1;
@@ -1736,9 +1736,9 @@ inline void veQueryEach( veWorld* w, veQuery* q, Fn&& fn )
 }
 
 template< typename... With, typename... Without, typename... Optional, typename Fn >
-inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, uint32_t endIndex, Fn&& fn )
+inline void vecsQueryEachParallel( vecsWorld* w, vecsQuery* q, uint32_t startIndex, uint32_t endIndex, Fn&& fn )
 {
-    static_assert( sizeof...( With ) >= 1, "veQueryEachParallel requires at least one With component" );
+    static_assert( sizeof...( With ) >= 1, "vecsQueryEachParallel requires at least one With component" );
 
     if ( q->withCount == 0 )
     {
@@ -1752,9 +1752,9 @@ inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, ui
         return;
     }
 
-    auto withPools = std::make_tuple( veDetail::getPool<With>( w )... );
+    auto withPools = std::make_tuple( vecsDetail::getPool<With>( w )... );
     bool invalid = false;
-    veDetail::forEachPool( withPools, [&]( vePool* pool )
+    vecsDetail::forEachPool( withPools, [&]( vecsPool* pool )
     {
         if ( !pool || pool->count == 0 )
         {
@@ -1766,8 +1766,8 @@ inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, ui
         return;
     }
 
-    auto optionalPools = std::make_tuple( veDetail::getPool<Optional>( w )... );
-    auto withoutPools = std::make_tuple( veDetail::getPool<Without>( w )... );
+    auto optionalPools = std::make_tuple( vecsDetail::getPool<Optional>( w )... );
+    auto withoutPools = std::make_tuple( vecsDetail::getPool<Without>( w )... );
 
     auto processScalarTi = [&]( uint32_t ti )
     {
@@ -1779,7 +1779,7 @@ inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, ui
 
         for ( uint32_t i = 0; i < q->withoutCount; i++ )
         {
-            vePool* wp = w->pools[q->withoutIds[i]];
+            vecsPool* wp = w->pools[q->withoutIds[i]];
             if ( wp )
             {
                 top &= ~wp->bitfield.topMasks[ti];
@@ -1787,7 +1787,7 @@ inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, ui
         }
         if constexpr ( sizeof...( Without ) > 0 )
         {
-            veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+            vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
             {
                 if ( pool )
                 {
@@ -1798,13 +1798,13 @@ inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, ui
 
         while ( top )
         {
-            uint32_t tb = veTzcnt( top );
+            uint32_t tb = vecsTzcnt( top );
             uint32_t l2Idx = ti * 64u + tb;
             uint64_t l2 = q->withMask.l2Masks[l2Idx];
 
             for ( uint32_t i = 0; i < q->withoutCount; i++ )
             {
-                vePool* wp = w->pools[q->withoutIds[i]];
+                vecsPool* wp = w->pools[q->withoutIds[i]];
                 if ( wp )
                 {
                     l2 &= ~wp->bitfield.l2Masks[l2Idx];
@@ -1812,7 +1812,7 @@ inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, ui
             }
             if constexpr ( sizeof...( Without ) > 0 )
             {
-                veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+                vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
                 {
                     if ( pool )
                     {
@@ -1823,13 +1823,13 @@ inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, ui
 
             while ( l2 )
             {
-                uint32_t lb = veTzcnt( l2 );
+                uint32_t lb = vecsTzcnt( l2 );
                 uint32_t entityIdx = l2Idx * 64u + lb;
 
                 bool excluded = false;
-                veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+                vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
                 {
-                    if ( pool && vePoolHas( pool, entityIdx ) )
+                    if ( pool && vecsPoolHas( pool, entityIdx ) )
                     {
                         excluded = true;
                     }
@@ -1840,8 +1840,8 @@ inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, ui
                     continue;
                 }
 
-                veEntity entity = veMakeEntity( entityIdx, w->entities->generations[entityIdx] );
-                veDetail::invokeQueryCallback<With...>( w, withPools, optionalPools, entityIdx, entity, fn, std::make_index_sequence<sizeof...( With )>() );
+                vecsEntity entity = vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+                vecsDetail::invokeQueryCallback<With...>( w, withPools, optionalPools, entityIdx, entity, fn, std::make_index_sequence<sizeof...( With )>() );
                 l2 &= l2 - 1;
             }
             top &= top - 1;
@@ -1851,7 +1851,7 @@ inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, ui
     uint32_t ti = startTi;
 
 #if defined( VECS_SSE2 ) || defined( VECS_NEON )
-    if ( veRuntimeSimdSupported() )
+    if ( vecsRuntimeSimdSupported() )
     {
         if ( ( ti & 1u ) != 0u )
         {
@@ -1866,7 +1866,7 @@ inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, ui
             __m128i joined = _mm_loadu_si128( ( const __m128i* )&q->withMask.topMasks[ti] );
             for ( uint32_t i = 0; i < q->withoutCount; i++ )
             {
-                vePool* wp = w->pools[q->withoutIds[i]];
+                vecsPool* wp = w->pools[q->withoutIds[i]];
                 if ( wp )
                 {
                     __m128i without = _mm_loadu_si128( ( const __m128i* )&wp->bitfield.topMasks[ti] );
@@ -1875,7 +1875,7 @@ inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, ui
             }
             if constexpr ( sizeof...( Without ) > 0 )
             {
-                veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+                vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
                 {
                     if ( pool )
                     {
@@ -1898,7 +1898,7 @@ inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, ui
             uint64x2_t joined = vld1q_u64( &q->withMask.topMasks[ti] );
             for ( uint32_t i = 0; i < q->withoutCount; i++ )
             {
-                vePool* wp = w->pools[q->withoutIds[i]];
+                vecsPool* wp = w->pools[q->withoutIds[i]];
                 if ( wp )
                 {
                     uint64x2_t without = vld1q_u64( &wp->bitfield.topMasks[ti] );
@@ -1907,7 +1907,7 @@ inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, ui
             }
             if constexpr ( sizeof...( Without ) > 0 )
             {
-                veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+                vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
                 {
                     if ( pool )
                     {
@@ -1929,13 +1929,13 @@ inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, ui
                 uint64_t top = vals[k];
                 while ( top )
                 {
-                    uint32_t tb = veTzcnt( top );
+                    uint32_t tb = vecsTzcnt( top );
                     uint32_t l2Idx = ( ti + k ) * 64u + tb;
                     uint64_t l2 = q->withMask.l2Masks[l2Idx];
 
                     for ( uint32_t i = 0; i < q->withoutCount; i++ )
                     {
-                        vePool* wp = w->pools[q->withoutIds[i]];
+                        vecsPool* wp = w->pools[q->withoutIds[i]];
                         if ( wp )
                         {
                             l2 &= ~wp->bitfield.l2Masks[l2Idx];
@@ -1943,7 +1943,7 @@ inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, ui
                     }
                     if constexpr ( sizeof...( Without ) > 0 )
                     {
-                        veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+                        vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
                         {
                             if ( pool )
                             {
@@ -1954,13 +1954,13 @@ inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, ui
 
                     while ( l2 )
                     {
-                        uint32_t lb = veTzcnt( l2 );
+                        uint32_t lb = vecsTzcnt( l2 );
                         uint32_t entityIdx = l2Idx * 64u + lb;
 
                         bool excluded = false;
-                        veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+                        vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
                         {
-                            if ( pool && vePoolHas( pool, entityIdx ) )
+                            if ( pool && vecsPoolHas( pool, entityIdx ) )
                             {
                                 excluded = true;
                             }
@@ -1971,8 +1971,8 @@ inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, ui
                             continue;
                         }
 
-                        veEntity entity = veMakeEntity( entityIdx, w->entities->generations[entityIdx] );
-                        veDetail::invokeQueryCallback<With...>( w, withPools, optionalPools, entityIdx, entity, fn, std::make_index_sequence<sizeof...( With )>() );
+                        vecsEntity entity = vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+                        vecsDetail::invokeQueryCallback<With...>( w, withPools, optionalPools, entityIdx, entity, fn, std::make_index_sequence<sizeof...( With )>() );
                         l2 &= l2 - 1;
                     }
                     top &= top - 1;
@@ -1989,15 +1989,15 @@ inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, ui
 }
 
 template< typename... With, typename Fn >
-inline void veEach( veWorld* w, Fn&& fn )
+inline void vecsEach( vecsWorld* w, Fn&& fn )
 {
     constexpr size_t N = sizeof...( With );
-    static_assert( N >= 1, "veEach requires at least one component type" );
+    static_assert( N >= 1, "vecsEach requires at least one component type" );
 
     if constexpr ( N == 1 )
     {
         using First = std::tuple_element_t<0, std::tuple<With...>>;
-        vePool* pool = veDetail::getPool<First>( w );
+        vecsPool* pool = vecsDetail::getPool<First>( w );
         if ( !pool )
         {
             return;
@@ -2005,16 +2005,16 @@ inline void veEach( veWorld* w, Fn&& fn )
         for ( uint32_t i = 0; i < pool->count; i++ )
         {
             uint32_t entityIdx = pool->denseEntities[i];
-            veEntity entity = veMakeEntity( entityIdx, w->entities->generations[entityIdx] );
-            First* data = veDetail::getData<First>( pool, entityIdx );
+            vecsEntity entity = vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+            First* data = vecsDetail::getData<First>( pool, entityIdx );
             fn( entity, *data );
         }
     }
     else
     {
-        auto pools = std::make_tuple( veDetail::getPool<With>( w )... );
+        auto pools = std::make_tuple( vecsDetail::getPool<With>( w )... );
         bool invalid = false;
-        veDetail::forEachPool( pools, [&]( vePool* pool )
+        vecsDetail::forEachPool( pools, [&]( vecsPool* pool )
         {
             if ( !pool || pool->count == 0 )
             {
@@ -2026,13 +2026,13 @@ inline void veEach( veWorld* w, Fn&& fn )
             return;
         }
 #if defined( VECS_SSE2 ) || defined( VECS_NEON )
-        if ( veRuntimeSimdSupported() )
+        if ( vecsRuntimeSimdSupported() )
         {
-            veDetail::eachJoinSimd<With...>( w, pools, fn );
+            vecsDetail::eachJoinSimd<With...>( w, pools, fn );
             return;
         }
 #endif
-        veDetail::eachJoinScalar<With...>( w, pools, fn );
+        vecsDetail::eachJoinScalar<With...>( w, pools, fn );
     }
 }
 
@@ -2041,16 +2041,16 @@ inline void veEach( veWorld* w, Fn&& fn )
 // --------------------------------------------------------------------------
 
 template< typename T, typename... Args >
-inline T* veEmplace( veWorld* w, veEntity e, Args&&... args )
+inline T* vecsEmplace( vecsWorld* w, vecsEntity e, Args&&... args )
 {
-    assert( veAlive( w, e ) );
-    vePool* pool = veEnsurePool<T>( w );
-    uint32_t idx = veEntityIndex( e );
-    uint32_t componentId = veTypeId<T>();
+    assert( vecsAlive( w, e ) );
+    vecsPool* pool = vecsEnsurePool<T>( w );
+    uint32_t idx = vecsEntityIndex( e );
+    uint32_t componentId = vecsTypeId<T>();
     
-    if ( vePoolHas( pool, idx ) )
+    if ( vecsPoolHas( pool, idx ) )
     {
-        T* ptr = ( T* )vePoolGet( pool, idx );
+        T* ptr = ( T* )vecsPoolGet( pool, idx );
         if constexpr ( !std::is_empty<T>::value )
         {
             if constexpr ( !std::is_trivially_destructible<T>::value )
@@ -2065,7 +2065,7 @@ inline T* veEmplace( veWorld* w, veEntity e, Args&&... args )
     T* result = nullptr;
     if constexpr ( std::is_empty<T>::value )
     {
-        vePoolSet( pool, idx, nullptr );
+        vecsPoolSet( pool, idx, nullptr );
         static T tagValue = {};
         result = &tagValue;
     }
@@ -2073,19 +2073,19 @@ inline T* veEmplace( veWorld* w, veEntity e, Args&&... args )
     {
         if ( pool->count == pool->capacity )
         {
-            vePoolGrow( pool );
+            vecsPoolGrow( pool );
         }
         uint32_t denseIdx = pool->count++;
         pool->sparse[idx] = denseIdx;
         pool->denseEntities[denseIdx] = idx;
         result = ( T* )( pool->denseData + ( size_t )denseIdx * pool->stride );
         new ( result ) T( std::forward<Args>( args )... );
-        veBitfieldSet( &pool->bitfield, idx );
+        vecsBitfieldSet( &pool->bitfield, idx );
     }
     
     for ( uint32_t i = 0; i < w->observers->count; i++ )
     {
-        veObserver& obs = w->observers->observers[i];
+        vecsObserver& obs = w->observers->observers[i];
         if ( obs.onAdd && obs.componentId == componentId )
         {
             obs.callback( w, e, result );
@@ -2095,25 +2095,25 @@ inline T* veEmplace( veWorld* w, veEntity e, Args&&... args )
 }
 
 template< typename T >
-inline void veAddTag( veWorld* w, veEntity e )
+inline void vecsAddTag( vecsWorld* w, vecsEntity e )
 {
-    static_assert( std::is_empty<T>::value, "veAddTag can only be used on empty structs (tags)" );
-    assert( veAlive( w, e ) );
-    vePool* pool = veEnsurePool<T>( w );
-    uint32_t idx = veEntityIndex( e );
-    uint32_t componentId = veTypeId<T>();
+    static_assert( std::is_empty<T>::value, "vecsAddTag can only be used on empty structs (tags)" );
+    assert( vecsAlive( w, e ) );
+    vecsPool* pool = vecsEnsurePool<T>( w );
+    uint32_t idx = vecsEntityIndex( e );
+    uint32_t componentId = vecsTypeId<T>();
     
-    if ( vePoolHas( pool, idx ) )
+    if ( vecsPoolHas( pool, idx ) )
     {
         return;
     }
     
-    vePoolSet( pool, idx, nullptr );
+    vecsPoolSet( pool, idx, nullptr );
     static T tagValue = {};
     
     for ( uint32_t i = 0; i < w->observers->count; i++ )
     {
-        veObserver& obs = w->observers->observers[i];
+        vecsObserver& obs = w->observers->observers[i];
         if ( obs.onAdd && obs.componentId == componentId )
         {
             obs.callback( w, e, &tagValue );
@@ -2126,28 +2126,28 @@ inline void veAddTag( veWorld* w, veEntity e )
 // --------------------------------------------------------------------------
 
 template< typename... T >
-inline bool veHasAll( veWorld* w, veEntity e )
+inline bool vecsHasAll( vecsWorld* w, vecsEntity e )
 {
-    return ( veHas<T>( w, e ) && ... );
+    return ( vecsHas<T>( w, e ) && ... );
 }
 
 template< typename... T >
-inline void veRemoveAll( veWorld* w, veEntity e )
+inline void vecsRemoveAll( vecsWorld* w, vecsEntity e )
 {
-    ( veUnset<T>( w, e ), ... );
+    ( vecsUnset<T>( w, e ), ... );
 }
 
 template< typename... T >
-inline bool veHasAny( veWorld* w, veEntity e )
+inline bool vecsHasAny( vecsWorld* w, vecsEntity e )
 {
-    return ( veHas<T>( w, e ) || ... );
+    return ( vecsHas<T>( w, e ) || ... );
 }
 
 // --------------------------------------------------------------------------
-// veEach with Optional Entity Parameter
+// vecsEach with Optional Entity Parameter
 // --------------------------------------------------------------------------
 
-namespace veDetail
+namespace vecsDetail
 {
 
 template< typename... With, typename Tuple, typename Fn, size_t... I >
@@ -2157,21 +2157,21 @@ inline void invokeJoinNoEntity( Tuple& pools, uint32_t entityIdx, Fn&& fn, std::
 }
 
 template< typename... With, typename Tuple, typename Fn >
-inline void eachJoinScalarNoEntity( veWorld* w, Tuple& pools, Fn&& fn )
+inline void eachJoinScalarNoEntity( vecsWorld* w, Tuple& pools, Fn&& fn )
 {
     for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti++ )
     {
         uint64_t top = UINT64_MAX;
-        forEachPool( pools, [&]( vePool* pool ) { top &= pool->bitfield.topMasks[ti]; } );
+        forEachPool( pools, [&]( vecsPool* pool ) { top &= pool->bitfield.topMasks[ti]; } );
         while ( top )
         {
-            uint32_t tb = veTzcnt( top );
+            uint32_t tb = vecsTzcnt( top );
             uint32_t l2Idx = ti * 64u + tb;
             uint64_t l2 = UINT64_MAX;
-            forEachPool( pools, [&]( vePool* pool ) { l2 &= pool->bitfield.l2Masks[l2Idx]; } );
+            forEachPool( pools, [&]( vecsPool* pool ) { l2 &= pool->bitfield.l2Masks[l2Idx]; } );
             while ( l2 )
             {
-                uint32_t lb = veTzcnt( l2 );
+                uint32_t lb = vecsTzcnt( l2 );
                 uint32_t entityIdx = l2Idx * 64u + lb;
                 invokeJoinNoEntity<With...>( pools, entityIdx, fn, std::make_index_sequence<sizeof...( With )>() );
                 l2 &= l2 - 1;
@@ -2182,44 +2182,44 @@ inline void eachJoinScalarNoEntity( veWorld* w, Tuple& pools, Fn&& fn )
 }
 
 template< size_t N >
-struct veLambdaTraits
+struct vecsLambdaTraits
 {
     static constexpr size_t ArgCount = N;
 };
 
 template< typename R, typename C, typename... Args >
-veLambdaTraits<sizeof...( Args )> veDetectLambdaArgs( R ( C::* )( Args... ) const );
+vecsLambdaTraits<sizeof...( Args )> vecsDetectLambdaArgs( R ( C::* )( Args... ) const );
 
 template< typename R, typename C, typename... Args >
-veLambdaTraits<sizeof...( Args )> veDetectLambdaArgs( R ( C::* )( Args... ) );
+vecsLambdaTraits<sizeof...( Args )> vecsDetectLambdaArgs( R ( C::* )( Args... ) );
 
 }
 
 template< typename... With, typename Fn >
-inline void veEachNoEntity( veWorld* w, Fn&& fn )
+inline void vecsEachNoEntity( vecsWorld* w, Fn&& fn )
 {
     constexpr size_t N = sizeof...( With );
-    static_assert( N >= 1, "veEachNoEntity requires at least one component type" );
+    static_assert( N >= 1, "vecsEachNoEntity requires at least one component type" );
     
     if constexpr ( N == 1 )
     {
         using First = std::tuple_element_t<0, std::tuple<With...>>;
-        vePool* pool = veDetail::getPool<First>( w );
+        vecsPool* pool = vecsDetail::getPool<First>( w );
         if ( !pool )
         {
             return;
         }
         for ( uint32_t i = 0; i < pool->count; i++ )
         {
-            First* data = veDetail::getData<First>( pool, pool->denseEntities[i] );
+            First* data = vecsDetail::getData<First>( pool, pool->denseEntities[i] );
             fn( *data );
         }
     }
     else
     {
-        auto pools = std::make_tuple( veDetail::getPool<With>( w )... );
+        auto pools = std::make_tuple( vecsDetail::getPool<With>( w )... );
         bool invalid = false;
-        veDetail::forEachPool( pools, [&]( vePool* pool )
+        vecsDetail::forEachPool( pools, [&]( vecsPool* pool )
         {
             if ( !pool || pool->count == 0 )
             {
@@ -2230,7 +2230,7 @@ inline void veEachNoEntity( veWorld* w, Fn&& fn )
         {
             return;
         }
-        veDetail::eachJoinScalarNoEntity<With...>( w, pools, fn );
+        vecsDetail::eachJoinScalarNoEntity<With...>( w, pools, fn );
     }
 }
 
@@ -2239,9 +2239,9 @@ inline void veEachNoEntity( veWorld* w, Fn&& fn )
 // --------------------------------------------------------------------------
 
 template< typename T >
-inline T* veSetSingleton( veWorld* w, const T& val = {} )
+inline T* vecsSetSingleton( vecsWorld* w, const T& val = {} )
 {
-    uint32_t id = veTypeId<T>();
+    uint32_t id = vecsTypeId<T>();
     assert( id < VECS_MAX_COMPONENTS );
     auto& slot = w->singletons[id];
     if ( !slot.data )
@@ -2268,9 +2268,9 @@ inline T* veSetSingleton( veWorld* w, const T& val = {} )
 }
 
 template< typename T >
-inline T* veGetSingleton( veWorld* w )
+inline T* vecsGetSingleton( vecsWorld* w )
 {
-    uint32_t id = veTypeId<T>();
+    uint32_t id = vecsTypeId<T>();
     if ( id >= VECS_MAX_COMPONENTS || !w->singletons[id].data )
     {
         return nullptr;
@@ -2279,156 +2279,156 @@ inline T* veGetSingleton( veWorld* w )
 }
 
 template< typename T >
-inline void veOnAdd( veWorld* w, void ( *callback )( veWorld*, veEntity, T* ) )
+inline void vecsOnAdd( vecsWorld* w, void ( *callback )( vecsWorld*, vecsEntity, T* ) )
 {
-    veAddObserver( w->observers, veTypeId<T>(), reinterpret_cast< void ( * )( veWorld*, veEntity, void* ) >( callback ), true );
+    vecsAddObserver( w->observers, vecsTypeId<T>(), reinterpret_cast< void ( * )( vecsWorld*, vecsEntity, void* ) >( callback ), true );
 }
 
 template< typename T >
-inline void veOnRemove( veWorld* w, void ( *callback )( veWorld*, veEntity, T* ) )
+inline void vecsOnRemove( vecsWorld* w, void ( *callback )( vecsWorld*, vecsEntity, T* ) )
 {
-    veAddObserver( w->observers, veTypeId<T>(), reinterpret_cast< void ( * )( veWorld*, veEntity, void* ) >( callback ), false );
+    vecsAddObserver( w->observers, vecsTypeId<T>(), reinterpret_cast< void ( * )( vecsWorld*, vecsEntity, void* ) >( callback ), false );
 }
 
-inline void veSetChildOf( veWorld* w, veEntity child, veEntity parent )
+inline void vecsSetChildOf( vecsWorld* w, vecsEntity child, vecsEntity parent )
 {
     assert( w );
     if ( !w->relationships )
     {
-        w->relationships = veCreateRelationships( w->maxEntities );
+        w->relationships = vecsCreateRelationships( w->maxEntities );
     }
-    veSetParent( w->relationships, child, parent );
+    vecsSetParent( w->relationships, child, parent );
 }
 
-inline veEntity veGetParentEntity( veWorld* w, veEntity child )
+inline vecsEntity vecsGetParentEntity( vecsWorld* w, vecsEntity child )
 {
     assert( w );
     if ( !w->relationships )
     {
         return VECS_INVALID_ENTITY;
     }
-    return veGetParent( w->relationships, child );
+    return vecsGetParent( w->relationships, child );
 }
 
-inline uint32_t veGetChildEntityCount( veWorld* w, veEntity parent )
+inline uint32_t vecsGetChildEntityCount( vecsWorld* w, vecsEntity parent )
 {
     assert( w );
     if ( !w->relationships )
     {
         return 0;
     }
-    return veGetChildCount( w->relationships, parent );
+    return vecsGetChildCount( w->relationships, parent );
 }
 
-inline veEntity veGetChildEntity( veWorld* w, veEntity parent, uint32_t index )
+inline vecsEntity vecsGetChildEntity( vecsWorld* w, vecsEntity parent, uint32_t index )
 {
     assert( w );
     if ( !w->relationships )
     {
         return VECS_INVALID_ENTITY;
     }
-    return veGetChild( w->relationships, parent, index );
+    return vecsGetChild( w->relationships, parent, index );
 }
 
 // --------------------------------------------------------------------------
 // Entity Handle Wrapper
 // --------------------------------------------------------------------------
 
-struct veHandle
+struct vecsHandle
 {
-    veWorld* w;
-    veEntity e;
+    vecsWorld* w;
+    vecsEntity e;
     
     template< typename T, typename... Args >
     T* emplace( Args&&... args )
     {
-        return veEmplace<T>( w, e, std::forward<Args>( args )... );
+        return vecsEmplace<T>( w, e, std::forward<Args>( args )... );
     }
     
     template< typename T >
     T* set( const T& val = {} )
     {
-        return veSet<T>( w, e, val );
+        return vecsSet<T>( w, e, val );
     }
     
     template< typename T >
     T* get()
     {
-        return veGet<T>( w, e );
+        return vecsGet<T>( w, e );
     }
     
     template< typename T >
     bool has() const
     {
-        return veHas<T>( w, e );
+        return vecsHas<T>( w, e );
     }
     
     template< typename T >
     void remove()
     {
-        veUnset<T>( w, e );
+        vecsUnset<T>( w, e );
     }
     
     template< typename... T >
     bool hasAll() const
     {
-        return veHasAll<T...>( w, e );
+        return vecsHasAll<T...>( w, e );
     }
     
     template< typename... T >
     void removeAll()
     {
-        veRemoveAll<T...>( w, e );
+        vecsRemoveAll<T...>( w, e );
     }
     
     template< typename T >
     void addTag()
     {
-        veAddTag<T>( w, e );
+        vecsAddTag<T>( w, e );
     }
     
-    void setParent( veEntity parent )
+    void setParent( vecsEntity parent )
     {
-        veSetChildOf( w, e, parent );
+        vecsSetChildOf( w, e, parent );
     }
     
-    veEntity parent() const
+    vecsEntity parent() const
     {
-        return veGetParentEntity( w, e );
+        return vecsGetParentEntity( w, e );
     }
     
     uint32_t childCount() const
     {
-        return veGetChildEntityCount( w, e );
+        return vecsGetChildEntityCount( w, e );
     }
     
-    veEntity child( uint32_t index ) const
+    vecsEntity child( uint32_t index ) const
     {
-        return veGetChildEntity( w, e, index );
+        return vecsGetChildEntity( w, e, index );
     }
     
     bool alive() const
     {
-        return veAlive( w, e );
+        return vecsAlive( w, e );
     }
     
     void destroy()
     {
-        veDestroy( w, e );
+        vecsDestroy( w, e );
     }
     
-    veEntity id() const
+    vecsEntity id() const
     {
         return e;
     }
 };
 
-inline veHandle veCreateHandle( veWorld* w )
+inline vecsHandle vecsCreateHandle( vecsWorld* w )
 {
-    return { w, veCreate( w ) };
+    return { w, vecsCreate( w ) };
 }
 
-inline veHandle veMakeHandle( veWorld* w, veEntity e )
+inline vecsHandle vecsMakeHandle( vecsWorld* w, vecsEntity e )
 {
     return { w, e };
 }
@@ -2437,7 +2437,7 @@ inline veHandle veMakeHandle( veWorld* w, veEntity e )
 // Command Buffer
 // --------------------------------------------------------------------------
 
-struct veCommand
+struct vecsCommand
 {
     enum Type : uint8_t
     {
@@ -2449,39 +2449,39 @@ struct veCommand
     };
 
     Type type;
-    veEntity entity;
+    vecsEntity entity;
     uint32_t componentId;
     uint32_t dataOffset;
     uint32_t dataSize;
     uint32_t createdIndex;
-    vePool* pool;
-    veEntity parent;
+    vecsPool* pool;
+    vecsEntity parent;
 };
 
-struct veCommandBuffer
+struct vecsCommandBuffer
 {
-    veWorld* world;
-    veCommand* commands;
+    vecsWorld* world;
+    vecsCommand* commands;
     uint32_t commandCount;
     uint32_t commandCapacity;
     uint8_t* dataBuffer;
     uint32_t dataSize;
     uint32_t dataCapacity;
-    veEntity* created;
+    vecsEntity* created;
     uint32_t createdCount;
     uint32_t createdCapacity;
 };
 
-inline void veCmdGrowCommands( veCommandBuffer* cb )
+inline void vecsCmdGrowCommands( vecsCommandBuffer* cb )
 {
     uint32_t cap = cb->commandCapacity ? cb->commandCapacity * 2u : 64u;
-    veCommand* ptr = ( veCommand* )std::realloc( cb->commands, ( size_t )cap * sizeof( veCommand ) );
+    vecsCommand* ptr = ( vecsCommand* )std::realloc( cb->commands, ( size_t )cap * sizeof( vecsCommand ) );
     assert( ptr );
     cb->commands = ptr;
     cb->commandCapacity = cap;
 }
 
-inline void veCmdGrowData( veCommandBuffer* cb, uint32_t minExtra )
+inline void vecsCmdGrowData( vecsCommandBuffer* cb, uint32_t minExtra )
 {
     uint32_t need = cb->dataSize + minExtra;
     if ( cb->dataCapacity >= need )
@@ -2499,18 +2499,18 @@ inline void veCmdGrowData( veCommandBuffer* cb, uint32_t minExtra )
     cb->dataCapacity = cap;
 }
 
-inline void veCmdGrowCreated( veCommandBuffer* cb )
+inline void vecsCmdGrowCreated( vecsCommandBuffer* cb )
 {
     uint32_t cap = cb->createdCapacity ? cb->createdCapacity * 2u : 32u;
-    veEntity* ptr = ( veEntity* )std::realloc( cb->created, ( size_t )cap * sizeof( veEntity ) );
+    vecsEntity* ptr = ( vecsEntity* )std::realloc( cb->created, ( size_t )cap * sizeof( vecsEntity ) );
     assert( ptr );
     cb->created = ptr;
     cb->createdCapacity = cap;
 }
 
-inline veCommandBuffer* veCreateCommandBuffer( veWorld* w )
+inline vecsCommandBuffer* vecsCreateCommandBuffer( vecsWorld* w )
 {
-    veCommandBuffer* cb = ( veCommandBuffer* )std::malloc( sizeof( veCommandBuffer ) );
+    vecsCommandBuffer* cb = ( vecsCommandBuffer* )std::malloc( sizeof( vecsCommandBuffer ) );
     assert( cb );
     cb->world = w;
     cb->commands = nullptr;
@@ -2525,7 +2525,7 @@ inline veCommandBuffer* veCreateCommandBuffer( veWorld* w )
     return cb;
 }
 
-inline void veDestroyCommandBuffer( veCommandBuffer* cb )
+inline void vecsDestroyCommandBuffer( vecsCommandBuffer* cb )
 {
     if ( !cb )
     {
@@ -2537,22 +2537,22 @@ inline void veDestroyCommandBuffer( veCommandBuffer* cb )
     std::free( cb );
 }
 
-inline uint32_t veCmdCreate( veCommandBuffer* cb )
+inline uint32_t vecsCmdCreate( vecsCommandBuffer* cb )
 {
     assert( cb );
     if ( cb->createdCount == cb->createdCapacity )
     {
-        veCmdGrowCreated( cb );
+        vecsCmdGrowCreated( cb );
     }
     uint32_t index = cb->createdCount++;
     cb->created[index] = VECS_INVALID_ENTITY;
 
     if ( cb->commandCount == cb->commandCapacity )
     {
-        veCmdGrowCommands( cb );
+        vecsCmdGrowCommands( cb );
     }
-    veCommand& cmd = cb->commands[cb->commandCount++];
-    cmd.type = veCommand::CREATE;
+    vecsCommand& cmd = cb->commands[cb->commandCount++];
+    cmd.type = vecsCommand::CREATE;
     cmd.entity = VECS_INVALID_ENTITY;
     cmd.componentId = VECS_INVALID_INDEX;
     cmd.dataOffset = 0;
@@ -2563,15 +2563,15 @@ inline uint32_t veCmdCreate( veCommandBuffer* cb )
     return index;
 }
 
-inline void veCmdDestroy( veCommandBuffer* cb, veEntity e )
+inline void vecsCmdDestroy( vecsCommandBuffer* cb, vecsEntity e )
 {
     assert( cb );
     if ( cb->commandCount == cb->commandCapacity )
     {
-        veCmdGrowCommands( cb );
+        vecsCmdGrowCommands( cb );
     }
-    veCommand& cmd = cb->commands[cb->commandCount++];
-    cmd.type = veCommand::DESTROY;
+    vecsCommand& cmd = cb->commands[cb->commandCount++];
+    cmd.type = vecsCommand::DESTROY;
     cmd.entity = e;
     cmd.componentId = VECS_INVALID_INDEX;
     cmd.dataOffset = 0;
@@ -2582,18 +2582,18 @@ inline void veCmdDestroy( veCommandBuffer* cb, veEntity e )
 }
 
 template< typename T >
-inline void veCmdSet( veCommandBuffer* cb, veEntity e, const T& val )
+inline void vecsCmdSet( vecsCommandBuffer* cb, vecsEntity e, const T& val )
 {
     assert( cb );
-    vePool* pool = veEnsurePool<T>( cb->world );
+    vecsPool* pool = vecsEnsurePool<T>( cb->world );
     if ( cb->commandCount == cb->commandCapacity )
     {
-        veCmdGrowCommands( cb );
+        vecsCmdGrowCommands( cb );
     }
-    veCommand& cmd = cb->commands[cb->commandCount++];
-    cmd.type = veCommand::SET_COMPONENT;
+    vecsCommand& cmd = cb->commands[cb->commandCount++];
+    cmd.type = vecsCommand::SET_COMPONENT;
     cmd.entity = e;
-    cmd.componentId = veTypeId<T>();
+    cmd.componentId = vecsTypeId<T>();
     cmd.dataOffset = 0;
     cmd.dataSize = 0;
     cmd.createdIndex = VECS_INVALID_INDEX;
@@ -2601,7 +2601,7 @@ inline void veCmdSet( veCommandBuffer* cb, veEntity e, const T& val )
     cmd.parent = VECS_INVALID_ENTITY;
     if constexpr ( !std::is_empty<T>::value )
     {
-        veCmdGrowData( cb, sizeof( T ) );
+        vecsCmdGrowData( cb, sizeof( T ) );
         cmd.dataOffset = cb->dataSize;
         cmd.dataSize = sizeof( T );
         std::memcpy( cb->dataBuffer + cb->dataSize, &val, sizeof( T ) );
@@ -2610,19 +2610,19 @@ inline void veCmdSet( veCommandBuffer* cb, veEntity e, const T& val )
 }
 
 template< typename T >
-inline void veCmdSetCreated( veCommandBuffer* cb, uint32_t createdIndex, const T& val )
+inline void vecsCmdSetCreated( vecsCommandBuffer* cb, uint32_t createdIndex, const T& val )
 {
     assert( cb );
     assert( createdIndex < cb->createdCount );
-    vePool* pool = veEnsurePool<T>( cb->world );
+    vecsPool* pool = vecsEnsurePool<T>( cb->world );
     if ( cb->commandCount == cb->commandCapacity )
     {
-        veCmdGrowCommands( cb );
+        vecsCmdGrowCommands( cb );
     }
-    veCommand& cmd = cb->commands[cb->commandCount++];
-    cmd.type = veCommand::SET_COMPONENT;
+    vecsCommand& cmd = cb->commands[cb->commandCount++];
+    cmd.type = vecsCommand::SET_COMPONENT;
     cmd.entity = VECS_INVALID_ENTITY;
-    cmd.componentId = veTypeId<T>();
+    cmd.componentId = vecsTypeId<T>();
     cmd.dataOffset = 0;
     cmd.dataSize = 0;
     cmd.createdIndex = createdIndex;
@@ -2630,7 +2630,7 @@ inline void veCmdSetCreated( veCommandBuffer* cb, uint32_t createdIndex, const T
     cmd.parent = VECS_INVALID_ENTITY;
     if constexpr ( !std::is_empty<T>::value )
     {
-        veCmdGrowData( cb, sizeof( T ) );
+        vecsCmdGrowData( cb, sizeof( T ) );
         cmd.dataOffset = cb->dataSize;
         cmd.dataSize = sizeof( T );
         std::memcpy( cb->dataBuffer + cb->dataSize, &val, sizeof( T ) );
@@ -2639,33 +2639,33 @@ inline void veCmdSetCreated( veCommandBuffer* cb, uint32_t createdIndex, const T
 }
 
 template< typename T >
-inline void veCmdUnset( veCommandBuffer* cb, veEntity e )
+inline void vecsCmdUnset( vecsCommandBuffer* cb, vecsEntity e )
 {
     assert( cb );
     if ( cb->commandCount == cb->commandCapacity )
     {
-        veCmdGrowCommands( cb );
+        vecsCmdGrowCommands( cb );
     }
-    veCommand& cmd = cb->commands[cb->commandCount++];
-    cmd.type = veCommand::UNSET_COMPONENT;
+    vecsCommand& cmd = cb->commands[cb->commandCount++];
+    cmd.type = vecsCommand::UNSET_COMPONENT;
     cmd.entity = e;
-    cmd.componentId = veTypeId<T>();
+    cmd.componentId = vecsTypeId<T>();
     cmd.dataOffset = 0;
     cmd.dataSize = 0;
     cmd.createdIndex = VECS_INVALID_INDEX;
-    cmd.pool = veDetail::getPool<T>( cb->world );
+    cmd.pool = vecsDetail::getPool<T>( cb->world );
     cmd.parent = VECS_INVALID_ENTITY;
 }
 
-inline void veCmdSetParent( veCommandBuffer* cb, veEntity child, veEntity parent )
+inline void vecsCmdSetParent( vecsCommandBuffer* cb, vecsEntity child, vecsEntity parent )
 {
     assert( cb );
     if ( cb->commandCount == cb->commandCapacity )
     {
-        veCmdGrowCommands( cb );
+        vecsCmdGrowCommands( cb );
     }
-    veCommand& cmd = cb->commands[cb->commandCount++];
-    cmd.type = veCommand::SET_PARENT;
+    vecsCommand& cmd = cb->commands[cb->commandCount++];
+    cmd.type = vecsCommand::SET_PARENT;
     cmd.entity = child;
     cmd.componentId = VECS_INVALID_INDEX;
     cmd.dataOffset = 0;
@@ -2675,26 +2675,26 @@ inline void veCmdSetParent( veCommandBuffer* cb, veEntity child, veEntity parent
     cmd.parent = parent;
 }
 
-inline void veFlush( veCommandBuffer* cb )
+inline void vecsFlush( vecsCommandBuffer* cb )
 {
     assert( cb );
     for ( uint32_t i = 0; i < cb->commandCount; i++ )
     {
-        const veCommand& cmd = cb->commands[i];
+        const vecsCommand& cmd = cb->commands[i];
         switch ( cmd.type )
         {
-            case veCommand::CREATE:
-                cb->created[cmd.createdIndex] = veCreate( cb->world );
+            case vecsCommand::CREATE:
+                cb->created[cmd.createdIndex] = vecsCreate( cb->world );
                 break;
-            case veCommand::DESTROY:
-                if ( veAlive( cb->world, cmd.entity ) )
+            case vecsCommand::DESTROY:
+                if ( vecsAlive( cb->world, cmd.entity ) )
                 {
-                    veDestroy( cb->world, cmd.entity );
+                    vecsDestroy( cb->world, cmd.entity );
                 }
                 break;
-            case veCommand::SET_COMPONENT:
+            case vecsCommand::SET_COMPONENT:
                 {
-                    veEntity target = cmd.entity;
+                    vecsEntity target = cmd.entity;
                     if ( target == VECS_INVALID_ENTITY && cmd.createdIndex != VECS_INVALID_INDEX )
                     {
                         if ( cmd.createdIndex < cb->createdCount )
@@ -2702,46 +2702,46 @@ inline void veFlush( veCommandBuffer* cb )
                             target = cb->created[cmd.createdIndex];
                         }
                     }
-                    if ( !veAlive( cb->world, target ) )
+                    if ( !vecsAlive( cb->world, target ) )
                     {
                         break;
                     }
-                    uint32_t idx = veEntityIndex( target );
+                    uint32_t idx = vecsEntityIndex( target );
                     if ( cmd.pool->noData )
                     {
-                        if ( !vePoolHas( cmd.pool, idx ) )
+                        if ( !vecsPoolHas( cmd.pool, idx ) )
                         {
-                            vePoolSet( cmd.pool, idx, nullptr );
+                            vecsPoolSet( cmd.pool, idx, nullptr );
                         }
                     }
                     else
                     {
                         void* data = cb->dataBuffer + cmd.dataOffset;
-                        if ( vePoolHas( cmd.pool, idx ) )
+                        if ( vecsPoolHas( cmd.pool, idx ) )
                         {
-                            std::memcpy( vePoolGet( cmd.pool, idx ), data, cmd.dataSize );
+                            std::memcpy( vecsPoolGet( cmd.pool, idx ), data, cmd.dataSize );
                         }
                         else
                         {
-                            vePoolSet( cmd.pool, idx, data );
+                            vecsPoolSet( cmd.pool, idx, data );
                         }
                     }
                 }
                 break;
-            case veCommand::UNSET_COMPONENT:
-                if ( veAlive( cb->world, cmd.entity ) && cmd.pool )
+            case vecsCommand::UNSET_COMPONENT:
+                if ( vecsAlive( cb->world, cmd.entity ) && cmd.pool )
                 {
-                    uint32_t idx = veEntityIndex( cmd.entity );
-                    if ( vePoolHas( cmd.pool, idx ) )
+                    uint32_t idx = vecsEntityIndex( cmd.entity );
+                    if ( vecsPoolHas( cmd.pool, idx ) )
                     {
-                        vePoolUnset( cmd.pool, idx );
+                        vecsPoolUnset( cmd.pool, idx );
                     }
                 }
                 break;
-            case veCommand::SET_PARENT:
-                if ( veAlive( cb->world, cmd.entity ) )
+            case vecsCommand::SET_PARENT:
+                if ( vecsAlive( cb->world, cmd.entity ) )
                 {
-                    veSetChildOf( cb->world, cmd.entity, cmd.parent );
+                    vecsSetChildOf( cb->world, cmd.entity, cmd.parent );
                 }
                 break;
             default:
@@ -2753,20 +2753,20 @@ inline void veFlush( veCommandBuffer* cb )
     cb->dataSize = 0;
 }
 
-inline veEntity veCmdGetCreated( veCommandBuffer* cb, uint32_t index )
+inline vecsEntity vecsCmdGetCreated( vecsCommandBuffer* cb, uint32_t index )
 {
     assert( cb );
     assert( index < cb->createdCount );
     return cb->created[index];
 }
 
-inline void veCreateBatch( veWorld* w, veEntity* out, uint32_t count )
+inline void vecsCreateBatch( vecsWorld* w, vecsEntity* out, uint32_t count )
 {
     assert( w );
     assert( out );
     for ( uint32_t i = 0; i < count; i++ )
     {
-        out[i] = veCreate( w );
+        out[i] = vecsCreate( w );
     }
 }
 
