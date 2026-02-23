@@ -74,4 +74,104 @@ UTEST( entity, generation_overflow_wraps )
     veDestroyEntityPool( pool );
 }
 
+UTEST( bitfield, set_has_clear )
+{
+    veBitfield bf = {};
+    ASSERT_FALSE( veBitfieldHas( &bf, 0u ) );
+    veBitfieldSet( &bf, 0u );
+    ASSERT_TRUE( veBitfieldHas( &bf, 0u ) );
+    veBitfieldUnset( &bf, 0u );
+    ASSERT_FALSE( veBitfieldHas( &bf, 0u ) );
+}
+
+UTEST( bitfield, scattered_bits )
+{
+    veBitfield bf = {};
+    veBitfieldSet( &bf, 0u );
+    veBitfieldSet( &bf, 63u );
+    veBitfieldSet( &bf, 64u );
+    veBitfieldSet( &bf, 4095u );
+    veBitfieldSet( &bf, 4096u );
+    veBitfieldSet( &bf, 65535u );
+    ASSERT_EQ( veBitfieldCount( &bf ), 6u );
+    ASSERT_TRUE( veBitfieldHas( &bf, 0u ) );
+    ASSERT_TRUE( veBitfieldHas( &bf, 63u ) );
+    ASSERT_TRUE( veBitfieldHas( &bf, 64u ) );
+    ASSERT_TRUE( veBitfieldHas( &bf, 4095u ) );
+    ASSERT_TRUE( veBitfieldHas( &bf, 4096u ) );
+    ASSERT_TRUE( veBitfieldHas( &bf, 65535u ) );
+    ASSERT_FALSE( veBitfieldHas( &bf, 1u ) );
+    ASSERT_FALSE( veBitfieldHas( &bf, 62u ) );
+    ASSERT_FALSE( veBitfieldHas( &bf, 65u ) );
+}
+
+UTEST( bitfield, iteration_order )
+{
+    veBitfield bf = {};
+    uint32_t expected[] = { 5u, 100u, 1000u, 50000u };
+    for ( uint32_t idx : expected )
+    {
+        veBitfieldSet( &bf, idx );
+    }
+
+    uint32_t collected[4] = {};
+    uint32_t n = 0;
+    veBitfieldEach( &bf, [&]( uint32_t index ) { collected[n++] = index; } );
+
+    ASSERT_EQ( n, 4u );
+    for ( uint32_t i = 0; i < 4u; i++ )
+    {
+        ASSERT_EQ( collected[i], expected[i] );
+    }
+}
+
+UTEST( bitfield, join )
+{
+    veBitfield a = {}, b = {};
+    veBitfieldSet( &a, 10u );
+    veBitfieldSet( &a, 20u );
+    veBitfieldSet( &a, 30u );
+    veBitfieldSet( &b, 20u );
+    veBitfieldSet( &b, 30u );
+    veBitfieldSet( &b, 40u );
+
+    uint32_t collected[4] = {};
+    uint32_t n = 0;
+    veBitfieldJoin( &a, &b, [&]( uint32_t index ) { collected[n++] = index; } );
+
+    ASSERT_EQ( n, 2u );
+    ASSERT_EQ( collected[0], 20u );
+    ASSERT_EQ( collected[1], 30u );
+}
+
+UTEST( bitfield, top_mask_auto_clear )
+{
+    veBitfield bf = {};
+    veBitfieldSet( &bf, 100u );
+    ASSERT_NE( bf.topMasks[100u / 4096u], 0ULL );
+    veBitfieldUnset( &bf, 100u );
+    uint32_t n = 0;
+    veBitfieldEach( &bf, [&]( uint32_t ) { n++; } );
+    ASSERT_EQ( n, 0u );
+}
+
+UTEST( bitfield, clear_all )
+{
+    veBitfield bf = {};
+    for ( uint32_t i = 0; i < 1000u; i++ )
+    {
+        veBitfieldSet( &bf, i * 50u );
+    }
+    veBitfieldClearAll( &bf );
+    ASSERT_EQ( veBitfieldCount( &bf ), 0u );
+}
+
+UTEST( bitfield, boundary_last_entity )
+{
+    veBitfield bf = {};
+    veBitfieldSet( &bf, VECS_MAX_ENTITIES - 1u );
+    ASSERT_TRUE( veBitfieldHas( &bf, VECS_MAX_ENTITIES - 1u ) );
+    ASSERT_EQ( veBitfieldCount( &bf ), 1u );
+}
+
 UTEST_MAIN();

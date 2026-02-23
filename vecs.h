@@ -155,6 +155,108 @@ inline bool veEntityPoolAlive( veEntityPool* pool, veEntity entity )
 // Bitfield
 // --------------------------------------------------------------------------
 
+struct veBitfield
+{
+    uint64_t topMasks[VECS_TOP_COUNT];
+    uint64_t l2Masks[VECS_L2_COUNT];
+};
+
+inline void veBitfieldClearAll( veBitfield* bf )
+{
+    assert( bf );
+    std::memset( bf, 0, sizeof( veBitfield ) );
+}
+
+inline void veBitfieldSet( veBitfield* bf, uint32_t index )
+{
+    assert( bf );
+    assert( index < VECS_MAX_ENTITIES );
+    uint32_t l2 = index >> 6;
+    uint32_t bit = index & 63u;
+    bf->l2Masks[l2] |= ( 1ULL << bit );
+    bf->topMasks[l2 >> 6] |= ( 1ULL << ( l2 & 63u ) );
+}
+
+inline void veBitfieldUnset( veBitfield* bf, uint32_t index )
+{
+    assert( bf );
+    assert( index < VECS_MAX_ENTITIES );
+    uint32_t l2 = index >> 6;
+    uint32_t bit = index & 63u;
+    bf->l2Masks[l2] &= ~( 1ULL << bit );
+    if ( bf->l2Masks[l2] == 0 )
+    {
+        bf->topMasks[l2 >> 6] &= ~( 1ULL << ( l2 & 63u ) );
+    }
+}
+
+inline bool veBitfieldHas( const veBitfield* bf, uint32_t index )
+{
+    assert( bf );
+    assert( index < VECS_MAX_ENTITIES );
+    uint32_t l2 = index >> 6;
+    uint32_t bit = index & 63u;
+    return ( bf->l2Masks[l2] & ( 1ULL << bit ) ) != 0;
+}
+
+inline uint32_t veBitfieldCount( const veBitfield* bf )
+{
+    assert( bf );
+    uint32_t total = 0;
+    for ( uint32_t i = 0; i < VECS_L2_COUNT; i++ )
+    {
+        total += vePopcnt( bf->l2Masks[i] );
+    }
+    return total;
+}
+
+template< typename Fn >
+inline void veBitfieldEach( const veBitfield* bf, Fn&& fn )
+{
+    assert( bf );
+    for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti++ )
+    {
+        uint64_t top = bf->topMasks[ti];
+        while ( top )
+        {
+            uint32_t tb = veTzcnt( top );
+            uint32_t l2Idx = ti * 64u + tb;
+            uint64_t l2 = bf->l2Masks[l2Idx];
+            while ( l2 )
+            {
+                uint32_t lb = veTzcnt( l2 );
+                fn( l2Idx * 64u + lb );
+                l2 &= l2 - 1;
+            }
+            top &= top - 1;
+        }
+    }
+}
+
+template< typename Fn >
+inline void veBitfieldJoin( const veBitfield* a, const veBitfield* b, Fn&& fn )
+{
+    assert( a );
+    assert( b );
+    for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti++ )
+    {
+        uint64_t top = a->topMasks[ti] & b->topMasks[ti];
+        while ( top )
+        {
+            uint32_t tb = veTzcnt( top );
+            uint32_t l2Idx = ti * 64u + tb;
+            uint64_t l2 = a->l2Masks[l2Idx] & b->l2Masks[l2Idx];
+            while ( l2 )
+            {
+                uint32_t lb = veTzcnt( l2 );
+                fn( l2Idx * 64u + lb );
+                l2 &= l2 - 1;
+            }
+            top &= top - 1;
+        }
+    }
+}
+
 // --------------------------------------------------------------------------
 // Component Pool
 // --------------------------------------------------------------------------
