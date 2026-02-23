@@ -568,4 +568,105 @@ UTEST( batch, create )
     veDestroyWorld( w );
 }
 
+UTEST( simd, join_two_components )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    for ( uint32_t i = 0; i < 500u; i++ )
+    {
+        veEntity e = veCreate( w );
+        veSet<Position>( w, e, { ( float )i, 0 } );
+        if ( ( i % 2u ) == 0u )
+        {
+            veSet<Velocity>( w, e, { ( float )i * 10.0f, 0 } );
+        }
+    }
+
+    uint32_t count = 0;
+    veEach<Position, Velocity>( w, [&]( veEntity, Position&, Velocity& ) { count++; } );
+    ASSERT_EQ( count, 250u );
+    veDestroyWorld( w );
+}
+
+UTEST( simd, join_three_components )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    for ( uint32_t i = 0; i < 300u; i++ )
+    {
+        veEntity e = veCreate( w );
+        veSet<Position>( w, e, { ( float )i, 0 } );
+        if ( ( i % 3u ) == 0u )
+        {
+            veSet<Velocity>( w, e, { ( float )i, 0 } );
+        }
+        if ( ( i % 5u ) == 0u )
+        {
+            veSet<Health>( w, e, { ( int )i } );
+        }
+    }
+
+    uint32_t count = 0;
+    veEach<Position, Velocity, Health>( w, [&]( veEntity, Position&, Velocity&, Health& ) { count++; } );
+    ASSERT_EQ( count, 20u );
+    veDestroyWorld( w );
+}
+
+UTEST( simd, sparse_entities )
+{
+    veWorld* w = veCreateWorld();
+    veEntity entities[10];
+    for ( int i = 0; i < 10; i++ )
+    {
+        entities[i] = veCreate( w );
+        veSet<Position>( w, entities[i], { ( float )i, 0 } );
+        veSet<Velocity>( w, entities[i], { ( float )i * 10.0f, 0 } );
+    }
+
+    float sum = 0.0f;
+    veEach<Position, Velocity>( w, [&]( veEntity, Position& p, Velocity& v ) { sum += p.x + v.vx; } );
+    ASSERT_EQ( sum, 495.0f );
+    veDestroyWorld( w );
+}
+
+UTEST( simd, empty_skip )
+{
+    veWorld* w = veCreateWorld();
+    veEntity e = veCreate( w );
+    veSet<Position>( w, e, { 42.0f, 0 } );
+    veSet<Velocity>( w, e, { 1.0f, 0 } );
+
+    uint32_t count = 0;
+    veEach<Position, Velocity>( w, [&]( veEntity, Position& p, Velocity& )
+    {
+        ASSERT_EQ( p.x, 42.0f );
+        count++;
+    } );
+    ASSERT_EQ( count, 1u );
+    veDestroyWorld( w );
+}
+
+UTEST( simd, scalar_simd_parity )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    for ( uint32_t i = 0; i < 200u; i++ )
+    {
+        veEntity e = veCreate( w );
+        veSet<Position>( w, e, { ( float )i, ( float )( i * 2u ) } );
+        if ( ( i % 3u ) == 0u )
+        {
+            veSet<Velocity>( w, e, { ( float )i, 0 } );
+        }
+    }
+
+    float sum = 0.0f;
+    uint32_t count = 0;
+    veEach<Position, Velocity>( w, [&]( veEntity, Position& p, Velocity& v )
+    {
+        sum += p.x + v.vx;
+        count++;
+    } );
+    ASSERT_EQ( count, 67u );
+    ASSERT_TRUE( sum > 0.0f );
+    veDestroyWorld( w );
+}
+
 UTEST_MAIN();
