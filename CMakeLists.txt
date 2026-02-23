@@ -11,7 +11,7 @@ elseif ( APPLE )
     add_compile_options( -Wall -Wextra -Wpedantic -stdlib=libc++ -mavx2 )
     add_link_options( -stdlib=libc++ )
 else()
-    add_compile_options( -Wall -Wextra -Wpedantic -stdlib=libc++ -mavx2 )
+    add_compile_options( -Wall -Wextra -Wpedantic -stdlib=libc++ -fno-exceptions -mavx2 )
     add_link_options( -stdlib=libc++ )
 endif()
 

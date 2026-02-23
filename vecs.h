@@ -29,7 +29,6 @@
 #include <type_traits>
 #include <tuple>
 #include <utility>
-#include <stdexcept>
 
 #ifndef VECS_NO_SIMD
     #if defined( __AVX2__ )
