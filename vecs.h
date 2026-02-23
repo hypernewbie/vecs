@@ -742,10 +742,25 @@ struct veWorld
     uint32_t maxEntities;
 };
 
-inline uint32_t veNextTypeId()
+inline uint32_t& veGetTypeIdCounterMutable()
 {
     static uint32_t counter = 0;
-    return counter++;
+    return counter;
+}
+
+inline uint32_t veNextTypeId()
+{
+    return veGetTypeIdCounterMutable()++;
+}
+
+inline uint32_t veGetTypeIdCounter()
+{
+    return veGetTypeIdCounterMutable();
+}
+
+inline void veSetTypeIdCounter( uint32_t value )
+{
+    veGetTypeIdCounterMutable() = value;
 }
 
 template< typename T >
@@ -2022,6 +2037,204 @@ inline void veEach( veWorld* w, Fn&& fn )
 }
 
 // --------------------------------------------------------------------------
+// In-Place Emplacement
+// --------------------------------------------------------------------------
+
+template< typename T, typename... Args >
+inline T* veEmplace( veWorld* w, veEntity e, Args&&... args )
+{
+    assert( veAlive( w, e ) );
+    vePool* pool = veEnsurePool<T>( w );
+    uint32_t idx = veEntityIndex( e );
+    uint32_t componentId = veTypeId<T>();
+    
+    if ( vePoolHas( pool, idx ) )
+    {
+        T* ptr = ( T* )vePoolGet( pool, idx );
+        if constexpr ( !std::is_empty<T>::value )
+        {
+            if constexpr ( !std::is_trivially_destructible<T>::value )
+            {
+                ptr->~T();
+            }
+            new ( ptr ) T( std::forward<Args>( args )... );
+        }
+        return ptr;
+    }
+    
+    T* result = nullptr;
+    if constexpr ( std::is_empty<T>::value )
+    {
+        vePoolSet( pool, idx, nullptr );
+        static T tagValue = {};
+        result = &tagValue;
+    }
+    else
+    {
+        if ( pool->count == pool->capacity )
+        {
+            vePoolGrow( pool );
+        }
+        uint32_t denseIdx = pool->count++;
+        pool->sparse[idx] = denseIdx;
+        pool->denseEntities[denseIdx] = idx;
+        result = ( T* )( pool->denseData + ( size_t )denseIdx * pool->stride );
+        new ( result ) T( std::forward<Args>( args )... );
+        veBitfieldSet( &pool->bitfield, idx );
+    }
+    
+    for ( uint32_t i = 0; i < w->observers->count; i++ )
+    {
+        veObserver& obs = w->observers->observers[i];
+        if ( obs.onAdd && obs.componentId == componentId )
+        {
+            obs.callback( w, e, result );
+        }
+    }
+    return result;
+}
+
+template< typename T >
+inline void veAddTag( veWorld* w, veEntity e )
+{
+    static_assert( std::is_empty<T>::value, "veAddTag can only be used on empty structs (tags)" );
+    assert( veAlive( w, e ) );
+    vePool* pool = veEnsurePool<T>( w );
+    uint32_t idx = veEntityIndex( e );
+    uint32_t componentId = veTypeId<T>();
+    
+    if ( vePoolHas( pool, idx ) )
+    {
+        return;
+    }
+    
+    vePoolSet( pool, idx, nullptr );
+    static T tagValue = {};
+    
+    for ( uint32_t i = 0; i < w->observers->count; i++ )
+    {
+        veObserver& obs = w->observers->observers[i];
+        if ( obs.onAdd && obs.componentId == componentId )
+        {
+            obs.callback( w, e, &tagValue );
+        }
+    }
+}
+
+// --------------------------------------------------------------------------
+// Variadic Helpers
+// --------------------------------------------------------------------------
+
+template< typename... T >
+inline bool veHasAll( veWorld* w, veEntity e )
+{
+    return ( veHas<T>( w, e ) && ... );
+}
+
+template< typename... T >
+inline void veRemoveAll( veWorld* w, veEntity e )
+{
+    ( veUnset<T>( w, e ), ... );
+}
+
+template< typename... T >
+inline bool veHasAny( veWorld* w, veEntity e )
+{
+    return ( veHas<T>( w, e ) || ... );
+}
+
+// --------------------------------------------------------------------------
+// veEach with Optional Entity Parameter
+// --------------------------------------------------------------------------
+
+namespace veDetail
+{
+
+template< typename... With, typename Tuple, typename Fn, size_t... I >
+inline void invokeJoinNoEntity( Tuple& pools, uint32_t entityIdx, Fn&& fn, std::index_sequence<I...> )
+{
+    fn( *getData<With>( std::get<I>( pools ), entityIdx )... );
+}
+
+template< typename... With, typename Tuple, typename Fn >
+inline void eachJoinScalarNoEntity( veWorld* w, Tuple& pools, Fn&& fn )
+{
+    for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti++ )
+    {
+        uint64_t top = UINT64_MAX;
+        forEachPool( pools, [&]( vePool* pool ) { top &= pool->bitfield.topMasks[ti]; } );
+        while ( top )
+        {
+            uint32_t tb = veTzcnt( top );
+            uint32_t l2Idx = ti * 64u + tb;
+            uint64_t l2 = UINT64_MAX;
+            forEachPool( pools, [&]( vePool* pool ) { l2 &= pool->bitfield.l2Masks[l2Idx]; } );
+            while ( l2 )
+            {
+                uint32_t lb = veTzcnt( l2 );
+                uint32_t entityIdx = l2Idx * 64u + lb;
+                invokeJoinNoEntity<With...>( pools, entityIdx, fn, std::make_index_sequence<sizeof...( With )>() );
+                l2 &= l2 - 1;
+            }
+            top &= top - 1;
+        }
+    }
+}
+
+template< size_t N >
+struct veLambdaTraits
+{
+    static constexpr size_t ArgCount = N;
+};
+
+template< typename R, typename C, typename... Args >
+veLambdaTraits<sizeof...( Args )> veDetectLambdaArgs( R ( C::* )( Args... ) const );
+
+template< typename R, typename C, typename... Args >
+veLambdaTraits<sizeof...( Args )> veDetectLambdaArgs( R ( C::* )( Args... ) );
+
+}
+
+template< typename... With, typename Fn >
+inline void veEachNoEntity( veWorld* w, Fn&& fn )
+{
+    constexpr size_t N = sizeof...( With );
+    static_assert( N >= 1, "veEachNoEntity requires at least one component type" );
+    
+    if constexpr ( N == 1 )
+    {
+        using First = std::tuple_element_t<0, std::tuple<With...>>;
+        vePool* pool = veDetail::getPool<First>( w );
+        if ( !pool )
+        {
+            return;
+        }
+        for ( uint32_t i = 0; i < pool->count; i++ )
+        {
+            First* data = veDetail::getData<First>( pool, pool->denseEntities[i] );
+            fn( *data );
+        }
+    }
+    else
+    {
+        auto pools = std::make_tuple( veDetail::getPool<With>( w )... );
+        bool invalid = false;
+        veDetail::forEachPool( pools, [&]( vePool* pool )
+        {
+            if ( !pool || pool->count == 0 )
+            {
+                invalid = true;
+            }
+        } );
+        if ( invalid )
+        {
+            return;
+        }
+        veDetail::eachJoinScalarNoEntity<With...>( w, pools, fn );
+    }
+}
+
+// --------------------------------------------------------------------------
 // Singleton
 // --------------------------------------------------------------------------
 
@@ -2115,6 +2328,109 @@ inline veEntity veGetChildEntity( veWorld* w, veEntity parent, uint32_t index )
         return VECS_INVALID_ENTITY;
     }
     return veGetChild( w->relationships, parent, index );
+}
+
+// --------------------------------------------------------------------------
+// Entity Handle Wrapper
+// --------------------------------------------------------------------------
+
+struct veHandle
+{
+    veWorld* w;
+    veEntity e;
+    
+    template< typename T, typename... Args >
+    T* emplace( Args&&... args )
+    {
+        return veEmplace<T>( w, e, std::forward<Args>( args )... );
+    }
+    
+    template< typename T >
+    T* set( const T& val = {} )
+    {
+        return veSet<T>( w, e, val );
+    }
+    
+    template< typename T >
+    T* get()
+    {
+        return veGet<T>( w, e );
+    }
+    
+    template< typename T >
+    bool has() const
+    {
+        return veHas<T>( w, e );
+    }
+    
+    template< typename T >
+    void remove()
+    {
+        veUnset<T>( w, e );
+    }
+    
+    template< typename... T >
+    bool hasAll() const
+    {
+        return veHasAll<T...>( w, e );
+    }
+    
+    template< typename... T >
+    void removeAll()
+    {
+        veRemoveAll<T...>( w, e );
+    }
+    
+    template< typename T >
+    void addTag()
+    {
+        veAddTag<T>( w, e );
+    }
+    
+    void setParent( veEntity parent )
+    {
+        veSetChildOf( w, e, parent );
+    }
+    
+    veEntity parent() const
+    {
+        return veGetParentEntity( w, e );
+    }
+    
+    uint32_t childCount() const
+    {
+        return veGetChildEntityCount( w, e );
+    }
+    
+    veEntity child( uint32_t index ) const
+    {
+        return veGetChildEntity( w, e, index );
+    }
+    
+    bool alive() const
+    {
+        return veAlive( w, e );
+    }
+    
+    void destroy()
+    {
+        veDestroy( w, e );
+    }
+    
+    veEntity id() const
+    {
+        return e;
+    }
+};
+
+inline veHandle veCreateHandle( veWorld* w )
+{
+    return { w, veCreate( w ) };
+}
+
+inline veHandle veMakeHandle( veWorld* w, veEntity e )
+{
+    return { w, e };
 }
 
 // --------------------------------------------------------------------------

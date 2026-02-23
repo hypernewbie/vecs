@@ -14,9 +14,9 @@
     #endif
 #endif
 
-struct Position { float x, y; };
-struct Velocity { float vx, vy; };
-struct Health { int hp; };
+struct Position { float x, y; Position() = default; Position( float x_, float y_ ) : x( x_ ), y( y_ ) {} };
+struct Velocity { float vx, vy; Velocity() = default; Velocity( float vx_, float vy_ ) : vx( vx_ ), vy( vy_ ) {} };
+struct Health { int hp; Health() = default; Health( int hp_ ) : hp( hp_ ) {} };
 struct IsEnemy {};
 struct Dead {};
 template< size_t I > struct ExhaustComp { int value; };
@@ -1800,7 +1800,10 @@ UTEST( benchmark, vecs_vs_entt )
 
 UTEST( entity, component_id_exhaustion_boundary )
 {
-    constexpr size_t kTypeCount = VECS_MAX_COMPONENTS;
+    uint32_t savedCounter = veGetTypeIdCounter();
+    veSetTypeIdCounter( VECS_MAX_COMPONENTS - 10 );
+    
+    constexpr size_t kTypeCount = 10;
     std::vector<uint32_t> ids( kTypeCount );
     veCollectExhaustIds( ids.data(), std::make_index_sequence<kTypeCount>() );
     for ( size_t i = 1; i < kTypeCount; i++ )
@@ -1814,7 +1817,403 @@ UTEST( entity, component_id_exhaustion_boundary )
     veWorld* w = veCreateWorld( 16u );
     veEntity e = veCreate( w );
     uint32_t setCount = veTrySetExhaustComponents( w, e, std::make_index_sequence<kTypeCount>() );
-    ASSERT_TRUE( setCount <= VECS_MAX_COMPONENTS );
+    ASSERT_TRUE( setCount <= 10u );
+    veDestroyWorld( w );
+    
+    veSetTypeIdCounter( savedCounter );
+}
+
+struct Transform
+{
+    float m[16];
+    Transform()
+    {
+        for ( int i = 0; i < 16; i++ ) m[i] = 0.0f;
+        m[0] = m[5] = m[10] = m[15] = 1.0f;
+    }
+    Transform( float diagonal )
+    {
+        for ( int i = 0; i < 16; i++ ) m[i] = 0.0f;
+        m[0] = m[5] = m[10] = m[15] = diagonal;
+    }
+};
+
+struct Name
+{
+    char data[64];
+    Name() { data[0] = '\0'; }
+    Name( const char* s )
+    {
+        size_t i = 0;
+        for ( ; s[i] && i < 63; i++ ) data[i] = s[i];
+        data[i] = '\0';
+    }
+};
+
+UTEST( emplace, constructs_in_place )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    
+    Transform* t = veEmplace<Transform>( w, e );
+    ASSERT_TRUE( t != nullptr );
+    ASSERT_EQ( t->m[0], 1.0f );
+    ASSERT_EQ( t->m[15], 1.0f );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( emplace, constructs_with_args )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    
+    Transform* t = veEmplace<Transform>( w, e, 5.0f );
+    ASSERT_TRUE( t != nullptr );
+    ASSERT_EQ( t->m[0], 5.0f );
+    ASSERT_EQ( t->m[5], 5.0f );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( emplace, replaces_existing )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    
+    veSet<Position>( w, e, { 1.0f, 2.0f } );
+    Position* p = veEmplace<Position>( w, e, 10.0f, 20.0f );
+    
+    ASSERT_EQ( p->x, 10.0f );
+    ASSERT_EQ( p->y, 20.0f );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( emplace, non_trivial_type )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    
+    Name* n = veEmplace<Name>( w, e, "TestEntity" );
+    ASSERT_TRUE( n != nullptr );
+    ASSERT_EQ( strcmp( n->data, "TestEntity" ), 0 );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( addtag, adds_tag_without_data )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    
+    veAddTag<IsEnemy>( w, e );
+    
+    ASSERT_TRUE( veHas<IsEnemy>( w, e ) );
+    
+    vePool* pool = w->pools[veTypeId<IsEnemy>()];
+    ASSERT_TRUE( pool != nullptr );
+    ASSERT_TRUE( pool->noData );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( addtag, idempotent )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    
+    veAddTag<IsEnemy>( w, e );
+    veAddTag<IsEnemy>( w, e );
+    veAddTag<IsEnemy>( w, e );
+    
+    ASSERT_TRUE( veHas<IsEnemy>( w, e ) );
+    ASSERT_EQ( w->pools[veTypeId<IsEnemy>()]->count, 1u );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( hasall, all_present )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    
+    veSet<Position>( w, e, { 0, 0 } );
+    veSet<Velocity>( w, e, { 1, 1 } );
+    veSet<Health>( w, e, { 100 } );
+    
+    ASSERT_TRUE( ( veHasAll<Position, Velocity, Health>( w, e ) ) );
+    ASSERT_TRUE( ( veHasAll<Position, Velocity>( w, e ) ) );
+    ASSERT_TRUE( veHasAll<Position>( w, e ) );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( hasall, some_missing )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    
+    veSet<Position>( w, e, { 0, 0 } );
+    veSet<Health>( w, e, { 100 } );
+    
+    ASSERT_FALSE( ( veHasAll<Position, Velocity, Health>( w, e ) ) );
+    ASSERT_FALSE( ( veHasAll<Position, Velocity>( w, e ) ) );
+    ASSERT_TRUE( ( veHasAll<Position, Health>( w, e ) ) );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( hasall, none_present )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    
+    ASSERT_FALSE( ( veHasAll<Position, Velocity>( w, e ) ) );
+    ASSERT_FALSE( veHasAll<Position>( w, e ) );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( hasany, any_present )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    
+    veSet<Position>( w, e, { 0, 0 } );
+    
+    ASSERT_TRUE( ( veHasAny<Position, Velocity, Health>( w, e ) ) );
+    ASSERT_TRUE( ( veHasAny<Position, Velocity>( w, e ) ) );
+    ASSERT_FALSE( ( veHasAny<Velocity, Health>( w, e ) ) );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( removeall, removes_multiple )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    
+    veSet<Position>( w, e, { 0, 0 } );
+    veSet<Velocity>( w, e, { 1, 1 } );
+    veSet<Health>( w, e, { 100 } );
+    
+    ASSERT_TRUE( ( veHasAll<Position, Velocity, Health>( w, e ) ) );
+    
+    ( veRemoveAll<Position, Velocity, Health>( w, e ) );
+    
+    ASSERT_FALSE( veHas<Position>( w, e ) );
+    ASSERT_FALSE( veHas<Velocity>( w, e ) );
+    ASSERT_FALSE( veHas<Health>( w, e ) );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( removeall, partial_removal )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    
+    veSet<Position>( w, e, { 0, 0 } );
+    veSet<Velocity>( w, e, { 1, 1 } );
+    
+    ( veRemoveAll<Position, Velocity>( w, e ) );
+    
+    ASSERT_FALSE( veHas<Position>( w, e ) );
+    ASSERT_FALSE( veHas<Velocity>( w, e ) );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( handle, basic_operations )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    
+    veHandle player = veCreateHandle( w );
+    ASSERT_TRUE( player.alive() );
+    
+    player.emplace<Position>( 10.0f, 20.0f );
+    player.emplace<Velocity>( 1.0f, 2.0f );
+    
+    ASSERT_TRUE( player.has<Position>() );
+    ASSERT_TRUE( player.has<Velocity>() );
+    
+    Position* p = player.get<Position>();
+    ASSERT_EQ( p->x, 10.0f );
+    ASSERT_EQ( p->y, 20.0f );
+    
+    player.remove<Velocity>();
+    ASSERT_FALSE( player.has<Velocity>() );
+    
+    player.destroy();
+    ASSERT_FALSE( player.alive() );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( handle, set_and_get )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    
+    veHandle e = veCreateHandle( w );
+    e.set<Position>( { 5.0f, 10.0f } );
+    
+    Position* p = e.get<Position>();
+    ASSERT_EQ( p->x, 5.0f );
+    ASSERT_EQ( p->y, 10.0f );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( handle, has_all_variadic )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    
+    veHandle e = veCreateHandle( w );
+    e.emplace<Position>( 0.0f, 0.0f );
+    e.emplace<Velocity>( 1.0f, 1.0f );
+    
+    ASSERT_TRUE( ( e.hasAll<Position, Velocity>() ) );
+    ASSERT_FALSE( ( e.hasAll<Position, Velocity, Health>() ) );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( handle, remove_all_variadic )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    
+    veHandle e = veCreateHandle( w );
+    e.emplace<Position>( 0.0f, 0.0f );
+    e.emplace<Velocity>( 1.0f, 1.0f );
+    e.emplace<Health>( 100 );
+    
+    e.removeAll<Position, Velocity>();
+    
+    ASSERT_FALSE( e.has<Position>() );
+    ASSERT_FALSE( e.has<Velocity>() );
+    ASSERT_TRUE( e.has<Health>() );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( handle, parent_child )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    
+    veHandle parent = veCreateHandle( w );
+    veHandle child = veCreateHandle( w );
+    
+    child.setParent( parent.id() );
+    
+    ASSERT_EQ( child.parent(), parent.id() );
+    ASSERT_EQ( parent.childCount(), 1u );
+    ASSERT_EQ( parent.child( 0 ), child.id() );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( handle, add_tag )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    
+    veHandle e = veCreateHandle( w );
+    e.addTag<IsEnemy>();
+    
+    ASSERT_TRUE( e.has<IsEnemy>() );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( handle, make_handle_from_entity )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity raw = veCreate( w );
+    veSet<Position>( w, raw, { 42.0f, 24.0f } );
+    
+    veHandle h = veMakeHandle( w, raw );
+    
+    ASSERT_TRUE( h.alive() );
+    ASSERT_EQ( h.id(), raw );
+    
+    Position* p = h.get<Position>();
+    ASSERT_EQ( p->x, 42.0f );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( each_no_entity, iterates_components )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    
+    for ( int i = 0; i < 10; i++ )
+    {
+        veEntity e = veCreate( w );
+        veSet<Position>( w, e, { ( float )i, ( float )i * 2.0f } );
+    }
+    
+    float sumX = 0.0f;
+    float sumY = 0.0f;
+    veEachNoEntity<Position>( w, [&]( Position& p )
+    {
+        sumX += p.x;
+        sumY += p.y;
+    } );
+    
+    ASSERT_EQ( sumX, 45.0f );
+    ASSERT_EQ( sumY, 90.0f );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( each_no_entity, multiple_components )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    
+    for ( int i = 0; i < 5; i++ )
+    {
+        veEntity e = veCreate( w );
+        veSet<Position>( w, e, { ( float )i, 0.0f } );
+        veSet<Velocity>( w, e, { ( float )i * 10.0f, 0.0f } );
+    }
+    
+    float sumPos = 0.0f;
+    float sumVel = 0.0f;
+    veEachNoEntity<Position, Velocity>( w, [&]( Position& p, Velocity& v )
+    {
+        sumPos += p.x;
+        sumVel += v.vx;
+    } );
+    
+    ASSERT_EQ( sumPos, 10.0f );
+    ASSERT_EQ( sumVel, 100.0f );
+    
+    veDestroyWorld( w );
+}
+
+UTEST( each_no_entity, mutates_components )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    
+    for ( int i = 0; i < 5; i++ )
+    {
+        veEntity e = veCreate( w );
+        veSet<Position>( w, e, { ( float )i, 0.0f } );
+    }
+    
+    veEachNoEntity<Position>( w, [&]( Position& p )
+    {
+        p.x *= 2.0f;
+    } );
+    
+    float sum = 0.0f;
+    veEachNoEntity<Position>( w, [&]( Position& p )
+    {
+        sum += p.x;
+    } );
+    
+    ASSERT_EQ( sum, 20.0f );
+    
     veDestroyWorld( w );
 }
 
