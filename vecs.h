@@ -1670,6 +1670,259 @@ inline void veQueryEach( veWorld* w, veQuery* q, Fn&& fn )
     }
 }
 
+template< typename... With, typename... Without, typename... Optional, typename Fn >
+inline void veQueryEachParallel( veWorld* w, veQuery* q, uint32_t startIndex, uint32_t endIndex, Fn&& fn )
+{
+    static_assert( sizeof...( With ) >= 1, "veQueryEachParallel requires at least one With component" );
+
+    if ( q->withCount == 0 )
+    {
+        return;
+    }
+
+    uint32_t startTi = ( startIndex < VECS_TOP_COUNT ) ? startIndex : VECS_TOP_COUNT;
+    uint32_t endTi = ( endIndex < VECS_TOP_COUNT ) ? endIndex : VECS_TOP_COUNT;
+    if ( startTi >= endTi )
+    {
+        return;
+    }
+
+    auto withPools = std::make_tuple( veDetail::getPool<With>( w )... );
+    bool invalid = false;
+    veDetail::forEachPool( withPools, [&]( vePool* pool )
+    {
+        if ( !pool || pool->count == 0 )
+        {
+            invalid = true;
+        }
+    } );
+    if ( invalid )
+    {
+        return;
+    }
+
+    auto optionalPools = std::make_tuple( veDetail::getPool<Optional>( w )... );
+    auto withoutPools = std::make_tuple( veDetail::getPool<Without>( w )... );
+
+    auto processScalarTi = [&]( uint32_t ti )
+    {
+        uint64_t top = q->withMask.topMasks[ti];
+        if ( top == 0 )
+        {
+            return;
+        }
+
+        for ( uint32_t i = 0; i < q->withoutCount; i++ )
+        {
+            vePool* wp = w->pools[q->withoutIds[i]];
+            if ( wp )
+            {
+                top &= ~wp->bitfield.topMasks[ti];
+            }
+        }
+        if constexpr ( sizeof...( Without ) > 0 )
+        {
+            veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+            {
+                if ( pool )
+                {
+                    top &= ~pool->bitfield.topMasks[ti];
+                }
+            } );
+        }
+
+        while ( top )
+        {
+            uint32_t tb = veTzcnt( top );
+            uint32_t l2Idx = ti * 64u + tb;
+            uint64_t l2 = q->withMask.l2Masks[l2Idx];
+
+            for ( uint32_t i = 0; i < q->withoutCount; i++ )
+            {
+                vePool* wp = w->pools[q->withoutIds[i]];
+                if ( wp )
+                {
+                    l2 &= ~wp->bitfield.l2Masks[l2Idx];
+                }
+            }
+            if constexpr ( sizeof...( Without ) > 0 )
+            {
+                veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+                {
+                    if ( pool )
+                    {
+                        l2 &= ~pool->bitfield.l2Masks[l2Idx];
+                    }
+                } );
+            }
+
+            while ( l2 )
+            {
+                uint32_t lb = veTzcnt( l2 );
+                uint32_t entityIdx = l2Idx * 64u + lb;
+
+                bool excluded = false;
+                veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+                {
+                    if ( pool && vePoolHas( pool, entityIdx ) )
+                    {
+                        excluded = true;
+                    }
+                } );
+                if ( excluded )
+                {
+                    l2 &= l2 - 1;
+                    continue;
+                }
+
+                veEntity entity = veMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+                veDetail::invokeQueryCallback<With...>( w, withPools, optionalPools, entityIdx, entity, fn, std::make_index_sequence<sizeof...( With )>() );
+                l2 &= l2 - 1;
+            }
+            top &= top - 1;
+        }
+    };
+
+    uint32_t ti = startTi;
+
+#if defined( VECS_SSE2 ) || defined( VECS_NEON )
+    if ( veRuntimeSimdSupported() )
+    {
+        if ( ( ti & 1u ) != 0u )
+        {
+            processScalarTi( ti );
+            ti++;
+        }
+
+        for ( ; ti + 1u < endTi; ti += 2u )
+        {
+            uint64_t vals[2] = {};
+#if defined( VECS_SSE2 )
+            __m128i joined = _mm_loadu_si128( ( const __m128i* )&q->withMask.topMasks[ti] );
+            for ( uint32_t i = 0; i < q->withoutCount; i++ )
+            {
+                vePool* wp = w->pools[q->withoutIds[i]];
+                if ( wp )
+                {
+                    __m128i without = _mm_loadu_si128( ( const __m128i* )&wp->bitfield.topMasks[ti] );
+                    joined = _mm_andnot_si128( without, joined );
+                }
+            }
+            if constexpr ( sizeof...( Without ) > 0 )
+            {
+                veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+                {
+                    if ( pool )
+                    {
+                        __m128i without = _mm_loadu_si128( ( const __m128i* )&pool->bitfield.topMasks[ti] );
+                        joined = _mm_andnot_si128( without, joined );
+                    }
+                } );
+            }
+            __m128i zero = _mm_setzero_si128();
+            __m128i cmp = _mm_cmpeq_epi32( joined, zero );
+            if ( _mm_movemask_epi8( cmp ) == 0xFFFF )
+            {
+                continue;
+            }
+            alignas( 16 ) uint64_t alignedVals[2] = {};
+            _mm_store_si128( ( __m128i* )alignedVals, joined );
+            vals[0] = alignedVals[0];
+            vals[1] = alignedVals[1];
+#elif defined( VECS_NEON )
+            uint64x2_t joined = vld1q_u64( &q->withMask.topMasks[ti] );
+            for ( uint32_t i = 0; i < q->withoutCount; i++ )
+            {
+                vePool* wp = w->pools[q->withoutIds[i]];
+                if ( wp )
+                {
+                    uint64x2_t without = vld1q_u64( &wp->bitfield.topMasks[ti] );
+                    joined = vandq_u64( joined, vmvnq_u64( without ) );
+                }
+            }
+            if constexpr ( sizeof...( Without ) > 0 )
+            {
+                veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+                {
+                    if ( pool )
+                    {
+                        uint64x2_t without = vld1q_u64( &pool->bitfield.topMasks[ti] );
+                        joined = vandq_u64( joined, vmvnq_u64( without ) );
+                    }
+                } );
+            }
+            uint64x2_t cmp = vceqq_u64( joined, vdupq_n_u64( 0 ) );
+            if ( vgetq_lane_u64( cmp, 0 ) && vgetq_lane_u64( cmp, 1 ) )
+            {
+                continue;
+            }
+            vals[0] = vgetq_lane_u64( joined, 0 );
+            vals[1] = vgetq_lane_u64( joined, 1 );
+#endif
+            for ( uint32_t k = 0; k < 2u; k++ )
+            {
+                uint64_t top = vals[k];
+                while ( top )
+                {
+                    uint32_t tb = veTzcnt( top );
+                    uint32_t l2Idx = ( ti + k ) * 64u + tb;
+                    uint64_t l2 = q->withMask.l2Masks[l2Idx];
+
+                    for ( uint32_t i = 0; i < q->withoutCount; i++ )
+                    {
+                        vePool* wp = w->pools[q->withoutIds[i]];
+                        if ( wp )
+                        {
+                            l2 &= ~wp->bitfield.l2Masks[l2Idx];
+                        }
+                    }
+                    if constexpr ( sizeof...( Without ) > 0 )
+                    {
+                        veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+                        {
+                            if ( pool )
+                            {
+                                l2 &= ~pool->bitfield.l2Masks[l2Idx];
+                            }
+                        } );
+                    }
+
+                    while ( l2 )
+                    {
+                        uint32_t lb = veTzcnt( l2 );
+                        uint32_t entityIdx = l2Idx * 64u + lb;
+
+                        bool excluded = false;
+                        veDetail::forEachPool( withoutPools, [&]( vePool* pool )
+                        {
+                            if ( pool && vePoolHas( pool, entityIdx ) )
+                            {
+                                excluded = true;
+                            }
+                        } );
+                        if ( excluded )
+                        {
+                            l2 &= l2 - 1;
+                            continue;
+                        }
+
+                        veEntity entity = veMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+                        veDetail::invokeQueryCallback<With...>( w, withPools, optionalPools, entityIdx, entity, fn, std::make_index_sequence<sizeof...( With )>() );
+                        l2 &= l2 - 1;
+                    }
+                    top &= top - 1;
+                }
+            }
+        }
+    }
+#endif
+
+    for ( ; ti < endTi; ti++ )
+    {
+        processScalarTi( ti );
+    }
+}
+
 template< typename... With, typename Fn >
 inline void veEach( veWorld* w, Fn&& fn )
 {

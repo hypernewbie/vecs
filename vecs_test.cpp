@@ -1004,4 +1004,51 @@ UTEST( query, simd_query_parity )
     veDestroyWorld( w );
 }
 
+UTEST( query, parallel_chunked_matches_full )
+{
+    veWorld* w = veCreateWorld();
+    for ( uint32_t i = 0; i < 4000u; i++ )
+    {
+        veEntity e = veCreate( w );
+        veSet<Position>( w, e, { ( float )i, 0 } );
+        if ( ( i % 2u ) == 0u )
+        {
+            veSet<Velocity>( w, e, { ( float )( i + 1u ), 0 } );
+        }
+        if ( ( i % 5u ) == 0u )
+        {
+            veSet<Health>( w, e, { ( int )i } );
+        }
+    }
+
+    veQuery* q = veBuildQuery<Position, Velocity>( w );
+    veQueryAddWithout( q, veTypeId<Health>() );
+
+    uint32_t fullCount = 0u;
+    double fullSum = 0.0;
+    veQueryEach<Position, Velocity>( w, q, [&]( veEntity, Position& p, Velocity& v )
+    {
+        fullCount++;
+        fullSum += ( double )p.x + ( double )v.vx;
+    } );
+
+    uint32_t chunkCount = 0u;
+    double chunkSum = 0.0;
+    for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti += 3u )
+    {
+        uint32_t end = ( ti + 3u < VECS_TOP_COUNT ) ? ti + 3u : VECS_TOP_COUNT;
+        veQueryEachParallel<Position, Velocity>( w, q, ti, end, [&]( veEntity, Position& p, Velocity& v )
+        {
+            chunkCount++;
+            chunkSum += ( double )p.x + ( double )v.vx;
+        } );
+    }
+
+    ASSERT_EQ( chunkCount, fullCount );
+    ASSERT_EQ( chunkSum, fullSum );
+
+    veDestroyQuery( q );
+    veDestroyWorld( w );
+}
+
 UTEST_MAIN();
