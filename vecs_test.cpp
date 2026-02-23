@@ -1576,6 +1576,7 @@ UTEST( threading, parallel_chunked_iteration_manual )
 
 UTEST( benchmark, vecs_ops_per_second )
 {
+    ( void )utest_result;
     const uint32_t activeCapacity = VECS_MAX_ENTITIES;
     const uint64_t opTarget = 1000000ULL;
 
@@ -1684,6 +1685,7 @@ UTEST( benchmark, vecs_ops_per_second )
 
 UTEST( benchmark, vecs_vs_entt )
 {
+    ( void )utest_result;
 #if defined( VECS_HAS_ENTT )
     const uint32_t activeCapacity = VECS_MAX_ENTITIES;
     const uint64_t opTarget = 1000000ULL;
@@ -2411,6 +2413,7 @@ UTEST( each_no_entity, mutates_components )
 
 UTEST( benchmark, simd_test_matrix )
 {
+    ( void )utest_result;
     const uint32_t entityCount = VECS_MAX_ENTITIES;
     vecsWorld* w = vecsCreateWorld( entityCount );
     
@@ -2436,6 +2439,7 @@ UTEST( benchmark, simd_test_matrix )
     
     auto runBenchmark = [&]( vecsSimdLevel level, const char* name ) -> double
     {
+        ( void )name;
         g_vecsSimdConfig = level;
         uint64_t processed = 0u;
         const auto start = std::chrono::high_resolution_clock::now();
