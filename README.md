@@ -1,5 +1,7 @@
 # Vecs
 
+![CI](https://github.com/hypernewbie/vecs/actions/workflows/ci.yml/badge.svg)
+
 Vecs is a high-performance, single-header C++ ECS utilising a **two-level bitfield sparse index** for O(1) lookups and efficient vectorized joins.
 
 The architecture is inspired by the design described by [Sebastien Aaltonen](https://x.com/SebAaltonen/status/2018706822429892859).
