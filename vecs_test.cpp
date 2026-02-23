@@ -1,6 +1,10 @@
 #include "utest.h"
 #include "vecs.h"
 
+struct Position { float x, y; };
+struct Velocity { float vx, vy; };
+struct Health { int hp; };
+
 UTEST( vecs, smoke )
 {
     ASSERT_NE( VECS_INVALID_ENTITY, 0ULL );
@@ -172,6 +176,118 @@ UTEST( bitfield, boundary_last_entity )
     veBitfieldSet( &bf, VECS_MAX_ENTITIES - 1u );
     ASSERT_TRUE( veBitfieldHas( &bf, VECS_MAX_ENTITIES - 1u ) );
     ASSERT_EQ( veBitfieldCount( &bf ), 1u );
+}
+
+UTEST( pool, add_get_remove )
+{
+    vePool* pool = veCreatePool( 1024u, sizeof( Position ) );
+    Position p = { 1.0f, 2.0f };
+    vePoolSet( pool, 0u, &p );
+    ASSERT_TRUE( vePoolHas( pool, 0u ) );
+    Position* got = ( Position* )vePoolGet( pool, 0u );
+    ASSERT_EQ( got->x, 1.0f );
+    ASSERT_EQ( got->y, 2.0f );
+    vePoolUnset( pool, 0u );
+    ASSERT_FALSE( vePoolHas( pool, 0u ) );
+    veDestroyPool( pool );
+}
+
+UTEST( pool, swap_and_pop_integrity )
+{
+    vePool* pool = veCreatePool( 1024u, sizeof( int ) );
+    int vals[] = { 10, 20, 30 };
+    vePoolSet( pool, 5u, &vals[0] );
+    vePoolSet( pool, 10u, &vals[1] );
+    vePoolSet( pool, 15u, &vals[2] );
+    vePoolUnset( pool, 10u );
+    ASSERT_FALSE( vePoolHas( pool, 10u ) );
+    ASSERT_TRUE( vePoolHas( pool, 5u ) );
+    ASSERT_TRUE( vePoolHas( pool, 15u ) );
+    ASSERT_EQ( *( int* )vePoolGet( pool, 5u ), 10 );
+    ASSERT_EQ( *( int* )vePoolGet( pool, 15u ), 30 );
+    veDestroyPool( pool );
+}
+
+UTEST( pool, grow )
+{
+    vePool* pool = veCreatePool( 1024u, sizeof( int ) );
+    for ( int i = 0; i < 200; i++ )
+    {
+        vePoolSet( pool, ( uint32_t )i, &i );
+    }
+    ASSERT_EQ( pool->count, 200u );
+    for ( int i = 0; i < 200; i++ )
+    {
+        ASSERT_EQ( *( int* )vePoolGet( pool, ( uint32_t )i ), i );
+    }
+    veDestroyPool( pool );
+}
+
+UTEST( world, create_destroy_entity )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    ASSERT_TRUE( veAlive( w, e ) );
+    veDestroy( w, e );
+    ASSERT_FALSE( veAlive( w, e ) );
+    veDestroyWorld( w );
+}
+
+UTEST( world, component_crud )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+
+    veSet<Position>( w, e, { 1.0f, 2.0f } );
+    ASSERT_TRUE( veHas<Position>( w, e ) );
+    Position* p = veGet<Position>( w, e );
+    ASSERT_EQ( p->x, 1.0f );
+    ASSERT_EQ( p->y, 2.0f );
+
+    veSet<Position>( w, e, { 3.0f, 4.0f } );
+    p = veGet<Position>( w, e );
+    ASSERT_EQ( p->x, 3.0f );
+
+    veUnset<Position>( w, e );
+    ASSERT_FALSE( veHas<Position>( w, e ) );
+
+    veDestroyWorld( w );
+}
+
+UTEST( world, destroy_entity_removes_components )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+    veSet<Position>( w, e, { 1.0f, 2.0f } );
+    veSet<Velocity>( w, e, { 0.1f, 0.2f } );
+    veDestroy( w, e );
+    veEntity e2 = veCreate( w );
+    ASSERT_FALSE( veHas<Position>( w, e2 ) );
+    ASSERT_FALSE( veHas<Velocity>( w, e2 ) );
+    veDestroyWorld( w );
+}
+
+UTEST( world, multiple_entities_multiple_components )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e1 = veCreate( w );
+    veEntity e2 = veCreate( w );
+    veEntity e3 = veCreate( w );
+
+    veSet<Position>( w, e1, { 1, 1 } );
+    veSet<Position>( w, e2, { 2, 2 } );
+    veSet<Velocity>( w, e1, { 10, 10 } );
+    veSet<Health>( w, e3, { 100 } );
+
+    ASSERT_TRUE( veHas<Position>( w, e1 ) );
+    ASSERT_TRUE( veHas<Position>( w, e2 ) );
+    ASSERT_FALSE( veHas<Position>( w, e3 ) );
+    ASSERT_TRUE( veHas<Velocity>( w, e1 ) );
+    ASSERT_FALSE( veHas<Velocity>( w, e2 ) );
+    ASSERT_TRUE( veHas<Health>( w, e3 ) );
+    ASSERT_EQ( veCount( w ), 3u );
+
+    veDestroyWorld( w );
 }
 
 UTEST_MAIN();

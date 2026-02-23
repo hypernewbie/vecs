@@ -26,6 +26,7 @@
 #include <cassert>
 #include <new>
 #include <cstdlib>
+#include <type_traits>
 
 #ifndef VECS_MAX_ENTITIES
 #define VECS_MAX_ENTITIES 65536
@@ -261,9 +262,283 @@ inline void veBitfieldJoin( const veBitfield* a, const veBitfield* b, Fn&& fn )
 // Component Pool
 // --------------------------------------------------------------------------
 
+struct vePool
+{
+    veBitfield bitfield;
+    uint32_t* sparse;
+    uint32_t* denseEntities;
+    uint8_t* denseData;
+    uint32_t count;
+    uint32_t capacity;
+    uint32_t stride;
+    void ( *destructor )( void* );
+};
+
+inline void vePoolGrow( vePool* pool )
+{
+    assert( pool );
+    uint32_t newCapacity = pool->capacity ? pool->capacity * 2u : 64u;
+    if ( newCapacity > VECS_MAX_ENTITIES )
+    {
+        newCapacity = VECS_MAX_ENTITIES;
+    }
+    assert( newCapacity > pool->capacity );
+    uint32_t* newDenseEntities = ( uint32_t* )std::realloc( pool->denseEntities, newCapacity * sizeof( uint32_t ) );
+    uint8_t* newDenseData = ( uint8_t* )std::realloc( pool->denseData, ( size_t )newCapacity * pool->stride );
+    assert( newDenseEntities );
+    assert( newDenseData );
+    pool->denseEntities = newDenseEntities;
+    pool->denseData = newDenseData;
+    pool->capacity = newCapacity;
+}
+
+inline vePool* veCreatePool( uint32_t maxEntities, uint32_t stride, void ( *dtor )( void* ) = nullptr )
+{
+    vePool* pool = ( vePool* )std::malloc( sizeof( vePool ) );
+    assert( pool );
+    pool->sparse = ( uint32_t* )std::malloc( maxEntities * sizeof( uint32_t ) );
+    pool->denseEntities = ( uint32_t* )std::malloc( 64u * sizeof( uint32_t ) );
+    pool->denseData = ( uint8_t* )std::malloc( ( size_t )64u * stride );
+    assert( pool->sparse );
+    assert( pool->denseEntities );
+    assert( pool->denseData );
+    for ( uint32_t i = 0; i < maxEntities; i++ )
+    {
+        pool->sparse[i] = VECS_INVALID_INDEX;
+    }
+    veBitfieldClearAll( &pool->bitfield );
+    pool->count = 0;
+    pool->capacity = 64u;
+    pool->stride = stride;
+    pool->destructor = dtor;
+    return pool;
+}
+
+inline void veDestroyPool( vePool* pool )
+{
+    if ( !pool )
+    {
+        return;
+    }
+    if ( pool->destructor )
+    {
+        for ( uint32_t i = 0; i < pool->count; i++ )
+        {
+            pool->destructor( pool->denseData + ( size_t )i * pool->stride );
+        }
+    }
+    std::free( pool->sparse );
+    std::free( pool->denseEntities );
+    std::free( pool->denseData );
+    std::free( pool );
+}
+
+inline void* vePoolSet( vePool* pool, uint32_t entityIndex, const void* data )
+{
+    assert( pool );
+    assert( entityIndex < VECS_MAX_ENTITIES );
+    assert( !veBitfieldHas( &pool->bitfield, entityIndex ) );
+    if ( pool->count == pool->capacity )
+    {
+        vePoolGrow( pool );
+    }
+    uint32_t denseIdx = pool->count++;
+    pool->sparse[entityIndex] = denseIdx;
+    pool->denseEntities[denseIdx] = entityIndex;
+    uint8_t* dst = pool->denseData + ( size_t )denseIdx * pool->stride;
+    std::memcpy( dst, data, pool->stride );
+    veBitfieldSet( &pool->bitfield, entityIndex );
+    return dst;
+}
+
+inline void vePoolUnset( vePool* pool, uint32_t entityIndex )
+{
+    assert( pool );
+    assert( entityIndex < VECS_MAX_ENTITIES );
+    assert( veBitfieldHas( &pool->bitfield, entityIndex ) );
+    uint32_t denseIdx = pool->sparse[entityIndex];
+    uint32_t lastIdx = pool->count - 1u;
+    uint8_t* removePtr = pool->denseData + ( size_t )denseIdx * pool->stride;
+    if ( pool->destructor )
+    {
+        pool->destructor( removePtr );
+    }
+    if ( denseIdx != lastIdx )
+    {
+        uint8_t* lastPtr = pool->denseData + ( size_t )lastIdx * pool->stride;
+        std::memcpy( removePtr, lastPtr, pool->stride );
+        uint32_t movedEntity = pool->denseEntities[lastIdx];
+        pool->denseEntities[denseIdx] = movedEntity;
+        pool->sparse[movedEntity] = denseIdx;
+    }
+    veBitfieldUnset( &pool->bitfield, entityIndex );
+    pool->sparse[entityIndex] = VECS_INVALID_INDEX;
+    pool->count--;
+}
+
+inline void* vePoolGet( vePool* pool, uint32_t entityIndex )
+{
+    assert( pool );
+    if ( !veBitfieldHas( &pool->bitfield, entityIndex ) )
+    {
+        return nullptr;
+    }
+    uint32_t denseIdx = pool->sparse[entityIndex];
+    return pool->denseData + ( size_t )denseIdx * pool->stride;
+}
+
+inline bool vePoolHas( const vePool* pool, uint32_t entityIndex )
+{
+    assert( pool );
+    return veBitfieldHas( &pool->bitfield, entityIndex );
+}
+
 // --------------------------------------------------------------------------
 // World
 // --------------------------------------------------------------------------
+
+struct veWorld
+{
+    veEntityPool* entities;
+    vePool* pools[VECS_MAX_COMPONENTS];
+    uint32_t maxEntities;
+};
+
+inline uint32_t veNextTypeId()
+{
+    static uint32_t counter = 0;
+    return counter++;
+}
+
+template< typename T >
+inline uint32_t veTypeId()
+{
+    static uint32_t id = veNextTypeId();
+    return id;
+}
+
+inline veWorld* veCreateWorld( uint32_t maxEntities = VECS_MAX_ENTITIES )
+{
+    veWorld* world = ( veWorld* )std::malloc( sizeof( veWorld ) );
+    assert( world );
+    world->entities = veCreateEntityPool( maxEntities );
+    world->maxEntities = maxEntities;
+    std::memset( world->pools, 0, sizeof( world->pools ) );
+    return world;
+}
+
+inline void veDestroyWorld( veWorld* world )
+{
+    if ( !world )
+    {
+        return;
+    }
+    for ( uint32_t i = 0; i < VECS_MAX_COMPONENTS; i++ )
+    {
+        veDestroyPool( world->pools[i] );
+    }
+    veDestroyEntityPool( world->entities );
+    std::free( world );
+}
+
+inline veEntity veCreate( veWorld* w )
+{
+    assert( w );
+    return veEntityPoolCreate( w->entities );
+}
+
+inline void veDestroy( veWorld* w, veEntity e )
+{
+    assert( w );
+    assert( veEntityPoolAlive( w->entities, e ) );
+    uint32_t entityIndex = veEntityIndex( e );
+    for ( uint32_t i = 0; i < VECS_MAX_COMPONENTS; i++ )
+    {
+        vePool* pool = w->pools[i];
+        if ( pool && vePoolHas( pool, entityIndex ) )
+        {
+            vePoolUnset( pool, entityIndex );
+        }
+    }
+    veEntityPoolDestroy( w->entities, e );
+}
+
+inline bool veAlive( veWorld* w, veEntity e )
+{
+    assert( w );
+    return veEntityPoolAlive( w->entities, e );
+}
+
+inline uint32_t veCount( veWorld* w )
+{
+    assert( w );
+    return w->entities->alive;
+}
+
+template< typename T >
+inline vePool* veEnsurePool( veWorld* w )
+{
+    uint32_t id = veTypeId<T>();
+    assert( id < VECS_MAX_COMPONENTS );
+    if ( !w->pools[id] )
+    {
+        void ( *dtor )( void* ) = nullptr;
+        if constexpr ( !std::is_trivially_destructible<T>::value )
+        {
+            dtor = []( void* ptr ) { static_cast<T*>( ptr )->~T(); };
+        }
+        w->pools[id] = veCreatePool( w->maxEntities, sizeof( T ), dtor );
+    }
+    return w->pools[id];
+}
+
+template< typename T >
+inline T* veSet( veWorld* w, veEntity e, const T& val = {} )
+{
+    assert( veAlive( w, e ) );
+    vePool* pool = veEnsurePool<T>( w );
+    uint32_t idx = veEntityIndex( e );
+    if ( vePoolHas( pool, idx ) )
+    {
+        T* ptr = ( T* )vePoolGet( pool, idx );
+        *ptr = val;
+        return ptr;
+    }
+    return ( T* )vePoolSet( pool, idx, &val );
+}
+
+template< typename T >
+inline void veUnset( veWorld* w, veEntity e )
+{
+    assert( veAlive( w, e ) );
+    vePool* pool = veEnsurePool<T>( w );
+    uint32_t idx = veEntityIndex( e );
+    assert( vePoolHas( pool, idx ) );
+    vePoolUnset( pool, idx );
+}
+
+template< typename T >
+inline T* veGet( veWorld* w, veEntity e )
+{
+    assert( veAlive( w, e ) );
+    uint32_t id = veTypeId<T>();
+    if ( id >= VECS_MAX_COMPONENTS || !w->pools[id] )
+    {
+        return nullptr;
+    }
+    return ( T* )vePoolGet( w->pools[id], veEntityIndex( e ) );
+}
+
+template< typename T >
+inline bool veHas( veWorld* w, veEntity e )
+{
+    uint32_t id = veTypeId<T>();
+    if ( id >= VECS_MAX_COMPONENTS || !w->pools[id] )
+    {
+        return false;
+    }
+    return vePoolHas( w->pools[id], veEntityIndex( e ) );
+}
 
 // --------------------------------------------------------------------------
 // Query
