@@ -2,6 +2,9 @@
 #include "vecs.h"
 #include <chrono>
 #include <cstdio>
+#include <random>
+#include <thread>
+#include <atomic>
 #include <vector>
 
 #if defined( __has_include )
@@ -16,6 +19,24 @@ struct Velocity { float vx, vy; };
 struct Health { int hp; };
 struct IsEnemy {};
 struct Dead {};
+template< size_t I > struct ExhaustComp { int value; };
+
+template< size_t... I >
+static void veCollectExhaustIds( uint32_t* out, std::index_sequence<I...> )
+{
+    ( ( out[I] = veTypeId<ExhaustComp<I>>() ), ... );
+}
+
+template< size_t... I >
+static uint32_t veTrySetExhaustComponents( veWorld* w, veEntity e, std::index_sequence<I...> )
+{
+    uint32_t setCount = 0u;
+    ( ( veTypeId<ExhaustComp<I>>() < VECS_MAX_COMPONENTS
+        ? ( ( void )veSet<ExhaustComp<I>>( w, e, { ( int )I } ), setCount++ )
+        : 0 ),
+      ... );
+    return setCount;
+}
 
 static double veBenchOpsPerSecond( const std::chrono::high_resolution_clock::time_point& start, uint64_t ops )
 {
@@ -1337,6 +1358,207 @@ UTEST( observer, destroy_fires_remove_for_all_components )
     veDestroyWorld( w );
 }
 
+UTEST( query, mutability_read_write_signature )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veQuery* q = veBuildQuery<const Position, Velocity>( w );
+    ASSERT_TRUE( veQueryReads( q, veTypeId<Position>() ) );
+    ASSERT_FALSE( veQueryWrites( q, veTypeId<Position>() ) );
+    ASSERT_TRUE( veQueryWrites( q, veTypeId<Velocity>() ) );
+    ASSERT_FALSE( veQueryReads( q, veTypeId<Health>() ) );
+    veDestroyQuery( q );
+    veDestroyWorld( w );
+}
+
+UTEST( simd, scalar_fallback_exact_match )
+{
+    veWorld* w = veCreateWorld( 20000u );
+    std::mt19937 rng( 1337u );
+    std::uniform_real_distribution<float> distPos( -500.0f, 500.0f );
+    std::uniform_real_distribution<float> distVel( -50.0f, 50.0f );
+    std::uniform_int_distribution<int> bit( 0, 99 );
+
+    for ( uint32_t i = 0; i < 10000u; i++ )
+    {
+        veEntity e = veCreate( w );
+        veSet<Position>( w, e, { distPos( rng ), distPos( rng ) } );
+        if ( bit( rng ) < 70 )
+        {
+            veSet<Velocity>( w, e, { distVel( rng ), distVel( rng ) } );
+        }
+        if ( bit( rng ) < 25 )
+        {
+            veSet<Health>( w, e, { ( int )i } );
+        }
+    }
+
+    veQuery* q = veBuildQuery<Position, Velocity>( w );
+    veQueryAddWithout( q, veTypeId<Health>() );
+
+    std::vector<uint64_t> simdResults;
+    std::vector<uint64_t> scalarResults;
+    simdResults.reserve( 10000u );
+    scalarResults.reserve( 10000u );
+
+    g_veDisableSimd = false;
+    veQueryEach<Position, Velocity>( w, q, [&]( veEntity e, Position& p, Velocity& v )
+    {
+        uint64_t h = veEntityIndex( e );
+        h = ( h * 1315423911u ) ^ ( uint64_t )( p.x * 1000.0f ) ^ ( ( uint64_t )( v.vx * 1000.0f ) << 32 );
+        simdResults.push_back( h );
+    } );
+
+    g_veDisableSimd = true;
+    veQueryEach<Position, Velocity>( w, q, [&]( veEntity e, Position& p, Velocity& v )
+    {
+        uint64_t h = veEntityIndex( e );
+        h = ( h * 1315423911u ) ^ ( uint64_t )( p.x * 1000.0f ) ^ ( ( uint64_t )( v.vx * 1000.0f ) << 32 );
+        scalarResults.push_back( h );
+    } );
+    g_veDisableSimd = false;
+
+    ASSERT_EQ( scalarResults.size(), simdResults.size() );
+    for ( size_t i = 0; i < simdResults.size(); i++ )
+    {
+        ASSERT_EQ( scalarResults[i], simdResults[i] );
+    }
+
+    veDestroyQuery( q );
+    veDestroyWorld( w );
+}
+
+UTEST( threading, concurrent_command_buffers )
+{
+    const uint32_t targetTotal = ( VECS_MAX_ENTITIES < 100000u ) ? VECS_MAX_ENTITIES : 100000u;
+    const uint32_t threadCount = 4u;
+    const uint32_t basePerThread = targetTotal / threadCount;
+    const uint32_t remainder = targetTotal % threadCount;
+
+    veWorld* w = veCreateWorld( targetTotal );
+    veEnsurePool<Position>( w );
+
+    std::vector<veCommandBuffer*> buffers( threadCount, nullptr );
+    std::vector<std::thread> threads;
+    threads.reserve( threadCount );
+
+    for ( uint32_t t = 0; t < threadCount; t++ )
+    {
+        const uint32_t count = basePerThread + ( t < remainder ? 1u : 0u );
+        const uint32_t start = t * basePerThread + ( t < remainder ? t : remainder );
+        threads.emplace_back( [&, t, count, start]()
+        {
+            veCommandBuffer* cb = veCreateCommandBuffer( w );
+            for ( uint32_t i = 0; i < count; i++ )
+            {
+                uint32_t created = veCmdCreate( cb );
+                veCmdSetCreated<Position>( cb, created, { ( float )( start + i ), ( float )t } );
+            }
+            buffers[t] = cb;
+        } );
+    }
+
+    for ( auto& th : threads )
+    {
+        th.join();
+    }
+
+    uint32_t alive = 0u;
+    for ( uint32_t t = 0; t < threadCount; t++ )
+    {
+        veCommandBuffer* cb = buffers[t];
+        veFlush( cb );
+        for ( uint32_t i = 0; i < cb->createdCount; i++ )
+        {
+            veEntity e = veCmdGetCreated( cb, i );
+            ASSERT_NE( e, VECS_INVALID_ENTITY );
+            ASSERT_TRUE( veAlive( w, e ) );
+            Position* p = veGet<Position>( w, e );
+            ASSERT_TRUE( p != nullptr );
+            alive++;
+        }
+        veDestroyCommandBuffer( cb );
+    }
+
+    ASSERT_EQ( alive, targetTotal );
+    ASSERT_EQ( veCount( w ), targetTotal );
+    veDestroyWorld( w );
+}
+
+UTEST( threading, parallel_chunked_iteration_manual )
+{
+    const uint32_t entityCount = ( VECS_MAX_ENTITIES < 100000u ) ? VECS_MAX_ENTITIES : 100000u;
+    veWorld* w = veCreateWorld( entityCount );
+    std::vector<veEntity> entities;
+    entities.reserve( entityCount );
+    for ( uint32_t i = 0; i < entityCount; i++ )
+    {
+        veEntity e = veCreate( w );
+        entities.push_back( e );
+        veSet<Position>( w, e, { ( float )i, 0.0f } );
+        veSet<Velocity>( w, e, { 1.0f, 0.0f } );
+    }
+
+    veQuery* q = veBuildQuery<Position, Velocity>( w );
+    vePool* positionPool = w->pools[veTypeId<Position>()];
+    vePool* velocityPool = w->pools[veTypeId<Velocity>()];
+    std::atomic<uint32_t> processed = 0u;
+
+    const uint32_t threadCount = 4u;
+    const uint32_t chunk = ( VECS_TOP_COUNT + threadCount - 1u ) / threadCount;
+    std::vector<std::thread> threads;
+    threads.reserve( threadCount );
+    for ( uint32_t t = 0; t < threadCount; t++ )
+    {
+        const uint32_t startTi = t * chunk;
+        const uint32_t endTi = ( startTi + chunk < VECS_TOP_COUNT ) ? startTi + chunk : VECS_TOP_COUNT;
+        threads.emplace_back( [=, &processed]()
+        {
+            for ( uint32_t ti = startTi; ti < endTi; ti++ )
+            {
+                uint64_t top = q->withMask.topMasks[ti];
+                while ( top )
+                {
+                    uint32_t tb = veTzcnt( top );
+                    uint32_t l2Idx = ti * 64u + tb;
+                    uint64_t l2 = q->withMask.l2Masks[l2Idx];
+                    while ( l2 )
+                    {
+                        uint32_t lb = veTzcnt( l2 );
+                        uint32_t entityIdx = l2Idx * 64u + lb;
+
+                        uint32_t densePos = positionPool->sparse[entityIdx];
+                        uint32_t denseVel = velocityPool->sparse[entityIdx];
+                        Position* p = ( Position* )( positionPool->denseData + ( size_t )densePos * positionPool->stride );
+                        Velocity* v = ( Velocity* )( velocityPool->denseData + ( size_t )denseVel * velocityPool->stride );
+                        p->x += 1.0f;
+                        v->vx += 1.0f;
+                        processed.fetch_add( 1u, std::memory_order_relaxed );
+
+                        l2 &= l2 - 1;
+                    }
+                    top &= top - 1;
+                }
+            }
+        } );
+    }
+    for ( auto& th : threads )
+    {
+        th.join();
+    }
+
+    ASSERT_EQ( processed.load( std::memory_order_relaxed ), entityCount );
+    for ( uint32_t i = 0; i < entityCount; i++ )
+    {
+        Position* p = veGet<Position>( w, entities[i] );
+        Velocity* v = veGet<Velocity>( w, entities[i] );
+        ASSERT_EQ( p->x, ( float )i + 1.0f );
+        ASSERT_EQ( v->vx, 2.0f );
+    }
+
+    veDestroyQuery( q );
+    veDestroyWorld( w );
+}
+
 UTEST( benchmark, vecs_ops_per_second )
 {
     const uint32_t activeCapacity = VECS_MAX_ENTITIES;
@@ -1574,6 +1796,26 @@ UTEST( benchmark, vecs_vs_entt )
 #else
     std::printf( "[BENCHMARK] Vecs vs EnTT skipped (entt/entt.hpp not found).\n" );
 #endif
+}
+
+UTEST( entity, component_id_exhaustion_boundary )
+{
+    constexpr size_t kTypeCount = VECS_MAX_COMPONENTS;
+    std::vector<uint32_t> ids( kTypeCount );
+    veCollectExhaustIds( ids.data(), std::make_index_sequence<kTypeCount>() );
+    for ( size_t i = 1; i < kTypeCount; i++ )
+    {
+        ASSERT_TRUE( ids[i] > ids[i - 1u] );
+    }
+
+    uint32_t overflowId = veTypeId<ExhaustComp<kTypeCount>>();
+    ASSERT_GE( overflowId, ( uint32_t )VECS_MAX_COMPONENTS );
+
+    veWorld* w = veCreateWorld( 16u );
+    veEntity e = veCreate( w );
+    uint32_t setCount = veTrySetExhaustComponents( w, e, std::make_index_sequence<kTypeCount>() );
+    ASSERT_TRUE( setCount <= VECS_MAX_COMPONENTS );
+    veDestroyWorld( w );
 }
 
 UTEST_MAIN();

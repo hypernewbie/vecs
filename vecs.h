@@ -1074,6 +1074,8 @@ struct veQuery
 {
     veBitfield withMask;
     veBitfield withoutMask;
+    uint64_t readAccess[VECS_MAX_COMPONENTS / 64u];
+    uint64_t writeAccess[VECS_MAX_COMPONENTS / 64u];
     uint32_t* withIds;
     uint32_t* withoutIds;
     uint32_t* optionalIds;
@@ -1091,6 +1093,8 @@ inline veQuery* veCreateQuery()
     assert( q );
     veBitfieldClearAll( &q->withMask );
     veBitfieldClearAll( &q->withoutMask );
+    std::memset( q->readAccess, 0, sizeof( q->readAccess ) );
+    std::memset( q->writeAccess, 0, sizeof( q->writeAccess ) );
     q->withIds = nullptr;
     q->withoutIds = nullptr;
     q->optionalIds = nullptr;
@@ -1113,6 +1117,30 @@ inline void veDestroyQuery( veQuery* q )
     std::free( q->withoutIds );
     std::free( q->optionalIds );
     std::free( q );
+}
+
+inline void veQueryMarkRead( veQuery* q, uint32_t typeId )
+{
+    assert( q );
+    q->readAccess[typeId >> 6] |= ( 1ULL << ( typeId & 63u ) );
+}
+
+inline void veQueryMarkWrite( veQuery* q, uint32_t typeId )
+{
+    assert( q );
+    q->writeAccess[typeId >> 6] |= ( 1ULL << ( typeId & 63u ) );
+}
+
+inline bool veQueryReads( const veQuery* q, uint32_t typeId )
+{
+    assert( q );
+    return ( q->readAccess[typeId >> 6] & ( 1ULL << ( typeId & 63u ) ) ) != 0;
+}
+
+inline bool veQueryWrites( const veQuery* q, uint32_t typeId )
+{
+    assert( q );
+    return ( q->writeAccess[typeId >> 6] & ( 1ULL << ( typeId & 63u ) ) ) != 0;
 }
 
 inline void veQueryAddWith( veQuery* q, uint32_t typeId, vePool* pool )
@@ -1172,17 +1200,29 @@ inline void veQueryAddOptional( veQuery* q, uint32_t typeId )
 namespace veDetail
 {
 
+template< typename T >
+inline void buildQueryWithType( veWorld* w, veQuery* q )
+{
+    using Raw = std::remove_cv_t<T>;
+    uint32_t id = veTypeId<Raw>();
+    vePool* pool = ( id < VECS_MAX_COMPONENTS ) ? w->pools[id] : nullptr;
+    veQueryAddWith( q, id, pool );
+    if constexpr ( std::is_const<T>::value )
+    {
+        veQueryMarkRead( q, id );
+    }
+    else
+    {
+        veQueryMarkWrite( q, id );
+    }
+}
+
 template< typename... With >
 inline void buildQueryWith( veWorld* w, veQuery* q )
 {
     if constexpr ( sizeof...( With ) > 0 )
     {
-        uint32_t ids[] = { veTypeId<With>()... };
-        vePool* pools[] = { veDetail::getPool<With>( w )... };
-        for ( size_t i = 0; i < sizeof...( With ); i++ )
-        {
-            veQueryAddWith( q, ids[i], pools[i] );
-        }
+        ( buildQueryWithType<With>( w, q ), ... );
     }
 }
 
@@ -1195,6 +1235,7 @@ inline void buildQueryWithout( veWorld* w, veQuery* q )
         for ( size_t i = 0; i < sizeof...( Without ); i++ )
         {
             veQueryAddWithout( q, ids[i] );
+            veQueryMarkRead( q, ids[i] );
         }
     }
 }
@@ -1208,6 +1249,7 @@ inline void buildQueryOptional( veWorld* w, veQuery* q )
         for ( size_t i = 0; i < sizeof...( Optional ); i++ )
         {
             veQueryAddOptional( q, ids[i] );
+            veQueryMarkRead( q, ids[i] );
         }
     }
 }
@@ -1411,8 +1453,14 @@ inline void eachJoinSimd( veWorld* w, Tuple& pools, Fn&& fn )
 }
 }
 
+inline bool g_veDisableSimd = false;
+
 inline bool veRuntimeSimdSupported()
 {
+    if ( g_veDisableSimd )
+    {
+        return false;
+    }
 #if defined( VECS_SSE2 )
     static int cached = -1;
     if ( cached < 0 )
@@ -2246,6 +2294,35 @@ inline void veCmdSet( veCommandBuffer* cb, veEntity e, const T& val )
 }
 
 template< typename T >
+inline void veCmdSetCreated( veCommandBuffer* cb, uint32_t createdIndex, const T& val )
+{
+    assert( cb );
+    assert( createdIndex < cb->createdCount );
+    vePool* pool = veEnsurePool<T>( cb->world );
+    if ( cb->commandCount == cb->commandCapacity )
+    {
+        veCmdGrowCommands( cb );
+    }
+    veCommand& cmd = cb->commands[cb->commandCount++];
+    cmd.type = veCommand::SET_COMPONENT;
+    cmd.entity = VECS_INVALID_ENTITY;
+    cmd.componentId = veTypeId<T>();
+    cmd.dataOffset = 0;
+    cmd.dataSize = 0;
+    cmd.createdIndex = createdIndex;
+    cmd.pool = pool;
+    cmd.parent = VECS_INVALID_ENTITY;
+    if constexpr ( !std::is_empty<T>::value )
+    {
+        veCmdGrowData( cb, sizeof( T ) );
+        cmd.dataOffset = cb->dataSize;
+        cmd.dataSize = sizeof( T );
+        std::memcpy( cb->dataBuffer + cb->dataSize, &val, sizeof( T ) );
+        cb->dataSize += sizeof( T );
+    }
+}
+
+template< typename T >
 inline void veCmdUnset( veCommandBuffer* cb, veEntity e )
 {
     assert( cb );
@@ -2300,9 +2377,20 @@ inline void veFlush( veCommandBuffer* cb )
                 }
                 break;
             case veCommand::SET_COMPONENT:
-                if ( veAlive( cb->world, cmd.entity ) )
                 {
-                    uint32_t idx = veEntityIndex( cmd.entity );
+                    veEntity target = cmd.entity;
+                    if ( target == VECS_INVALID_ENTITY && cmd.createdIndex != VECS_INVALID_INDEX )
+                    {
+                        if ( cmd.createdIndex < cb->createdCount )
+                        {
+                            target = cb->created[cmd.createdIndex];
+                        }
+                    }
+                    if ( !veAlive( cb->world, target ) )
+                    {
+                        break;
+                    }
+                    uint32_t idx = veEntityIndex( target );
                     if ( cmd.pool->noData )
                     {
                         if ( !vePoolHas( cmd.pool, idx ) )
