@@ -4,6 +4,7 @@
 struct Position { float x, y; };
 struct Velocity { float vx, vy; };
 struct Health { int hp; };
+struct IsEnemy {};
 
 UTEST( vecs, smoke )
 {
@@ -842,6 +843,31 @@ UTEST( relationships, destroy_parent_destroys_children )
     veDestroyWorld( w );
 }
 
+UTEST( relationships, reparent_removes_from_old_parent )
+{
+    veWorld* w = veCreateWorld( 1024u );
+
+    veEntity oldParent = veCreate( w );
+    veEntity newParent = veCreate( w );
+    veEntity child = veCreate( w );
+
+    veSetChildOf( w, child, oldParent );
+    ASSERT_EQ( veGetChildEntityCount( w, oldParent ), 1u );
+
+    veSetChildOf( w, child, newParent );
+
+    ASSERT_EQ( veGetParentEntity( w, child ), newParent );
+    ASSERT_EQ( veGetChildEntityCount( w, oldParent ), 0u );
+    ASSERT_EQ( veGetChildEntityCount( w, newParent ), 1u );
+    ASSERT_EQ( veGetChildEntity( w, newParent, 0u ), child );
+
+    veDestroy( w, oldParent );
+    ASSERT_TRUE( veAlive( w, child ) );
+    ASSERT_EQ( veGetParentEntity( w, child ), newParent );
+
+    veDestroyWorld( w );
+}
+
 UTEST( relationships, no_parent_returns_invalid )
 {
     veWorld* w = veCreateWorld( 1024u );
@@ -870,6 +896,57 @@ UTEST( alignment, aligned_component )
     ASSERT_TRUE( ptr != nullptr );
     ASSERT_EQ( ( uintptr_t )ptr % 32u, 0u );
     
+    veDestroyWorld( w );
+}
+
+UTEST( world, tag_component_uses_bitfield_only )
+{
+    veWorld* w = veCreateWorld( 1024u );
+    veEntity e = veCreate( w );
+
+    IsEnemy* tag = veSet<IsEnemy>( w, e, {} );
+    ASSERT_TRUE( tag != nullptr );
+    ASSERT_TRUE( veHas<IsEnemy>( w, e ) );
+    ASSERT_TRUE( veGet<IsEnemy>( w, e ) != nullptr );
+
+    vePool* pool = w->pools[veTypeId<IsEnemy>()];
+    ASSERT_TRUE( pool != nullptr );
+    ASSERT_TRUE( pool->noData );
+    ASSERT_TRUE( pool->denseData == nullptr );
+
+    veUnset<IsEnemy>( w, e );
+    ASSERT_FALSE( veHas<IsEnemy>( w, e ) );
+
+    veDestroyWorld( w );
+}
+
+UTEST( world, instantiate_batch_prefab )
+{
+    veWorld* w = veCreateWorld( 4096u );
+    veEntity prefab = veCreate( w );
+    veSet<Position>( w, prefab, { 3.0f, 9.0f } );
+    veSet<Velocity>( w, prefab, { 4.0f, 7.0f } );
+    veSet<IsEnemy>( w, prefab, {} );
+
+    const uint32_t count = 256u;
+    veEntity spawned[count] = {};
+    veInstantiateBatch( w, prefab, spawned, count );
+
+    for ( uint32_t i = 0; i < count; i++ )
+    {
+        ASSERT_TRUE( veAlive( w, spawned[i] ) );
+        ASSERT_TRUE( veHas<Position>( w, spawned[i] ) );
+        ASSERT_TRUE( veHas<Velocity>( w, spawned[i] ) );
+        ASSERT_TRUE( veHas<IsEnemy>( w, spawned[i] ) );
+        Position* p = veGet<Position>( w, spawned[i] );
+        Velocity* v = veGet<Velocity>( w, spawned[i] );
+        ASSERT_EQ( p->x, 3.0f );
+        ASSERT_EQ( p->y, 9.0f );
+        ASSERT_EQ( v->vx, 4.0f );
+        ASSERT_EQ( v->vy, 7.0f );
+    }
+
+    ASSERT_TRUE( veAlive( w, prefab ) );
     veDestroyWorld( w );
 }
 

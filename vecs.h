@@ -329,6 +329,7 @@ struct vePool
     uint32_t capacity;
     uint32_t stride;
     uint32_t alignment;
+    bool noData;
     void ( *destructor )( void* );
 };
 
@@ -344,39 +345,49 @@ inline void vePoolGrow( vePool* pool )
     uint32_t* newDenseEntities = ( uint32_t* )std::realloc( pool->denseEntities, newCapacity * sizeof( uint32_t ) );
     assert( newDenseEntities );
     pool->denseEntities = newDenseEntities;
-    
-    if ( pool->alignment > 8 )
+
+    if ( !pool->noData )
     {
-        uint8_t* newDenseData = ( uint8_t* )veAlignedRealloc( pool->denseData, ( size_t )newCapacity * pool->stride, pool->alignment );
-        assert( newDenseData );
-        pool->denseData = newDenseData;
-    }
-    else
-    {
-        uint8_t* newDenseData = ( uint8_t* )std::realloc( pool->denseData, ( size_t )newCapacity * pool->stride );
-        assert( newDenseData );
-        pool->denseData = newDenseData;
+        if ( pool->alignment > 8 )
+        {
+            uint8_t* newDenseData = ( uint8_t* )veAlignedRealloc( pool->denseData, ( size_t )newCapacity * pool->stride, pool->alignment );
+            assert( newDenseData );
+            pool->denseData = newDenseData;
+        }
+        else
+        {
+            uint8_t* newDenseData = ( uint8_t* )std::realloc( pool->denseData, ( size_t )newCapacity * pool->stride );
+            assert( newDenseData );
+            pool->denseData = newDenseData;
+        }
     }
     pool->capacity = newCapacity;
 }
 
-inline vePool* veCreatePool( uint32_t maxEntities, uint32_t stride, uint32_t alignment = 8u, void ( *dtor )( void* ) = nullptr )
+inline vePool* veCreatePool( uint32_t maxEntities, uint32_t stride, uint32_t alignment = 8u, void ( *dtor )( void* ) = nullptr, bool noData = false )
 {
     vePool* pool = ( vePool* )std::malloc( sizeof( vePool ) );
     assert( pool );
     pool->sparse = ( uint32_t* )std::malloc( maxEntities * sizeof( uint32_t ) );
     pool->denseEntities = ( uint32_t* )std::malloc( 64u * sizeof( uint32_t ) );
-    if ( alignment > 8 )
+    pool->denseData = nullptr;
+    if ( !noData )
     {
-        pool->denseData = ( uint8_t* )veAlignedAlloc( ( size_t )64u * stride, alignment );
-    }
-    else
-    {
-        pool->denseData = ( uint8_t* )std::malloc( ( size_t )64u * stride );
+        if ( alignment > 8 )
+        {
+            pool->denseData = ( uint8_t* )veAlignedAlloc( ( size_t )64u * stride, alignment );
+        }
+        else
+        {
+            pool->denseData = ( uint8_t* )std::malloc( ( size_t )64u * stride );
+        }
     }
     assert( pool->sparse );
     assert( pool->denseEntities );
-    assert( pool->denseData );
+    if ( !noData )
+    {
+        assert( pool->denseData );
+    }
     for ( uint32_t i = 0; i < maxEntities; i++ )
     {
         pool->sparse[i] = VECS_INVALID_INDEX;
@@ -386,6 +397,7 @@ inline vePool* veCreatePool( uint32_t maxEntities, uint32_t stride, uint32_t ali
     pool->capacity = 64u;
     pool->stride = stride;
     pool->alignment = alignment;
+    pool->noData = noData;
     pool->destructor = dtor;
     return pool;
 }
@@ -396,7 +408,7 @@ inline void veDestroyPool( vePool* pool )
     {
         return;
     }
-    if ( pool->destructor )
+    if ( pool->destructor && !pool->noData )
     {
         for ( uint32_t i = 0; i < pool->count; i++ )
         {
@@ -405,13 +417,16 @@ inline void veDestroyPool( vePool* pool )
     }
     std::free( pool->sparse );
     std::free( pool->denseEntities );
-    if ( pool->alignment > 8 )
+    if ( pool->denseData )
     {
-        veAlignedFree( pool->denseData );
-    }
-    else
-    {
-        std::free( pool->denseData );
+        if ( pool->alignment > 8 )
+        {
+            veAlignedFree( pool->denseData );
+        }
+        else
+        {
+            std::free( pool->denseData );
+        }
     }
     std::free( pool );
 }
@@ -428,8 +443,12 @@ inline void* vePoolSet( vePool* pool, uint32_t entityIndex, const void* data )
     uint32_t denseIdx = pool->count++;
     pool->sparse[entityIndex] = denseIdx;
     pool->denseEntities[denseIdx] = entityIndex;
-    uint8_t* dst = pool->denseData + ( size_t )denseIdx * pool->stride;
-    std::memcpy( dst, data, pool->stride );
+    uint8_t* dst = nullptr;
+    if ( !pool->noData )
+    {
+        dst = pool->denseData + ( size_t )denseIdx * pool->stride;
+        std::memcpy( dst, data, pool->stride );
+    }
     veBitfieldSet( &pool->bitfield, entityIndex );
     return dst;
 }
@@ -441,15 +460,21 @@ inline void vePoolUnset( vePool* pool, uint32_t entityIndex )
     assert( veBitfieldHas( &pool->bitfield, entityIndex ) );
     uint32_t denseIdx = pool->sparse[entityIndex];
     uint32_t lastIdx = pool->count - 1u;
-    uint8_t* removePtr = pool->denseData + ( size_t )denseIdx * pool->stride;
-    if ( pool->destructor )
+    if ( !pool->noData )
     {
-        pool->destructor( removePtr );
+        uint8_t* removePtr = pool->denseData + ( size_t )denseIdx * pool->stride;
+        if ( pool->destructor )
+        {
+            pool->destructor( removePtr );
+        }
+        if ( denseIdx != lastIdx )
+        {
+            uint8_t* lastPtr = pool->denseData + ( size_t )lastIdx * pool->stride;
+            std::memcpy( removePtr, lastPtr, pool->stride );
+        }
     }
     if ( denseIdx != lastIdx )
     {
-        uint8_t* lastPtr = pool->denseData + ( size_t )lastIdx * pool->stride;
-        std::memcpy( removePtr, lastPtr, pool->stride );
         uint32_t movedEntity = pool->denseEntities[lastIdx];
         pool->denseEntities[denseIdx] = movedEntity;
         pool->sparse[movedEntity] = denseIdx;
@@ -463,6 +488,10 @@ inline void* vePoolGet( vePool* pool, uint32_t entityIndex )
 {
     assert( pool );
     if ( !veBitfieldHas( &pool->bitfield, entityIndex ) )
+    {
+        return nullptr;
+    }
+    if ( pool->noData )
     {
         return nullptr;
     }
@@ -540,7 +569,7 @@ struct veChildOf
 struct veRelationshipData
 {
     veEntity* parents;
-    veEntity* children;
+    veEntity** children;
     uint32_t* childCounts;
     uint32_t* childCapacities;
     uint32_t maxEntities;
@@ -551,9 +580,10 @@ inline veRelationshipData* veCreateRelationships( uint32_t maxEntities )
     veRelationshipData* rel = ( veRelationshipData* )std::malloc( sizeof( veRelationshipData ) );
     assert( rel );
     rel->parents = ( veEntity* )std::calloc( maxEntities, sizeof( veEntity ) );
-    rel->children = nullptr;
+    rel->children = ( veEntity** )std::calloc( maxEntities, sizeof( veEntity* ) );
     rel->childCounts = ( uint32_t* )std::calloc( maxEntities, sizeof( uint32_t ) );
     rel->childCapacities = ( uint32_t* )std::calloc( maxEntities, sizeof( uint32_t ) );
+    assert( rel->children );
     rel->maxEntities = maxEntities;
     for ( uint32_t i = 0; i < maxEntities; i++ )
     {
@@ -571,6 +601,10 @@ inline void veDestroyRelationships( veRelationshipData* rel )
     std::free( rel->parents );
     if ( rel->children )
     {
+        for ( uint32_t i = 0; i < rel->maxEntities; i++ )
+        {
+            std::free( rel->children[i] );
+        }
         std::free( rel->children );
     }
     std::free( rel->childCounts );
@@ -578,38 +612,80 @@ inline void veDestroyRelationships( veRelationshipData* rel )
     std::free( rel );
 }
 
+inline void veRemoveChildFromParent( veRelationshipData* rel, uint32_t parentIdx, veEntity child )
+{
+    uint32_t count = rel->childCounts[parentIdx];
+    for ( uint32_t i = 0; i < count; i++ )
+    {
+        if ( rel->children[parentIdx][i] == child )
+        {
+            uint32_t last = count - 1u;
+            rel->children[parentIdx][i] = rel->children[parentIdx][last];
+            rel->childCounts[parentIdx] = last;
+            return;
+        }
+    }
+}
+
 inline void veSetParent( veRelationshipData* rel, veEntity child, veEntity parent )
 {
     assert( rel );
-    uint32_t idx = veEntityIndex( child );
-    assert( idx < rel->maxEntities );
-    rel->parents[idx] = parent;
-    
-    if ( parent != VECS_INVALID_ENTITY )
+    uint32_t childIdx = veEntityIndex( child );
+    assert( childIdx < rel->maxEntities );
+
+    veEntity oldParent = rel->parents[childIdx];
+    if ( oldParent == parent )
     {
-        uint32_t parentIdx = veEntityIndex( parent );
-        if ( rel->childCounts[parentIdx] >= rel->childCapacities[parentIdx] )
-        {
-            uint32_t newCap = rel->childCapacities[parentIdx] ? rel->childCapacities[parentIdx] * 2u : 4u;
-            uint32_t totalSize = 0;
-            for ( uint32_t i = 0; i < rel->maxEntities; i++ )
-            {
-                uint32_t cap = ( i == parentIdx ) ? newCap : ( rel->childCapacities[i] ? rel->childCapacities[i] : 4u );
-                totalSize += cap;
-            }
-            veEntity* newChildren = ( veEntity* )std::realloc( rel->children, totalSize * sizeof( veEntity ) );
-            assert( newChildren );
-            rel->children = newChildren;
-            rel->childCapacities[parentIdx] = newCap;
-        }
-        uint32_t offset = 0;
-        for ( uint32_t i = 0; i < parentIdx; i++ )
-        {
-            offset += rel->childCapacities[i] ? rel->childCapacities[i] : 4u;
-        }
-        rel->children[offset + rel->childCounts[parentIdx]] = child;
-        rel->childCounts[parentIdx]++;
+        return;
     }
+
+    if ( oldParent != VECS_INVALID_ENTITY )
+    {
+        uint32_t oldParentIdx = veEntityIndex( oldParent );
+        assert( oldParentIdx < rel->maxEntities );
+        veRemoveChildFromParent( rel, oldParentIdx, child );
+    }
+
+    rel->parents[childIdx] = parent;
+
+    if ( parent == VECS_INVALID_ENTITY )
+    {
+        return;
+    }
+
+    uint32_t parentIdx = veEntityIndex( parent );
+    assert( parentIdx < rel->maxEntities );
+    if ( rel->childCounts[parentIdx] >= rel->childCapacities[parentIdx] )
+    {
+        uint32_t newCap = rel->childCapacities[parentIdx] ? rel->childCapacities[parentIdx] * 2u : 4u;
+        veEntity* newChildren = ( veEntity* )std::realloc( rel->children[parentIdx], ( size_t )newCap * sizeof( veEntity ) );
+        assert( newChildren );
+        rel->children[parentIdx] = newChildren;
+        rel->childCapacities[parentIdx] = newCap;
+    }
+    rel->children[parentIdx][rel->childCounts[parentIdx]++] = child;
+}
+
+inline void veClearChildren( veRelationshipData* rel, veEntity parent )
+{
+    assert( rel );
+    uint32_t parentIdx = veEntityIndex( parent );
+    if ( parentIdx >= rel->maxEntities )
+    {
+        return;
+    }
+
+    uint32_t count = rel->childCounts[parentIdx];
+    for ( uint32_t i = 0; i < count; i++ )
+    {
+        veEntity child = rel->children[parentIdx][i];
+        uint32_t childIdx = veEntityIndex( child );
+        if ( childIdx < rel->maxEntities )
+        {
+            rel->parents[childIdx] = VECS_INVALID_ENTITY;
+        }
+    }
+    rel->childCounts[parentIdx] = 0;
 }
 
 inline veEntity veGetParent( veRelationshipData* rel, veEntity child )
@@ -642,12 +718,7 @@ inline veEntity veGetChild( veRelationshipData* rel, veEntity parent, uint32_t i
     {
         return VECS_INVALID_ENTITY;
     }
-    uint32_t offset = 0;
-    for ( uint32_t i = 0; i < idx; i++ )
-    {
-        offset += rel->childCapacities[i] ? rel->childCapacities[i] : 4u;
-    }
-    return rel->children[offset + index];
+    return rel->children[idx][index];
 }
 
 // --------------------------------------------------------------------------
@@ -678,10 +749,17 @@ inline uint32_t veNextTypeId()
 }
 
 template< typename T >
-inline uint32_t veTypeId()
+inline uint32_t veTypeIdRaw()
 {
     static uint32_t id = veNextTypeId();
     return id;
+}
+
+template< typename T >
+inline uint32_t veTypeId()
+{
+    using Raw = std::remove_cv_t<std::remove_reference_t<T>>;
+    return veTypeIdRaw<Raw>();
 }
 
 inline veWorld* veCreateWorld( uint32_t maxEntities = VECS_MAX_ENTITIES )
@@ -748,15 +826,24 @@ inline void veDestroyRecursive( veWorld* w, veEntity e )
     
     if ( w->relationships )
     {
-        uint32_t childCount = veGetChildCount( w->relationships, e );
-        for ( uint32_t i = 0; i < childCount; i++ )
+        while ( veGetChildCount( w->relationships, e ) > 0u )
         {
-            veEntity child = veGetChild( w->relationships, e, i );
+            veEntity child = veGetChild( w->relationships, e, 0u );
             if ( child != VECS_INVALID_ENTITY && veAlive( w, child ) )
             {
                 veDestroyRecursive( w, child );
             }
+            else if ( child != VECS_INVALID_ENTITY )
+            {
+                veSetParent( w->relationships, child, VECS_INVALID_ENTITY );
+            }
+            else
+            {
+                break;
+            }
         }
+        veSetParent( w->relationships, e, VECS_INVALID_ENTITY );
+        veClearChildren( w->relationships, e );
     }
     
     uint32_t entityIndex = veEntityIndex( e );
@@ -797,12 +884,13 @@ inline vePool* veEnsurePool( veWorld* w )
     assert( id < VECS_MAX_COMPONENTS );
     if ( !w->pools[id] )
     {
+        constexpr bool kTag = std::is_empty<T>::value;
         void ( *dtor )( void* ) = nullptr;
-        if constexpr ( !std::is_trivially_destructible<T>::value )
+        if constexpr ( !kTag && !std::is_trivially_destructible<T>::value )
         {
             dtor = []( void* ptr ) { static_cast<T*>( ptr )->~T(); };
         }
-        w->pools[id] = veCreatePool( w->maxEntities, sizeof( T ), alignof( T ), dtor );
+        w->pools[id] = veCreatePool( w->maxEntities, kTag ? 0u : ( uint32_t )sizeof( T ), kTag ? 1u : ( uint32_t )alignof( T ), dtor, kTag );
     }
     return w->pools[id];
 }
@@ -816,11 +904,29 @@ inline T* veSet( veWorld* w, veEntity e, const T& val = {} )
     uint32_t componentId = veTypeId<T>();
     if ( vePoolHas( pool, idx ) )
     {
-        T* ptr = ( T* )vePoolGet( pool, idx );
-        *ptr = val;
-        return ptr;
+        if constexpr ( std::is_empty<T>::value )
+        {
+            static T tagValue = {};
+            return &tagValue;
+        }
+        else
+        {
+            T* ptr = ( T* )vePoolGet( pool, idx );
+            *ptr = val;
+            return ptr;
+        }
     }
-    T* result = ( T* )vePoolSet( pool, idx, &val );
+    T* result = nullptr;
+    if constexpr ( std::is_empty<T>::value )
+    {
+        vePoolSet( pool, idx, nullptr );
+        static T tagValue = {};
+        result = &tagValue;
+    }
+    else
+    {
+        result = ( T* )vePoolSet( pool, idx, &val );
+    }
     for ( uint32_t i = 0; i < w->observers->count; i++ )
     {
         veObserver& obs = w->observers->observers[i];
@@ -860,7 +966,17 @@ inline T* veGet( veWorld* w, veEntity e )
     {
         return nullptr;
     }
-    return ( T* )vePoolGet( w->pools[id], veEntityIndex( e ) );
+    vePool* pool = w->pools[id];
+    if constexpr ( std::is_empty<T>::value )
+    {
+        if ( !vePoolHas( pool, veEntityIndex( e ) ) )
+        {
+            return nullptr;
+        }
+        static T tagValue = {};
+        return &tagValue;
+    }
+    return ( T* )vePoolGet( pool, veEntityIndex( e ) );
 }
 
 template< typename T >
@@ -895,6 +1011,57 @@ inline veEntity veClone( veWorld* w, veEntity src )
         }
     }
     return dst;
+}
+
+inline void veInstantiateBatch( veWorld* w, veEntity prefab, veEntity* out, uint32_t count )
+{
+    assert( w );
+    assert( veAlive( w, prefab ) );
+    assert( out || count == 0u );
+
+    struct vePrefabPoolCopy
+    {
+        vePool* pool;
+        const void* srcData;
+    };
+
+    vePrefabPoolCopy active[VECS_MAX_COMPONENTS] = {};
+    uint32_t activeCount = 0;
+    uint32_t prefabIdx = veEntityIndex( prefab );
+
+    for ( uint32_t i = 0; i < VECS_MAX_COMPONENTS; i++ )
+    {
+        vePool* pool = w->pools[i];
+        if ( pool && vePoolHas( pool, prefabIdx ) )
+        {
+            active[activeCount].pool = pool;
+            active[activeCount].srcData = pool->noData ? nullptr : vePoolGet( pool, prefabIdx );
+            activeCount++;
+        }
+    }
+
+    for ( uint32_t i = 0; i < count; i++ )
+    {
+        veEntity e = veCreate( w );
+        out[i] = e;
+        if ( e == VECS_INVALID_ENTITY )
+        {
+            continue;
+        }
+
+        uint32_t dstIdx = veEntityIndex( e );
+        for ( uint32_t j = 0; j < activeCount; j++ )
+        {
+            if ( active[j].pool->noData )
+            {
+                vePoolSet( active[j].pool, dstIdx, nullptr );
+            }
+            else
+            {
+                vePoolSet( active[j].pool, dstIdx, active[j].srcData );
+            }
+        }
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -1084,6 +1251,13 @@ inline vePool* getPool( veWorld* w )
 template< typename T >
 inline T* getData( vePool* pool, uint32_t entityIdx )
 {
+    if constexpr ( std::is_empty<T>::value )
+    {
+        ( void )pool;
+        ( void )entityIdx;
+        static T tagValue = {};
+        return &tagValue;
+    }
     uint32_t dense = pool->sparse[entityIdx];
     return ( T* )( pool->denseData + ( size_t )dense * pool->stride );
 }
@@ -1514,7 +1688,7 @@ inline void veEach( veWorld* w, Fn&& fn )
         {
             uint32_t entityIdx = pool->denseEntities[i];
             veEntity entity = veMakeEntity( entityIdx, w->entities->generations[entityIdx] );
-            First* data = ( First* )( pool->denseData + ( size_t )i * pool->stride );
+            First* data = veDetail::getData<First>( pool, entityIdx );
             fn( entity, *data );
         }
     }
@@ -1797,18 +1971,23 @@ inline void veCmdSet( veCommandBuffer* cb, veEntity e, const T& val )
     {
         veCmdGrowCommands( cb );
     }
-    veCmdGrowData( cb, sizeof( T ) );
     veCommand& cmd = cb->commands[cb->commandCount++];
     cmd.type = veCommand::SET_COMPONENT;
     cmd.entity = e;
     cmd.componentId = veTypeId<T>();
-    cmd.dataOffset = cb->dataSize;
-    cmd.dataSize = sizeof( T );
+    cmd.dataOffset = 0;
+    cmd.dataSize = 0;
     cmd.createdIndex = VECS_INVALID_INDEX;
     cmd.pool = pool;
     cmd.parent = VECS_INVALID_ENTITY;
-    std::memcpy( cb->dataBuffer + cb->dataSize, &val, sizeof( T ) );
-    cb->dataSize += sizeof( T );
+    if constexpr ( !std::is_empty<T>::value )
+    {
+        veCmdGrowData( cb, sizeof( T ) );
+        cmd.dataOffset = cb->dataSize;
+        cmd.dataSize = sizeof( T );
+        std::memcpy( cb->dataBuffer + cb->dataSize, &val, sizeof( T ) );
+        cb->dataSize += sizeof( T );
+    }
 }
 
 template< typename T >
@@ -1869,14 +2048,24 @@ inline void veFlush( veCommandBuffer* cb )
                 if ( veAlive( cb->world, cmd.entity ) )
                 {
                     uint32_t idx = veEntityIndex( cmd.entity );
-                    void* data = cb->dataBuffer + cmd.dataOffset;
-                    if ( vePoolHas( cmd.pool, idx ) )
+                    if ( cmd.pool->noData )
                     {
-                        std::memcpy( vePoolGet( cmd.pool, idx ), data, cmd.dataSize );
+                        if ( !vePoolHas( cmd.pool, idx ) )
+                        {
+                            vePoolSet( cmd.pool, idx, nullptr );
+                        }
                     }
                     else
                     {
-                        vePoolSet( cmd.pool, idx, data );
+                        void* data = cb->dataBuffer + cmd.dataOffset;
+                        if ( vePoolHas( cmd.pool, idx ) )
+                        {
+                            std::memcpy( vePoolGet( cmd.pool, idx ), data, cmd.dataSize );
+                        }
+                        else
+                        {
+                            vePoolSet( cmd.pool, idx, data );
+                        }
                     }
                 }
                 break;
