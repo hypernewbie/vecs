@@ -172,6 +172,20 @@ vecsQueryEach<Position, Velocity>( w, q, []( vecsEntity, Position& p, Velocity& 
 vecsDestroyQuery( q );
 ```
 
+## Performance
+
+Benchmarks performed on **Windows (AMD Ryzen 9 5950X)** comparing **Vecs (Auto SIMD)** vs **EnTT (v3.13.0)**.
+
+### Core Operations
+
+| Operation | Vecs | EnTT | Ratio |
+| :--- | :--- | :--- | :--- |
+| **Entity Create** | 1.75 B ops/s | 66.8 M ops/s | **26.2x** |
+| **Component Insert** | 159.9 M ops/s | 42.6 M ops/s | **3.7x** |
+| **Query Iterate** | 72.3 B ops/s | 0.99 B ops/s | **72.8x** |
+| **Full Destroy** | 38.0 M ops/s | 14.5 M ops/s | **2.6x** |
+| **Shotgun Deletion** | 38.2 M ops/s | 14.1 M ops/s | **2.7x** |
+
 ## Build
 
 ### Windows (clang-cl)

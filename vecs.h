@@ -68,6 +68,7 @@ constexpr uint32_t VECS_INVALID_INDEX  = UINT32_MAX;
 // Bit Intrinsics
 // --------------------------------------------------------------------------
 
+// Raw speed for bit-scanning. Input MUST be non-zero (enforced by assert in debug).
 inline uint32_t vecsTzcnt( uint64_t v )
 {
     assert( v != 0 );
@@ -83,6 +84,7 @@ inline uint32_t vecsPopcnt( uint64_t v )
 // Aligned Memory
 // --------------------------------------------------------------------------
 
+// Required for SIMD paths. Alignment MUST be a power of 2.
 inline void* vecsAlignedAlloc( size_t size, size_t alignment )
 {
     assert( alignment > 0 && ( alignment & ( alignment - 1 ) ) == 0 );
@@ -125,6 +127,7 @@ inline void* vecsAlignedRealloc( void* ptr, size_t size, size_t alignment )
 // Entity
 // --------------------------------------------------------------------------
 
+// 32-bit index + 32-bit generation. Safe recycling for ~4 billion entities.
 typedef uint64_t vecsEntity;
 
 inline vecsEntity vecsMakeEntity( uint32_t index, uint32_t generation )
@@ -146,6 +149,7 @@ struct vecsEntityPool
 {
     uint32_t* generations;
     uint32_t* freeList;
+    // 256-bit bitmask per entity. Makes destruction O(active_components) instead of O(total_types).
     uint64_t* signatures[4];
     uint32_t freeCount;
     uint32_t maxEntities;
@@ -232,6 +236,7 @@ inline bool vecsEntityPoolAlive( vecsEntityPool* pool, vecsEntity entity )
 // Bitfield
 // --------------------------------------------------------------------------
 
+// Hierarchical bitmask. Top level jumps over 4096 empty entities in a single check.
 struct vecsBitfield
 {
     uint64_t topMasks[VECS_TOP_COUNT];
@@ -338,6 +343,7 @@ inline void vecsBitfieldJoin( const vecsBitfield* a, const vecsBitfield* b, Fn&&
 // Component Pool
 // --------------------------------------------------------------------------
 
+// Hybrid Sparse-Set + Bitfield. SIMD queries use the bitfield; lookups use the sparse set.
 struct vecsPool
 {
     vecsBitfield bitfield;
@@ -348,7 +354,7 @@ struct vecsPool
     uint32_t capacity;
     uint32_t stride;
     uint32_t alignment;
-    bool noData;
+    bool noData; // Optimised path for Zero-Byte Tags.
     void ( *destructor )( void* );
 };
 
@@ -744,6 +750,7 @@ inline vecsEntity vecsGetChild( vecsRelationshipData* rel, vecsEntity parent, ui
 // World
 // --------------------------------------------------------------------------
 
+// The central registry. Maintains pools, observers, and hierarchy.
 struct vecsWorld
 {
     struct vecsSingletonSlot
@@ -853,6 +860,8 @@ inline bool vecsAlive( vecsWorld* w, vecsEntity e )
     return vecsEntityPoolAlive( w->entities, e );
 }
 
+// Cascading destruction. Nuke the entity and its entire child subtree.
+// Uses Entity Signatures to skip empty component pools at O(active_components) speed.
 inline void vecsDestroyRecursive( vecsWorld* w, vecsEntity e )
 {
     assert( w );
@@ -1062,6 +1071,8 @@ inline vecsEntity vecsClone( vecsWorld* w, vecsEntity src )
     return dst;
 }
 
+// Mass-spawn prefab instances. Prefab data is buffered to temporary memory first 
+// to prevent pointer invalidation if the world grows during the batch.
 inline void vecsInstantiateBatch( vecsWorld* w, vecsEntity prefab, vecsEntity* out, uint32_t count )
 {
     assert( w );
@@ -1530,6 +1541,8 @@ inline __m256i andTopMasksAvx2( Tuple& pools, uint32_t ti, std::index_sequence<I
 }
 #endif
 
+// Vectorised join. Intersects bitfields to jump over large gaps. 
+// Note: In 100% dense worlds, Scalar may be slightly faster due to lower setup overhead.
 template< typename... Components, typename Tuple, typename Fn >
 inline void eachJoinSimd( vecsWorld* w, Tuple& pools, Fn&& fn )
 {
