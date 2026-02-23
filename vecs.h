@@ -29,6 +29,7 @@
 #include <type_traits>
 #include <tuple>
 #include <utility>
+#include <stdexcept>
 
 #ifndef VECS_NO_SIMD
     #if defined( __AVX2__ )
@@ -1301,6 +1302,7 @@ inline void buildQueryWith( vecsWorld* w, vecsQuery* q )
 template< typename... Without >
 inline void buildQueryWithout( vecsWorld* w, vecsQuery* q )
 {
+    ( void )w;
     if constexpr ( sizeof...( Without ) > 0 )
     {
         uint32_t ids[] = { vecsTypeId<Without>()... };
@@ -1315,6 +1317,7 @@ inline void buildQueryWithout( vecsWorld* w, vecsQuery* q )
 template< typename... Optional >
 inline void buildQueryOptional( vecsWorld* w, vecsQuery* q )
 {
+    ( void )w;
     if constexpr ( sizeof...( Optional ) > 0 )
     {
         uint32_t ids[] = { vecsTypeId<Optional>()... };
@@ -1401,6 +1404,8 @@ inline void invokeJoin( vecsWorld* w, Tuple& pools, uint32_t entityIdx, Fn&& fn,
 template< typename... With, typename WithTuple, typename OptionalTuple, typename Fn, size_t... I >
 inline void invokeQueryCallback( vecsWorld* w, WithTuple& withPools, OptionalTuple& optionalPools, uint32_t entityIdx, vecsEntity entity, Fn&& fn, std::index_sequence<I...> )
 {
+    ( void )w;
+    ( void )optionalPools;
     fn( entity, *getData<With>( std::get<I>( withPools ), entityIdx )... );
 }
 
@@ -1522,11 +1527,13 @@ inline __m128i andTopMasksSse( Tuple& pools, uint32_t ti, std::index_sequence<I.
 #endif
 
 #if defined( VECS_NEON )
+inline uint64x2_t vecsNeonLoad( const uint64_t* ptr ) { return vld1q_u64( ptr ); }
+
 template< typename Tuple, size_t... I >
 inline uint64x2_t andTopMasksNeon( Tuple& pools, uint32_t ti, std::index_sequence<I...> )
 {
     uint64x2_t joined = vdupq_n_u64( UINT64_MAX );
-    ( ( joined = vandq_u64( joined, vld1q_u64( &std::get<I>( pools )->bitfield.topMasks[ti] ) ) ), ... );
+    ( ( joined = vandq_u64( joined, vecsNeonLoad( &std::get<I>( pools )->bitfield.topMasks[ti] ) ) ), ... );
     return joined;
 }
 #endif
@@ -1826,7 +1833,7 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
                 if ( wp )
                 {
                     uint64x2_t without = vld1q_u64( &wp->bitfield.topMasks[ti] );
-                    joined = vandq_u64( joined, vmvnq_u64( without ) );
+                    joined = vreinterpretq_u64_u32( vbicq_u32( vreinterpretq_u32_u64( joined ), vreinterpretq_u32_u64( without ) ) );
                 }
             }
             if constexpr ( sizeof...( Without ) > 0 )
@@ -1836,7 +1843,7 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
                     if ( pool )
                     {
                         uint64x2_t without = vld1q_u64( &pool->bitfield.topMasks[ti] );
-                        joined = vandq_u64( joined, vmvnq_u64( without ) );
+                        joined = vreinterpretq_u64_u32( vbicq_u32( vreinterpretq_u32_u64( joined ), vreinterpretq_u32_u64( without ) ) );
                     }
                 } );
             }
@@ -2249,7 +2256,7 @@ inline void vecsQueryEachParallel( vecsWorld* w, vecsQuery* q, uint32_t startInd
                 if ( wp )
                 {
                     uint64x2_t without = vld1q_u64( &wp->bitfield.topMasks[ti] );
-                    joined = vandq_u64( joined, vmvnq_u64( without ) );
+                    joined = vreinterpretq_u64_u32( vbicq_u32( vreinterpretq_u32_u64( joined ), vreinterpretq_u32_u64( without ) ) );
                 }
             }
             if constexpr ( sizeof...( Without ) > 0 )
@@ -2259,7 +2266,7 @@ inline void vecsQueryEachParallel( vecsWorld* w, vecsQuery* q, uint32_t startInd
                     if ( pool )
                     {
                         uint64x2_t without = vld1q_u64( &pool->bitfield.topMasks[ti] );
-                        joined = vandq_u64( joined, vmvnq_u64( without ) );
+                        joined = vreinterpretq_u64_u32( vbicq_u32( vreinterpretq_u32_u64( joined ), vreinterpretq_u32_u64( without ) ) );
                     }
                 } );
             }
@@ -2506,6 +2513,7 @@ inline void invokeJoinNoEntity( Tuple& pools, uint32_t entityIdx, Fn&& fn, std::
 template< typename... With, typename Tuple, typename Fn >
 inline void eachJoinScalarNoEntity( vecsWorld* w, Tuple& pools, Fn&& fn )
 {
+    ( void )w;
     for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti++ )
     {
         uint64_t top = UINT64_MAX;

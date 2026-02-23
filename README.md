@@ -1,7 +1,11 @@
 # Vecs
 
-Vecs is a single-header, header-only C++ ECS using a two-level bitfield sparse index for fast
-`has()` checks and efficient multi-component joins.
+Vecs is a high-performance, single-header C++ ECS utilising a **two-level bitfield sparse index** for O(1) lookups and efficient vectorized joins.
+
+The architecture is inspired by the design described by [Sebastien Aaltonen](https://x.com/SebAaltonen/status/2018706822429892859).
+
+> Vecs is AI coded slop, without much oversight. Not closely engineering reviewed.
+> Don't use this library. Please write something better instead.
 
 ## Quick Start
 
