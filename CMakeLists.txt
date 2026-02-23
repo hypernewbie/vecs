@@ -17,3 +17,6 @@ endif()
 
 add_executable( vecs_test vecs_test.cpp )
 target_include_directories( vecs_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} )
+if ( EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/entt/single_include" )
+    target_include_directories( vecs_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/entt/single_include" )
+endif()

@@ -4,6 +4,13 @@
 #include <cstdio>
 #include <vector>
 
+#if defined( __has_include )
+    #if __has_include( "entt/entt.hpp" )
+        #include "entt/entt.hpp"
+        #define VECS_HAS_ENTT 1
+    #endif
+#endif
+
 struct Position { float x, y; };
 struct Velocity { float vx, vy; };
 struct Health { int hp; };
@@ -1443,6 +1450,130 @@ UTEST( benchmark, vecs_ops_per_second )
         veDestroyQuery( q );
         veDestroyWorld( w );
     }
+}
+
+UTEST( benchmark, vecs_vs_entt )
+{
+#if defined( VECS_HAS_ENTT )
+    const uint32_t activeCapacity = VECS_MAX_ENTITIES;
+    const uint64_t opTarget = 1000000ULL;
+
+    double vecsCreateOps = 0.0;
+    double enttCreateOps = 0.0;
+    {
+        veWorld* w = veCreateWorld( activeCapacity );
+        std::vector<veEntity> ring( activeCapacity, VECS_INVALID_ENTITY );
+        const auto start = std::chrono::high_resolution_clock::now();
+        for ( uint64_t i = 0; i < opTarget; i++ )
+        {
+            uint32_t slot = ( uint32_t )( i % activeCapacity );
+            if ( ring[slot] != VECS_INVALID_ENTITY )
+            {
+                veDestroy( w, ring[slot] );
+            }
+            ring[slot] = veCreate( w );
+            ASSERT_NE( ring[slot], VECS_INVALID_ENTITY );
+        }
+        vecsCreateOps = veBenchOpsPerSecond( start, opTarget );
+        veDestroyWorld( w );
+    }
+    {
+        entt::registry registry;
+        std::vector<entt::entity> entities;
+        entities.resize( ( size_t )opTarget );
+        const auto start = std::chrono::high_resolution_clock::now();
+        for ( uint64_t i = 0; i < opTarget; i++ )
+        {
+            entities[( size_t )i] = registry.create();
+        }
+        enttCreateOps = veBenchOpsPerSecond( start, opTarget );
+    }
+    std::printf( "[BENCHMARK] Entity Create | Vecs: %.0f ops/s | EnTT: %.0f ops/s\n", vecsCreateOps, enttCreateOps );
+
+    double vecsSetOps = 0.0;
+    double enttSetOps = 0.0;
+    {
+        veWorld* w = veCreateWorld( activeCapacity );
+        std::vector<veEntity> entities( activeCapacity );
+        for ( uint32_t i = 0; i < activeCapacity; i++ )
+        {
+            entities[i] = veCreate( w );
+        }
+        const auto start = std::chrono::high_resolution_clock::now();
+        for ( uint64_t i = 0; i < opTarget; i++ )
+        {
+            veEntity e = entities[( uint32_t )( i % activeCapacity )];
+            veSet<Position>( w, e, { ( float )i, 0.0f } );
+            veSet<Velocity>( w, e, { 0.0f, ( float )i } );
+        }
+        vecsSetOps = veBenchOpsPerSecond( start, opTarget * 2u );
+        veDestroyWorld( w );
+    }
+    {
+        entt::registry registry;
+        std::vector<entt::entity> entities;
+        entities.resize( ( size_t )opTarget );
+        for ( uint64_t i = 0; i < opTarget; i++ )
+        {
+            entities[( size_t )i] = registry.create();
+        }
+        const auto start = std::chrono::high_resolution_clock::now();
+        for ( uint64_t i = 0; i < opTarget; i++ )
+        {
+            const Position p = { ( float )i, 0.0f };
+            const Velocity v = { 0.0f, ( float )i };
+            registry.emplace_or_replace<Position>( entities[( size_t )i], p );
+            registry.emplace_or_replace<Velocity>( entities[( size_t )i], v );
+        }
+        enttSetOps = veBenchOpsPerSecond( start, opTarget * 2u );
+    }
+    std::printf( "[BENCHMARK] Component Insert | Vecs: %.0f ops/s | EnTT: %.0f ops/s\n", vecsSetOps, enttSetOps );
+
+    double vecsIterOps = 0.0;
+    double enttIterOps = 0.0;
+    {
+        veWorld* w = veCreateWorld( activeCapacity );
+        for ( uint32_t i = 0; i < activeCapacity; i++ )
+        {
+            veEntity e = veCreate( w );
+            veSet<Position>( w, e, { ( float )i, 1.0f } );
+            veSet<Velocity>( w, e, { 2.0f, ( float )i } );
+        }
+
+        uint64_t processed = 0u;
+        const uint64_t target = 1000000ULL;
+        const auto start = std::chrono::high_resolution_clock::now();
+        while ( processed < target )
+        {
+            veEach<Position, Velocity>( w, [&]( veEntity, Position&, Velocity& ) { processed++; } );
+        }
+        vecsIterOps = veBenchOpsPerSecond( start, processed );
+        veDestroyWorld( w );
+    }
+    {
+        entt::registry registry;
+        std::vector<entt::entity> entities;
+        entities.resize( ( size_t )opTarget );
+        for ( uint64_t i = 0; i < opTarget; i++ )
+        {
+            entt::entity e = registry.create();
+            entities[( size_t )i] = e;
+            registry.emplace<Position>( e, Position{ ( float )i, 1.0f } );
+            registry.emplace<Velocity>( e, Velocity{ 2.0f, ( float )i } );
+        }
+
+        uint64_t processed = 0u;
+        const auto start = std::chrono::high_resolution_clock::now();
+        registry.view<Position, Velocity>().each( [&]( Position&, Velocity& )
+        {
+            processed++;
+        } );
+        enttIterOps = veBenchOpsPerSecond( start, processed );
+    }
+    std::printf( "[BENCHMARK] Query Iterate | Vecs: %.0f ops/s | EnTT: %.0f ops/s\n", vecsIterOps, enttIterOps );
+#else
+    std::printf( "[BENCHMARK] Vecs vs EnTT skipped (entt/entt.hpp not found).\n" );
+#endif
 }
 
 UTEST_MAIN();
