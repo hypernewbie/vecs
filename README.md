@@ -192,6 +192,8 @@ Benchmarks performed on **Windows (AMD Ryzen 9 5950X)** comparing **Vecs (Auto S
 | **Full Destroy** | 38.0 M ops/s | 14.5 M ops/s | **2.6x** |
 | **Shotgun Deletion** | 38.2 M ops/s | 14.1 M ops/s | **2.7x** |
 
+There are also a lot of projects out there that use EnTT as a basis for comparison (this should already tell you a lot). This is one of those projects. Our benchmarks are completely wrong and incomplete, good at omitting basically all useful information, and we used the wrong function to compare several features. However, even if used poorly, no one cares because no one uses Vecs.
+
 ## Build
 
 ### Windows (clang-cl)
