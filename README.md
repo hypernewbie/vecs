@@ -210,6 +210,29 @@ cmake --build build
 ./build/vecs_test
 ```
 
+## Debugger Visualizations
+
+Vecs includes a `.natvis` file for enhanced debugging in Visual Studio. The visualizers provide human‑readable views of entity IDs, component pools, relationships, queries, and command buffers.
+
+**Installation**:
+1. Copy `vecs.natvis` to your solution directory.
+2. In Visual Studio: **Debug → Options → Debugging → Symbols → Add .natvis file**.
+3. Or add to your `.vcxproj`:
+   ```xml
+   <ItemGroup>
+     <Natvis Include="vecs.natvis" />
+   </ItemGroup>
+   ```
+
+**Features**:
+- **vecsEntity**: Shows `index:generation` instead of raw 64‑bit value.
+- **vecsWorld**: Displays alive entity count, active component pools, relationships, observers, and singletons.
+- **vecsPool**: Shows component count, stride, and bitfield state.
+- **vecsQuery**: Lists required, excluded, and optional component IDs.
+- **vecsCommandBuffer**: Lists deferred commands and pending entity creations.
+
+Use `,view(simple)` in the Watch window to reduce detail.
+
 ## Notes
 
 - C++17 minimum.

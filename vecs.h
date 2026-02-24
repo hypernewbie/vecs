@@ -848,6 +848,85 @@ inline void vecsDestroyWorld( vecsWorld* world )
     std::free( world );
 }
 
+// Reset the world to its initial empty state, preserving allocated memory.
+inline void vecsClearWorld( vecsWorld* world )
+{
+    if ( !world )
+    {
+        return;
+    }
+
+    for ( uint32_t i = 0; i < VECS_MAX_COMPONENTS; i++ )
+    {
+        vecsPool* pool = world->pools[i];
+        if ( pool )
+        {
+            if ( pool->destructor && !pool->noData )
+            {
+                for ( uint32_t j = 0; j < pool->count; j++ )
+                {
+                    pool->destructor( pool->denseData + ( size_t )j * pool->stride );
+                }
+            }
+            pool->count = 0;
+            vecsBitfieldClearAll( &pool->bitfield );
+            for ( uint32_t j = 0; j < world->maxEntities; j++ )
+            {
+                pool->sparse[j] = VECS_INVALID_INDEX;
+            }
+        }
+
+        if ( world->singletons[i].data )
+        {
+            if ( world->singletons[i].destructor )
+            {
+                world->singletons[i].destructor( world->singletons[i].data );
+            }
+            std::free( world->singletons[i].data );
+            world->singletons[i].data = nullptr;
+            world->singletons[i].size = 0;
+            world->singletons[i].destructor = nullptr;
+        }
+    }
+
+    vecsEntityPool* ep = world->entities;
+    ep->freeCount = world->maxEntities;
+    ep->alive = 0;
+    for ( uint32_t i = 0; i < world->maxEntities; i++ )
+    {
+        ep->freeList[i] = world->maxEntities - i - 1;
+    }
+    for ( uint32_t i = 0; i < 4; i++ )
+    {
+        std::memset( ep->signatures[i], 0, world->maxEntities * sizeof( uint64_t ) );
+    }
+    for ( uint32_t i = 0; i < world->maxEntities; i++ )
+    {
+        ep->generations[i]++;
+    }
+
+    vecsRelationshipData* rel = world->relationships;
+    for ( uint32_t i = 0; i < world->maxEntities; i++ )
+    {
+        rel->parents[i] = VECS_INVALID_ENTITY;
+        if ( rel->children[i] )
+        {
+            std::free( rel->children[i] );
+            rel->children[i] = nullptr;
+        }
+        rel->childCounts[i] = 0;
+        rel->childCapacities[i] = 0;
+    }
+
+    if ( world->observers )
+    {
+        vecsObserverListDestroy( world->observers );
+        world->observers->observers = nullptr;
+        world->observers->count = 0;
+        world->observers->capacity = 0;
+    }
+}
+
 inline vecsEntity vecsCreate( vecsWorld* w )
 {
     assert( w );

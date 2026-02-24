@@ -1,0 +1,346 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+<!--
+  Vecs ECS Debugger Visualizations
+  ================================
+  This file provides custom debugger views for Vecs ECS structures in Visual Studio.
+  
+  Installation:
+  1. Copy this file to your solution directory
+  2. In Visual Studio: Debug → Options → Debugging → Symbols → Add .natvis file
+  3. Or add to your .vcxproj: <ItemGroup><Natvis Include="vecs.natvis" /></ItemGroup>
+  
+  Structures visualized:
+  - vecsEntity: Shows index:generation format
+  - vecsWorld: Entity count, component pools, relationships, observers, singletons
+  - vecsEntityPool: Entity lifecycle state
+  - vecsPool: Component storage (sparse set + bitfield)
+  - vecsBitfield: Hierarchical bitmask
+  - vecsRelationshipData: Parent-child hierarchy
+  - vecsObserverList: Event callbacks
+  
+  Use "simple" view to reduce detail: In Watch window, append ",view(simple)" after variable.
+--> 
+
+  <!-- vecsEntity - 64-bit entity ID (index:generation) -->
+  <Type Name="vecsEntity">
+    <Intrinsic Name="index" Expression="(unsigned int)(this &amp; 0xFFFFFFFF)" />
+    <Intrinsic Name="generation" Expression="(unsigned int)(this &gt;&gt; 32)" />
+    <DisplayString>{{{index}:{generation}}}</DisplayString>
+    <Expand>
+      <Item Name="index">index</Item>
+      <Item Name="generation">generation</Item>
+      <Item Name="raw">this, x</Item>
+    </Expand>
+  </Type>
+
+  <!-- vecsBitfield - Hierarchical bitmask for entity membership -->
+  <Type Name="vecsBitfield">
+    <DisplayString>{{Bitfield}}</DisplayString>
+    <Expand>
+      <Item Name="top masks" ExcludeView="simple">topMasks, [16]</Item>
+      <Item Name="l2 masks" ExcludeView="simple">l2Masks, [1024]</Item>
+    </Expand>
+  </Type>
+
+  <!-- vecsEntityPool - Entity lifecycle management -->
+  <Type Name="vecsEntityPool">
+    <DisplayString>{{EntityPool | {alive} alive | {freeCount} free | {maxEntities} max}}</DisplayString>
+    <Expand>
+      <Item Name="alive">alive</Item>
+      <Item Name="free">freeCount</Item>
+      <Item Name="max">maxEntities</Item>
+      <Synthetic Name="[generations]" ExcludeView="simple">
+        <DisplayString>Entity generations ({maxEntities} total)</DisplayString>
+        <Expand>
+          <ArrayItems>
+            <Size>maxEntities</Size>
+            <ValuePointer>generations</ValuePointer>
+          </ArrayItems>
+        </Expand>
+      </Synthetic>
+      <Synthetic Name="[free list]" ExcludeView="simple">
+        <DisplayString>Free list ({freeCount} entries)</DisplayString>
+        <Expand>
+          <ArrayItems>
+            <Size>freeCount</Size>
+            <ValuePointer>freeList</ValuePointer>
+          </ArrayItems>
+        </Expand>
+      </Synthetic>
+      <Synthetic Name="[signatures]" ExcludeView="simple">
+        <DisplayString>Component signatures (4 × uint64 per entity)</DisplayString>
+        <Expand>
+          <Item Name="[0]">signatures[0], [maxEntities]</Item>
+          <Item Name="[1]">signatures[1], [maxEntities]</Item>
+          <Item Name="[2]">signatures[2], [maxEntities]</Item>
+          <Item Name="[3]">signatures[3], [maxEntities]</Item>
+        </Expand>
+      </Synthetic>
+    </Expand>
+  </Type>
+
+  <!-- vecsPool - Component storage (sparse set + bitfield) -->
+  <Type Name="vecsPool">
+    <DisplayString>{{ComponentPool | {count} entities | stride:{stride} | {noData ? "tag" : "data"}}}</DisplayString>
+    <Expand>
+      <Item Name="count">count</Item>
+      <Item Name="capacity">capacity</Item>
+      <Item Name="stride">stride</Item>
+      <Item Name="alignment">alignment</Item>
+      <Item Name="noData" Condition="noData">true</Item>
+      <Synthetic Name="[bitfield]">
+        <DisplayString>Bitfield</DisplayString>
+        <Expand>
+          <Item Name="data">bitfield,nat</Item>
+        </Expand>
+      </Synthetic>
+      <Synthetic Name="[entities]" Condition="count > 0">
+        <DisplayString>{count} entities with this component</DisplayString>
+        <Expand>
+          <ArrayItems>
+            <Size>count</Size>
+            <ValuePointer>denseEntities</ValuePointer>
+          </ArrayItems>
+        </Expand>
+      </Synthetic>
+      <Synthetic Name="[sparse]" ExcludeView="simple">
+        <DisplayString>Sparse array (first 100 entries)</DisplayString>
+        <Expand>
+          <ArrayItems>
+            <Size>100</Size>
+            <ValuePointer>sparse</ValuePointer>
+          </ArrayItems>
+        </Expand>
+      </Synthetic>
+    </Expand>
+  </Type>
+
+  <!-- vecsRelationshipData - Parent-child hierarchy -->
+  <Type Name="vecsRelationshipData">
+    <DisplayString>{{Relationships | {maxEntities} entities}}</DisplayString>
+    <Expand>
+      <Item Name="maxEntities">maxEntities</Item>
+      <Synthetic Name="[parents]" ExcludeView="simple">
+        <DisplayString>Parent entities</DisplayString>
+        <Expand>
+          <ArrayItems>
+            <Size>maxEntities</Size>
+            <ValuePointer>parents</ValuePointer>
+          </ArrayItems>
+        </Expand>
+      </Synthetic>
+      <Synthetic Name="[children]" ExcludeView="simple">
+        <DisplayString>Child lists</DisplayString>
+        <Expand>
+          <CustomListItems>
+            <Variable Name="i" InitialValue="0" />
+            <Loop>
+              <Break Condition="i >= maxEntities" />
+              <If Condition="childCounts[i] > 0">
+                <Item Name="[{i}] ({childCounts[i]} children)">
+                  <DisplayString>Children of entity {i}: {childCounts[i]} items</DisplayString>
+                  <Expand>
+                    <ArrayItems>
+                      <Size>childCounts[i]</Size>
+                      <ValuePointer>children[i]</ValuePointer>
+                    </ArrayItems>
+                  </Expand>
+                </Item>
+              </If>
+              <Exec>i = i + 1</Exec>
+            </Loop>
+          </CustomListItems>
+        </Expand>
+      </Synthetic>
+    </Expand>
+  </Type>
+
+  <!-- vecsWorld - Central ECS registry -->
+  <Type Name="vecsWorld">
+    <DisplayString>{{vecsWorld | {entities->alive}/{maxEntities} entities}}</DisplayString>
+    <Expand>
+      <Item Name="[entities]">entities,nat</Item>
+      <Item Name="maxEntities">maxEntities</Item>
+      <Synthetic Name="[active pools]" ExcludeView="simple">
+        <DisplayString>Component pools</DisplayString>
+        <Expand>
+          <CustomListItems>
+            <Variable Name="i" InitialValue="0" />
+            <Loop>
+              <Break Condition="i >= 256" />
+              <If Condition="pools[i] != 0">
+                <Item Name="[{i}]">
+                  <DisplayString>Pool {i}: {pools[i]->count} entities</DisplayString>
+                  <Expand>
+                    <ExpandedItem>pools[i],nat</ExpandedItem>
+                  </Expand>
+                </Item>
+              </If>
+              <Exec>i = i + 1</Exec>
+            </Loop>
+          </CustomListItems>
+        </Expand>
+      </Synthetic>
+      <Synthetic Name="[relationships]" Condition="relationships != 0">
+        <DisplayString>Hierarchy</DisplayString>
+        <Expand>
+          <Item Name="data">relationships,nat</Item>
+        </Expand>
+      </Synthetic>
+      <Synthetic Name="[observers]" Condition="observers != 0">
+        <DisplayString>Observers: {observers->count} callbacks</DisplayString>
+        <Expand>
+          <Item Name="data">observers,nat</Item>
+        </Expand>
+      </Synthetic>
+      <Synthetic Name="[singletons]" ExcludeView="simple">
+        <DisplayString>Singletons</DisplayString>
+        <Expand>
+          <CustomListItems>
+            <Variable Name="i" InitialValue="0" />
+            <Loop>
+              <Break Condition="i >= 256" />
+              <If Condition="singletons[i].data != 0">
+                <Item Name="[{i}]">
+                  <DisplayString>Singleton {i}: {singletons[i].size} bytes</DisplayString>
+                  <Expand>
+                    <Item Name="data">singletons[i].data,na</Item>
+                    <Item Name="size">singletons[i].size</Item>
+                  </Expand>
+                </Item>
+              </If>
+              <Exec>i = i + 1</Exec>
+            </Loop>
+          </CustomListItems>
+        </Expand>
+      </Synthetic>
+    </Expand>
+  </Type>
+
+  <!-- vecsObserverList - Event callback registry -->
+  <Type Name="vecsObserverList">
+    <DisplayString>{{ObserverList | {count} observers | capacity:{capacity}}}</DisplayString>
+    <Expand>
+      <Item Name="count">count</Item>
+      <Item Name="capacity">capacity</Item>
+      <Synthetic Name="[observers]" Condition="count > 0">
+        <DisplayString>{count} observers</DisplayString>
+        <Expand>
+          <ArrayItems>
+            <Size>count</Size>
+            <ValuePointer>observers</ValuePointer>
+          </ArrayItems>
+        </Expand>
+      </Synthetic>
+    </Expand>
+  </Type>
+
+  <!-- vecsObserver - Individual observer entry -->
+  <Type Name="vecsObserver">
+    <DisplayString>{{Observer | component:{componentId} | {onAdd ? "onAdd" : "onRemove"}}}</DisplayString>
+    <Expand>
+      <Item Name="componentId">componentId</Item>
+      <Item Name="onAdd">onAdd</Item>
+      <Item Name="callback">callback</Item>
+    </Expand>
+  </Type>
+
+  <!-- vecsQuery - Component query definition -->
+  <Type Name="vecsQuery">
+    <DisplayString>{{Query | with:{withCount} | without:{withoutCount} | optional:{optionalCount}}}</DisplayString>
+    <Expand>
+      <Item Name="with count">withCount</Item>
+      <Item Name="without count">withoutCount</Item>
+      <Item Name="optional count">optionalCount</Item>
+      <Synthetic Name="[with components]" Condition="withCount > 0">
+        <DisplayString>{withCount} required components</DisplayString>
+        <Expand>
+          <ArrayItems>
+            <Size>withCount</Size>
+            <ValuePointer>withIds</ValuePointer>
+          </ArrayItems>
+        </Expand>
+      </Synthetic>
+      <Synthetic Name="[without components]" Condition="withoutCount > 0">
+        <DisplayString>{withoutCount} excluded components</DisplayString>
+        <Expand>
+          <ArrayItems>
+            <Size>withoutCount</Size>
+            <ValuePointer>withoutIds</ValuePointer>
+          </ArrayItems>
+        </Expand>
+      </Synthetic>
+      <Synthetic Name="[optional components]" Condition="optionalCount > 0">
+        <DisplayString>{optionalCount} optional components</DisplayString>
+        <Expand>
+          <ArrayItems>
+            <Size>optionalCount</Size>
+            <ValuePointer>optionalIds</ValuePointer>
+          </ArrayItems>
+        </Expand>
+      </Synthetic>
+      <Synthetic Name="[with mask]">
+        <DisplayString>With bitfield</DisplayString>
+        <Expand>
+          <Item Name="data">withMask,nat</Item>
+        </Expand>
+      </Synthetic>
+      <Synthetic Name="[without mask]">
+        <DisplayString>Without bitfield</DisplayString>
+        <Expand>
+          <Item Name="data">withoutMask,nat</Item>
+        </Expand>
+      </Synthetic>
+    </Expand>
+  </Type>
+
+  <!-- vecsCommand - Deferred operation -->
+  <Type Name="vecsCommand">
+    <Intrinsic Name="typeName" Expression="type == 0 ? \"CREATE\" : type == 1 ? \"DESTROY\" : type == 2 ? \"SET_COMPONENT\" : type == 3 ? \"UNSET_COMPONENT\" : type == 4 ? \"SET_PARENT\" : \"UNKNOWN\"" />
+    <DisplayString>{{Command | {typeName} | entity:{entity,na}}}</DisplayString>
+    <Expand>
+      <Item Name="type">typeName</Item>
+      <Item Name="entity">entity,nat</Item>
+      <Item Name="componentId" Condition="componentId != 4294967295">componentId</Item>
+      <Item Name="dataOffset" Condition="dataOffset != 4294967295">dataOffset</Item>
+      <Item Name="dataSize" Condition="dataSize != 0">dataSize</Item>
+      <Item Name="createdIndex" Condition="createdIndex != 4294967295">createdIndex</Item>
+      <Item Name="pool" Condition="pool != 0">pool,na</Item>
+      <Item Name="parent" Condition="parent != 18446744073709551615">parent,nat</Item>
+    </Expand>
+  </Type>
+
+  <!-- vecsCommandBuffer - Deferred operation buffer -->
+  <Type Name="vecsCommandBuffer">
+    <DisplayString>{{CommandBuffer | {commandCount} commands | {dataSize} bytes | {createdCount} created}}</DisplayString>
+    <Expand>
+      <Item Name="world">world,na</Item>
+      <Item Name="commandCount">commandCount</Item>
+      <Item Name="commandCapacity">commandCapacity</Item>
+      <Item Name="dataSize">dataSize</Item>
+      <Item Name="dataCapacity">dataCapacity</Item>
+      <Item Name="createdCount">createdCount</Item>
+      <Item Name="createdCapacity">createdCapacity</Item>
+      <Synthetic Name="[commands]" Condition="commandCount > 0">
+        <DisplayString>{commandCount} deferred commands</DisplayString>
+        <Expand>
+          <ArrayItems>
+            <Size>commandCount</Size>
+            <ValuePointer>commands</ValuePointer>
+          </ArrayItems>
+        </Expand>
+      </Synthetic>
+      <Synthetic Name="[created entities]" Condition="createdCount > 0">
+        <DisplayString>{createdCount} created entities</DisplayString>
+        <Expand>
+          <ArrayItems>
+            <Size>createdCount</Size>
+            <ValuePointer>created</ValuePointer>
+          </ArrayItems>
+        </Expand>
+      </Synthetic>
+    </Expand>
+  </Type>
+
+</AutoVisualizer>

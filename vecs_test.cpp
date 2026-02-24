@@ -60,6 +60,10 @@ static std::string vecsFormatOps( double ops )
     return std::string( buf );
 }
 
+static void vecs_test_clear_world_dummy_observer( vecsWorld*, vecsEntity, void* )
+{
+}
+
 UTEST( vecs, smoke )
 {
     ASSERT_NE( VECS_INVALID_ENTITY, 0ULL );
@@ -1001,6 +1005,86 @@ UTEST( world, instantiate_batch_prefab )
     }
 
     ASSERT_TRUE( vecsAlive( w, prefab ) );
+    vecsDestroyWorld( w );
+}
+
+UTEST( world, clear_world )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    ASSERT_TRUE( w != nullptr );
+
+    // Clear empty world
+    vecsClearWorld( w );
+    ASSERT_TRUE( w->entities->alive == 0 );
+
+    // Create entities, components, relationships, observers, singleton
+    vecsEntity e1 = vecsCreate( w );
+    vecsEntity e2 = vecsCreate( w );
+    vecsSet<Position>( w, e1, { 1.0f, 2.0f } );
+    vecsSet<Velocity>( w, e2, { 3.0f, 4.0f } );
+    vecsSetChildOf( w, e2, e1 );
+
+    // Add observer
+    vecsAddObserver( w->observers, vecsTypeId<Position>(), vecs_test_clear_world_dummy_observer, true );
+
+    // Add singleton with custom destructor
+    struct TestSingleton
+    {
+        int value;
+        ~TestSingleton()
+        {
+            // Destructor called when singleton is cleared
+        }
+    };
+    vecsSetSingleton<TestSingleton>( w, { 42 } );
+    ASSERT_TRUE( vecsGetSingleton<TestSingleton>( w ) != nullptr );
+    ASSERT_EQ( vecsGetSingleton<TestSingleton>( w )->value, 42 );
+
+    // Clear world
+    vecsClearWorld( w );
+
+    // Verify world is empty
+    ASSERT_TRUE( w->entities->alive == 0 );
+    ASSERT_TRUE( w->entities->freeCount == w->maxEntities );
+
+    // Old entity IDs should be invalid (generations incremented)
+    ASSERT_FALSE( vecsAlive( w, e1 ) );
+    ASSERT_FALSE( vecsAlive( w, e2 ) );
+
+    // Component pools should be empty
+    vecsPool* posPool = w->pools[vecsTypeId<Position>()];
+    if ( posPool )
+    {
+        ASSERT_TRUE( posPool->count == 0 );
+        // Sparse array should be reset for all indices
+        bool allInvalid = true;
+        for ( uint32_t i = 0; i < w->maxEntities; i++ )
+        {
+            if ( posPool->sparse[i] != VECS_INVALID_INDEX )
+            {
+                allInvalid = false;
+                break;
+            }
+        }
+        ASSERT_TRUE( allInvalid );
+    }
+
+    // Relationships cleared
+    ASSERT_TRUE( w->relationships->parents[vecsEntityIndex( e1 )] == VECS_INVALID_ENTITY );
+    ASSERT_TRUE( w->relationships->parents[vecsEntityIndex( e2 )] == VECS_INVALID_ENTITY );
+
+    // Observers cleared
+    ASSERT_TRUE( w->observers->count == 0 );
+
+    // Singleton data freed
+    ASSERT_TRUE( w->singletons[vecsTypeId<TestSingleton>()].data == nullptr );
+
+    // Can create new entities after clear
+    vecsEntity e3 = vecsCreate( w );
+    ASSERT_TRUE( vecsAlive( w, e3 ) );
+    vecsSet<Position>( w, e3, { 5.0f, 6.0f } );
+    ASSERT_TRUE( vecsHas<Position>( w, e3 ) );
+
     vecsDestroyWorld( w );
 }
 
