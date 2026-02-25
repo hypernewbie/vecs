@@ -2868,4 +2868,337 @@ UTEST( edge_case, zero_capacity_pool_growth )
     vecsDestroyWorld( w );
 }
 
+UTEST( first_match, single_component )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    vecsEntity e1 = vecsCreate( w );
+    vecsEntity e2 = vecsCreate( w );
+    ( void )e1;
+    vecsSet<Position>( w, e2, { 1.0f, 2.0f } );
+
+    vecsEntity match = vecsFirstMatch<Position>( w );
+    ASSERT_EQ( match, e2 );
+
+    vecsDestroyWorld( w );
+}
+
+UTEST( first_match, multiple_components )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    for( int i = 0; i < 10; ++i )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { 1.0f, 1.0f } );
+        if ( i == 7 )
+        {
+            vecsSet<Velocity>( w, e, { 2.0f, 2.0f } );
+        }
+    }
+
+    vecsEntity match = vecsFirstMatch<Position, Velocity>( w );
+    ASSERT_TRUE( vecsAlive( w, match ) );
+    ASSERT_TRUE( ( vecsHasAll<Position, Velocity>( w, match ) ) );
+
+    vecsDestroyWorld( w );
+}
+
+UTEST( first_match, no_match )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    vecsEntity match = vecsFirstMatch<Position>( w );
+    ASSERT_EQ( match, VECS_INVALID_ENTITY );
+
+    vecsEntity e = vecsCreate( w );
+    vecsSet<Position>( w, e, { 1.0f, 1.0f } );
+    match = vecsFirstMatch<Position, Velocity>( w );
+    ASSERT_EQ( match, VECS_INVALID_ENTITY );
+
+    vecsDestroyWorld( w );
+}
+
+UTEST( first_match, query_with_without )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    vecsEntity e1 = vecsCreate( w );
+    vecsSet<Position>( w, e1, { 1.0f, 1.0f } );
+    vecsAddTag<Dead>( w, e1 );
+
+    vecsEntity e2 = vecsCreate( w );
+    vecsSet<Position>( w, e2, { 1.0f, 1.0f } );
+
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    vecsQueryAddWithout( q, vecsTypeId<Dead>() );
+
+    vecsEntity match = vecsQueryFirstMatch<Position>( w, q );
+    ASSERT_EQ( match, e2 );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( first_match, equivalent_to_foreach )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    for( int i = 0; i < 100; ++i )
+    {
+        vecsEntity e = vecsCreate( w );
+        if ( i % 3 == 0 ) vecsSet<Position>( w, e, { 1.0f, 1.0f } );
+        if ( i % 5 == 0 ) vecsSet<Velocity>( w, e, { 1.0f, 1.0f } );
+    }
+
+    vecsEntity first_match_result = vecsFirstMatch<Position, Velocity>( w );
+    
+    vecsEntity foreach_first_result = VECS_INVALID_ENTITY;
+    bool found = false;
+    vecsEach<Position, Velocity>( w, [&]( vecsEntity e, Position&, Velocity& )
+    {
+        if ( !found )
+        {
+            foreach_first_result = e;
+            found = true;
+        }
+    } );
+
+    ASSERT_EQ( first_match_result, foreach_first_result );
+
+    vecsDestroyWorld( w );
+}
+
+UTEST( first_match, simd_levels )
+{
+    vecsWorld* w = vecsCreateWorld( 10000u );
+    // Create an entity at the very end of the pool so it spans across many SIMD chunks
+    for ( int i = 0; i < 8000; ++i )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { 1.0f, 1.0f } );
+        if ( i == 7500 )
+        {
+            vecsSet<Velocity>( w, e, { 1.0f, 1.0f } );
+        }
+    }
+
+    vecsSimdLevel savedConfig = g_vecsSimdConfig;
+    vecsSimdLevel supported = vecsRuntimeSimdSupported();
+
+    auto runTest = [&]( vecsSimdLevel level )
+    {
+        g_vecsSimdConfig = level;
+        vecsEntity match = vecsFirstMatch<Position, Velocity>( w );
+        ASSERT_TRUE( vecsAlive( w, match ) );
+        ASSERT_TRUE( ( vecsHasAll<Position, Velocity>( w, match ) ) );
+    };
+
+    runTest( VECS_SIMD_SCALAR );
+#if defined( VECS_SSE2 )
+    if ( supported >= VECS_SIMD_SSE2 ) runTest( VECS_SIMD_SSE2 );
+#endif
+#if defined( VECS_AVX2 )
+    if ( supported >= VECS_SIMD_AVX2 ) runTest( VECS_SIMD_AVX2 );
+#endif
+#if defined( VECS_NEON )
+    if ( supported >= VECS_SIMD_NEON ) runTest( VECS_SIMD_NEON );
+#endif
+
+    g_vecsSimdConfig = savedConfig;
+    vecsDestroyWorld( w );
+}
+
+UTEST( query_bug, each_without_skips_chunk )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    vecsEntity e1 = vecsCreate( w );
+    vecsEntity e2 = vecsCreate( w );
+
+    vecsSet<Position>( w, e1, { 1.0f, 1.0f } );
+    vecsAddTag<Dead>( w, e1 ); // e1 is Dead
+
+    vecsSet<Position>( w, e2, { 1.0f, 1.0f } );
+    // e2 is NOT Dead, should be matched!
+
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    vecsQueryAddWithout( q, vecsTypeId<Dead>() );
+
+    uint32_t count = 0;
+    vecsQueryEach<Position>( w, q, [&]( vecsEntity, Position& )
+    {
+        count++;
+    } );
+
+    // BUG: e1 having Dead causes the entire 64-chunk to be skipped.
+    // e2 is in the same chunk, so count will be 0 instead of 1.
+    ASSERT_EQ( count, 1u );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( query_bug, parallel_without_skips_chunk )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    vecsEntity e1 = vecsCreate( w );
+    vecsEntity e2 = vecsCreate( w );
+
+    vecsSet<Position>( w, e1, { 1.0f, 1.0f } );
+    vecsAddTag<Dead>( w, e1 );
+
+    vecsSet<Position>( w, e2, { 1.0f, 1.0f } );
+
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    vecsQueryAddWithout( q, vecsTypeId<Dead>() );
+
+    std::atomic<uint32_t> count = 0;
+    vecsQueryEachParallel<Position>( w, q, 0, VECS_TOP_COUNT, [&]( vecsEntity, Position& )
+    {
+        count++;
+    } );
+
+    // BUG: Same chunk skipping bug in parallel iteration.
+    ASSERT_EQ( count.load(), 1u );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( query_bug, stress_complex_filters_skip_chunk )
+{
+    vecsWorld* w = vecsCreateWorld( 10000u );
+    
+    // Create 1000 entities
+    for ( uint32_t i = 0; i < 1000u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { 1.0f, 1.0f } );
+        
+        if ( i % 2 == 0 ) vecsSet<Velocity>( w, e, { 2.0f, 2.0f } );
+        if ( i % 3 == 0 ) vecsSet<Health>( w, e, { 100 } );
+        if ( i % 5 == 0 ) vecsAddTag<Dead>( w, e );
+        if ( i % 7 == 0 ) vecsAddTag<IsEnemy>( w, e );
+    }
+
+    vecsQuery* q = vecsBuildQuery<Position, Velocity>( w );
+    vecsQueryAddOptional( q, vecsTypeId<Health>() );
+    vecsQueryAddWithout( q, vecsTypeId<Dead>() );
+    vecsQueryAddWithout( q, vecsTypeId<IsEnemy>() );
+
+    uint32_t expected_count = 0;
+    for ( uint32_t i = 0; i < 1000u; i++ )
+    {
+        bool has_pos = true;
+        bool has_vel = ( i % 2 == 0 );
+        bool has_dead = ( i % 5 == 0 );
+        bool has_enemy = ( i % 7 == 0 );
+
+        if ( has_pos && has_vel && !has_dead && !has_enemy )
+        {
+            expected_count++;
+        }
+    }
+
+    uint32_t actual_count = 0;
+    vecsQueryEach<Position, Velocity>( w, q, [&]( vecsEntity, Position&, Velocity& )
+    {
+        actual_count++;
+    } );
+
+    // BUG: The incorrect Without mask application will skip large chunks and cause
+    // the actual count to be vastly lower than expected.
+    ASSERT_EQ( actual_count, expected_count );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( query_bug, stress_dense_with_sparse_without )
+{
+    vecsWorld* w = vecsCreateWorld( 10000u );
+    
+    // 1000 entities, densely packed With components
+    for ( uint32_t i = 0; i < 1000u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { 1.0f, 1.0f } );
+        vecsSet<Velocity>( w, e, { 2.0f, 2.0f } );
+        
+        // Very sparse Without component - exactly one per 64-chunk chunk!
+        if ( i % 64 == 0 ) vecsAddTag<Dead>( w, e );
+    }
+
+    vecsQuery* q = vecsBuildQuery<Position, Velocity>( w );
+    vecsQueryAddWithout( q, vecsTypeId<Dead>() );
+
+    uint32_t expected_count = 1000u - ( 1000u / 64u ) - ( 1000u % 64u == 0 ? 0 : 1 );
+
+    uint32_t actual_count = 0;
+    vecsQueryEach<Position, Velocity>( w, q, [&]( vecsEntity, Position&, Velocity& )
+    {
+        actual_count++;
+    } );
+
+    // BUG: This should be missing ~16 entities. 
+    // Instead, it will be missing ~1000 entities because EVERY chunk has one Dead entity!
+    ASSERT_EQ( actual_count, expected_count );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( query_bug, parallel_stress_complex_filters_skip_chunk )
+{
+    vecsWorld* w = vecsCreateWorld( 10000u );
+    
+    for ( uint32_t i = 0; i < 2000u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { 1.0f, 1.0f } );
+        
+        if ( i % 2 == 0 ) vecsSet<Velocity>( w, e, { 2.0f, 2.0f } );
+        if ( i % 3 == 0 ) vecsSet<Health>( w, e, { 100 } );
+        if ( i % 5 == 0 ) vecsAddTag<Dead>( w, e );
+        if ( i % 7 == 0 ) vecsAddTag<IsEnemy>( w, e );
+    }
+
+    vecsQuery* q = vecsBuildQuery<Position, Velocity>( w );
+    vecsQueryAddOptional( q, vecsTypeId<Health>() );
+    vecsQueryAddWithout( q, vecsTypeId<Dead>() );
+    vecsQueryAddWithout( q, vecsTypeId<IsEnemy>() );
+
+    uint32_t expected_count = 0;
+    for ( uint32_t i = 0; i < 2000u; i++ )
+    {
+        bool has_pos = true;
+        bool has_vel = ( i % 2 == 0 );
+        bool has_dead = ( i % 5 == 0 );
+        bool has_enemy = ( i % 7 == 0 );
+
+        if ( has_pos && has_vel && !has_dead && !has_enemy )
+        {
+            expected_count++;
+        }
+    }
+
+    std::atomic<uint32_t> actual_count = 0;
+
+    // Simulate multi-threaded ranged evaluation by slicing VECS_TOP_COUNT into smaller chunks
+    // For a max entity count of 65536, VECS_TOP_COUNT is 16.
+    const uint32_t CHUNK_SIZE = 2u; 
+    for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti += CHUNK_SIZE )
+    {
+        uint32_t endTi = ( ti + CHUNK_SIZE < VECS_TOP_COUNT ) ? ( ti + CHUNK_SIZE ) : VECS_TOP_COUNT;
+        
+        // This simulates what a Task System would do by dispatching to worker threads
+        vecsQueryEachParallel<Position, Velocity>( w, q, ti, endTi, [&]( vecsEntity, Position&, Velocity& )
+        {
+            actual_count++;
+        } );
+    }
+
+    // BUG: This multi-threaded iterator uses the exact same `topMask` excluding logic.
+    // It should aggressively under-count the true number of matching entities.
+    ASSERT_EQ( actual_count.load(), expected_count );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
 UTEST_MAIN();

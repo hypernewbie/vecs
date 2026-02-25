@@ -1553,6 +1553,31 @@ inline void invokeQueryCallback( vecsWorld* w, WithTuple& withPools, OptionalTup
     fn( entity, *getData<With>( std::get<I>( withPools ), entityIdx )... );
 }
 
+template< typename Tuple >
+inline vecsEntity findFirstScalar( vecsWorld* w, Tuple& pools )
+{
+    for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti++ )
+    {
+        uint64_t top = UINT64_MAX;
+        forEachPool( pools, [&]( vecsPool* pool ) { top &= pool->bitfield.topMasks[ti]; } );
+        while ( top )
+        {
+            uint32_t tb = vecsTzcnt( top );
+            uint32_t l2Idx = ti * 64u + tb;
+            uint64_t l2 = UINT64_MAX;
+            forEachPool( pools, [&]( vecsPool* pool ) { l2 &= pool->bitfield.l2Masks[l2Idx]; } );
+            if ( l2 )
+            {
+                uint32_t lb = vecsTzcnt( l2 );
+                uint32_t entityIdx = l2Idx * 64u + lb;
+                return vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+            }
+            top &= top - 1;
+        }
+    }
+    return VECS_INVALID_ENTITY;
+}
+
 template< typename... Components, typename Tuple, typename Fn >
 inline void eachJoinScalar( vecsWorld* w, Tuple& pools, Fn&& fn )
 {
@@ -1692,11 +1717,122 @@ inline __m256i andTopMasksAvx2( Tuple& pools, uint32_t ti, std::index_sequence<I
 }
 #endif
 
-// Vectorised join. Intersects bitfields to jump over large gaps. 
+template< typename Tuple >
+inline vecsEntity findFirstSimd( vecsWorld* w, Tuple& pools )
+{
+    constexpr size_t PoolCount = std::tuple_size<Tuple>::value;
+    uint32_t ti = 0;
+    vecsSimdLevel simdLevel = vecsRuntimeSimdSupported();
+    
+#if defined( VECS_AVX2 )
+    if ( simdLevel == VECS_SIMD_AVX2 )
+    {
+        for ( ; ti + 3 < VECS_TOP_COUNT; ti += 4 )
+        {
+            __m256i joined = andTopMasksAvx2( pools, ti, std::make_index_sequence<PoolCount>() );
+            if ( _mm256_testz_si256( joined, joined ) )
+            {
+                continue;
+            }
+            alignas( 32 ) uint64_t vals[4] = {};
+            _mm256_store_si256( ( __m256i* )vals, joined );
+            for ( uint32_t k = 0; k < 4u; k++ )
+            {
+                uint64_t top = vals[k];
+                while ( top )
+                {
+                    uint32_t tb = vecsTzcnt( top );
+                    uint32_t l2Idx = ( ti + k ) * 64u + tb;
+                    uint64_t l2 = UINT64_MAX;
+                    forEachPool( pools, [&]( vecsPool* pool ) { l2 &= pool->bitfield.l2Masks[l2Idx]; } );
+                    if ( l2 )
+                    {
+                        uint32_t lb = vecsTzcnt( l2 );
+                        uint32_t entityIdx = l2Idx * 64u + lb;
+                        return vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+                    }
+                    top &= top - 1;
+                }
+            }
+        }
+    }
+    else
+#endif
+#if defined( VECS_SSE2 ) || defined( VECS_NEON )
+    if ( simdLevel == VECS_SIMD_SSE2 || simdLevel == VECS_SIMD_NEON )
+    {
+        for ( ; ti + 1 < VECS_TOP_COUNT; ti += 2 )
+        {
+            uint64_t vals[2] = {};
+#if defined( VECS_SSE2 )
+            __m128i joined = andTopMasksSse( pools, ti, std::make_index_sequence<PoolCount>() );
+            __m128i zero = _mm_setzero_si128();
+            __m128i cmp = _mm_cmpeq_epi32( joined, zero );
+            if ( _mm_movemask_epi8( cmp ) == 0xFFFF )
+            {
+                continue;
+            }
+            alignas( 16 ) uint64_t alignedVals[2] = {};
+            _mm_store_si128( ( __m128i* )alignedVals, joined );
+            vals[0] = alignedVals[0];
+            vals[1] = alignedVals[1];
+#elif defined( VECS_NEON )
+            uint64x2_t joined = andTopMasksNeon( pools, ti, std::make_index_sequence<PoolCount>() );
+            vals[0] = vgetq_lane_u64( joined, 0 );
+            vals[1] = vgetq_lane_u64( joined, 1 );
+            if ( ( vals[0] | vals[1] ) == 0 )
+            {
+                continue;
+            }
+#endif
+            for ( uint32_t k = 0; k < 2u; k++ )
+            {
+                uint64_t top = vals[k];
+                while ( top )
+                {
+                    uint32_t tb = vecsTzcnt( top );
+                    uint32_t l2Idx = ( ti + k ) * 64u + tb;
+                    uint64_t l2 = UINT64_MAX;
+                    forEachPool( pools, [&]( vecsPool* pool ) { l2 &= pool->bitfield.l2Masks[l2Idx]; } );
+                    if ( l2 )
+                    {
+                        uint32_t lb = vecsTzcnt( l2 );
+                        uint32_t entityIdx = l2Idx * 64u + lb;
+                        return vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+                    }
+                    top &= top - 1;
+                }
+            }
+        }
+    }
+#endif
+    
+    for ( ; ti < VECS_TOP_COUNT; ti++ )
+    {
+        uint64_t top = UINT64_MAX;
+        forEachPool( pools, [&]( vecsPool* pool ) { top &= pool->bitfield.topMasks[ti]; } );
+        while ( top )
+        {
+            uint32_t tb = vecsTzcnt( top );
+            uint32_t l2Idx = ti * 64u + tb;
+            uint64_t l2 = UINT64_MAX;
+            forEachPool( pools, [&]( vecsPool* pool ) { l2 &= pool->bitfield.l2Masks[l2Idx]; } );
+            if ( l2 )
+            {
+                uint32_t lb = vecsTzcnt( l2 );
+                uint32_t entityIdx = l2Idx * 64u + lb;
+                return vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+            }
+            top &= top - 1;
+        }
+    }
+    return VECS_INVALID_ENTITY;
+}
+
+// Vectorised join. Intersects bitfields to jump over large gaps.
 // Note: In 100% dense worlds, Scalar may be slightly faster due to lower setup overhead.
 template< typename... Components, typename Tuple, typename Fn >
-inline void eachJoinSimd( vecsWorld* w, Tuple& pools, Fn&& fn )
-{
+inline void eachJoinSimd( vecsWorld* w, Tuple& pools, Fn&& fn ){
     constexpr size_t N = sizeof...( Components );
     constexpr size_t PoolCount = std::tuple_size<Tuple>::value;
     uint32_t ti = 0;
@@ -1811,6 +1947,156 @@ inline void eachJoinSimd( vecsWorld* w, Tuple& pools, Fn&& fn )
 
 } // namespace vecsDetail
 
+template< typename... With >
+inline vecsEntity vecsQueryFirstMatch( vecsWorld* w, vecsQuery* q )
+{
+    assert( w );
+    assert( q );
+
+    if ( q->withCount == 0 )
+    {
+        return VECS_INVALID_ENTITY;
+    }
+
+    uint32_t ti = 0;
+    vecsSimdLevel simdLevel = vecsRuntimeSimdSupported();
+    
+#if defined( VECS_AVX2 )
+    if ( simdLevel == VECS_SIMD_AVX2 )
+    {
+        for ( ; ti + 3 < VECS_TOP_COUNT; ti += 4 )
+        {
+            __m256i joined = _mm256_loadu_si256( ( const __m256i* )&q->withMask.topMasks[ti] );
+            if ( _mm256_testz_si256( joined, joined ) )
+            {
+                continue;
+            }
+            alignas( 32 ) uint64_t vals[4] = {};
+            _mm256_store_si256( ( __m256i* )vals, joined );
+            for ( uint32_t k = 0; k < 4u; k++ )
+            {
+                uint64_t top = vals[k];
+                while ( top )
+                {
+                    uint32_t tb = vecsTzcnt( top );
+                    uint32_t l2Idx = ( ti + k ) * 64u + tb;
+                    uint64_t l2 = q->withMask.l2Masks[l2Idx];
+                    
+                    for ( uint32_t i = 0; i < q->withoutCount; i++ )
+                    {
+                        vecsPool* wp = w->pools[q->withoutIds[i]];
+                        if ( wp )
+                        {
+                            l2 &= ~wp->bitfield.l2Masks[l2Idx];
+                        }
+                    }
+                    
+                    if ( l2 )
+                    {
+                        uint32_t lb = vecsTzcnt( l2 );
+                        uint32_t entityIdx = l2Idx * 64u + lb;
+                        return vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+                    }
+                    top &= top - 1;
+                }
+            }
+        }
+    }
+    else
+#endif
+#if defined( VECS_SSE2 ) || defined( VECS_NEON )
+    if ( simdLevel == VECS_SIMD_SSE2 || simdLevel == VECS_SIMD_NEON )
+    {
+        for ( ; ti + 1 < VECS_TOP_COUNT; ti += 2 )
+        {
+            uint64_t vals[2] = {};
+#if defined( VECS_SSE2 )
+            __m128i joined = _mm_loadu_si128( ( const __m128i* )&q->withMask.topMasks[ti] );
+            __m128i zero = _mm_setzero_si128();
+            __m128i cmp = _mm_cmpeq_epi32( joined, zero );
+            if ( _mm_movemask_epi8( cmp ) == 0xFFFF )
+            {
+                continue;
+            }
+            alignas( 16 ) uint64_t alignedVals[2] = {};
+            _mm_store_si128( ( __m128i* )alignedVals, joined );
+            vals[0] = alignedVals[0];
+            vals[1] = alignedVals[1];
+#elif defined( VECS_NEON )
+            uint64x2_t joined = vld1q_u64( &q->withMask.topMasks[ti] );
+            vals[0] = vgetq_lane_u64( joined, 0 );
+            vals[1] = vgetq_lane_u64( joined, 1 );
+            if ( ( vals[0] | vals[1] ) == 0 )
+            {
+                continue;
+            }
+#endif
+            for ( uint32_t k = 0; k < 2u; k++ )
+            {
+                uint64_t top = vals[k];
+                while ( top )
+                {
+                    uint32_t tb = vecsTzcnt( top );
+                    uint32_t l2Idx = ( ti + k ) * 64u + tb;
+                    uint64_t l2 = q->withMask.l2Masks[l2Idx];
+                    
+                    for ( uint32_t i = 0; i < q->withoutCount; i++ )
+                    {
+                        vecsPool* wp = w->pools[q->withoutIds[i]];
+                        if ( wp )
+                        {
+                            l2 &= ~wp->bitfield.l2Masks[l2Idx];
+                        }
+                    }
+                    
+                    if ( l2 )
+                    {
+                        uint32_t lb = vecsTzcnt( l2 );
+                        uint32_t entityIdx = l2Idx * 64u + lb;
+                        return vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+                    }
+                    top &= top - 1;
+                }
+            }
+        }
+    }
+#endif
+    
+    for ( ; ti < VECS_TOP_COUNT; ti++ )
+    {
+        uint64_t top = q->withMask.topMasks[ti];
+        if ( top == 0 )
+        {
+            continue;
+        }
+        
+        while ( top )
+        {
+            uint32_t tb = vecsTzcnt( top );
+            uint32_t l2Idx = ti * 64u + tb;
+            uint64_t l2 = q->withMask.l2Masks[l2Idx];
+            
+            for ( uint32_t i = 0; i < q->withoutCount; i++ )
+            {
+                vecsPool* wp = w->pools[q->withoutIds[i]];
+                if ( wp )
+                {
+                    l2 &= ~wp->bitfield.l2Masks[l2Idx];
+                }
+            }
+            
+            if ( l2 )
+            {
+                uint32_t lb = vecsTzcnt( l2 );
+                uint32_t entityIdx = l2Idx * 64u + lb;
+                return vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+            }
+            top &= top - 1;
+        }
+    }
+    return VECS_INVALID_ENTITY;
+}
+
 template< typename... With, typename... Without, typename... Optional, typename Fn >
 inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
 {
@@ -1849,26 +2135,6 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
         for ( ; ti + 3 < VECS_TOP_COUNT; ti += 4 )
         {
             __m256i joined = _mm256_loadu_si256( ( const __m256i* )&q->withMask.topMasks[ti] );
-            for ( uint32_t i = 0; i < q->withoutCount; i++ )
-            {
-                vecsPool* wp = w->pools[q->withoutIds[i]];
-                if ( wp )
-                {
-                    __m256i without = _mm256_loadu_si256( ( const __m256i* )&wp->bitfield.topMasks[ti] );
-                    joined = _mm256_andnot_si256( without, joined );
-                }
-            }
-            if constexpr ( sizeof...( Without ) > 0 )
-            {
-                vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
-                {
-                    if ( pool )
-                    {
-                        __m256i without = _mm256_loadu_si256( ( const __m256i* )&pool->bitfield.topMasks[ti] );
-                        joined = _mm256_andnot_si256( without, joined );
-                    }
-                } );
-            }
             if ( _mm256_testz_si256( joined, joined ) )
             {
                 continue;
@@ -1941,26 +2207,6 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
             uint64_t vals[2] = {};
 #if defined( VECS_SSE2 )
             __m128i joined = _mm_loadu_si128( ( const __m128i* )&q->withMask.topMasks[ti] );
-            for ( uint32_t i = 0; i < q->withoutCount; i++ )
-            {
-                vecsPool* wp = w->pools[q->withoutIds[i]];
-                if ( wp )
-                {
-                    __m128i without = _mm_loadu_si128( ( const __m128i* )&wp->bitfield.topMasks[ti] );
-                    joined = _mm_andnot_si128( without, joined );
-                }
-            }
-            if constexpr ( sizeof...( Without ) > 0 )
-            {
-                vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
-                {
-                    if ( pool )
-                    {
-                        __m128i without = _mm_loadu_si128( ( const __m128i* )&pool->bitfield.topMasks[ti] );
-                        joined = _mm_andnot_si128( without, joined );
-                    }
-                } );
-            }
             __m128i zero = _mm_setzero_si128();
             __m128i cmp = _mm_cmpeq_epi32( joined, zero );
             if ( _mm_movemask_epi8( cmp ) == 0xFFFF )
@@ -1973,26 +2219,6 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
             vals[1] = alignedVals[1];
 #elif defined( VECS_NEON )
             uint64x2_t joined = vld1q_u64( &q->withMask.topMasks[ti] );
-            for ( uint32_t i = 0; i < q->withoutCount; i++ )
-            {
-                vecsPool* wp = w->pools[q->withoutIds[i]];
-                if ( wp )
-                {
-                    uint64x2_t without = vld1q_u64( &wp->bitfield.topMasks[ti] );
-                    joined = vreinterpretq_u64_u32( vbicq_u32( vreinterpretq_u32_u64( joined ), vreinterpretq_u32_u64( without ) ) );
-                }
-            }
-            if constexpr ( sizeof...( Without ) > 0 )
-            {
-                vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
-                {
-                    if ( pool )
-                    {
-                        uint64x2_t without = vld1q_u64( &pool->bitfield.topMasks[ti] );
-                        joined = vreinterpretq_u64_u32( vbicq_u32( vreinterpretq_u32_u64( joined ), vreinterpretq_u32_u64( without ) ) );
-                    }
-                } );
-            }
             vals[0] = vgetq_lane_u64( joined, 0 );
             vals[1] = vgetq_lane_u64( joined, 1 );
             if ( ( vals[0] | vals[1] ) == 0 )
@@ -2064,25 +2290,6 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
         if ( top == 0 )
         {
             continue;
-        }
-        
-        for ( uint32_t i = 0; i < q->withoutCount; i++ )
-        {
-            vecsPool* wp = w->pools[q->withoutIds[i]];
-            if ( wp )
-            {
-                top &= ~wp->bitfield.topMasks[ti];
-            }
-        }
-        if constexpr ( sizeof...( Without ) > 0 )
-        {
-            vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
-            {
-                if ( pool )
-                {
-                    top &= ~pool->bitfield.topMasks[ti];
-                }
-            } );
         }
         
         while ( top )
@@ -2184,25 +2391,6 @@ inline void vecsQueryEachParallel( vecsWorld* w, vecsQuery* q, uint32_t startInd
             return;
         }
 
-        for ( uint32_t i = 0; i < q->withoutCount; i++ )
-        {
-            vecsPool* wp = w->pools[q->withoutIds[i]];
-            if ( wp )
-            {
-                top &= ~wp->bitfield.topMasks[ti];
-            }
-        }
-        if constexpr ( sizeof...( Without ) > 0 )
-        {
-            vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
-            {
-                if ( pool )
-                {
-                    top &= ~pool->bitfield.topMasks[ti];
-                }
-            } );
-        }
-
         while ( top )
         {
             uint32_t tb = vecsTzcnt( top );
@@ -2270,26 +2458,6 @@ inline void vecsQueryEachParallel( vecsWorld* w, vecsQuery* q, uint32_t startInd
         for ( ; ti + 3u < endTi; ti += 4u )
         {
             __m256i joined = _mm256_loadu_si256( ( const __m256i* )&q->withMask.topMasks[ti] );
-            for ( uint32_t i = 0; i < q->withoutCount; i++ )
-            {
-                vecsPool* wp = w->pools[q->withoutIds[i]];
-                if ( wp )
-                {
-                    __m256i without = _mm256_loadu_si256( ( const __m256i* )&wp->bitfield.topMasks[ti] );
-                    joined = _mm256_andnot_si256( without, joined );
-                }
-            }
-            if constexpr ( sizeof...( Without ) > 0 )
-            {
-                vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
-                {
-                    if ( pool )
-                    {
-                        __m256i without = _mm256_loadu_si256( ( const __m256i* )&pool->bitfield.topMasks[ti] );
-                        joined = _mm256_andnot_si256( without, joined );
-                    }
-                } );
-            }
             if ( _mm256_testz_si256( joined, joined ) )
             {
                 continue;
@@ -2368,26 +2536,6 @@ inline void vecsQueryEachParallel( vecsWorld* w, vecsQuery* q, uint32_t startInd
             uint64_t vals[2] = {};
 #if defined( VECS_SSE2 )
             __m128i joined = _mm_loadu_si128( ( const __m128i* )&q->withMask.topMasks[ti] );
-            for ( uint32_t i = 0; i < q->withoutCount; i++ )
-            {
-                vecsPool* wp = w->pools[q->withoutIds[i]];
-                if ( wp )
-                {
-                    __m128i without = _mm_loadu_si128( ( const __m128i* )&wp->bitfield.topMasks[ti] );
-                    joined = _mm_andnot_si128( without, joined );
-                }
-            }
-            if constexpr ( sizeof...( Without ) > 0 )
-            {
-                vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
-                {
-                    if ( pool )
-                    {
-                        __m128i without = _mm_loadu_si128( ( const __m128i* )&pool->bitfield.topMasks[ti] );
-                        joined = _mm_andnot_si128( without, joined );
-                    }
-                } );
-            }
             __m128i zero = _mm_setzero_si128();
             __m128i cmp = _mm_cmpeq_epi32( joined, zero );
             if ( _mm_movemask_epi8( cmp ) == 0xFFFF )
@@ -2400,26 +2548,6 @@ inline void vecsQueryEachParallel( vecsWorld* w, vecsQuery* q, uint32_t startInd
             vals[1] = alignedVals[1];
 #elif defined( VECS_NEON )
             uint64x2_t joined = vld1q_u64( &q->withMask.topMasks[ti] );
-            for ( uint32_t i = 0; i < q->withoutCount; i++ )
-            {
-                vecsPool* wp = w->pools[q->withoutIds[i]];
-                if ( wp )
-                {
-                    uint64x2_t without = vld1q_u64( &wp->bitfield.topMasks[ti] );
-                    joined = vreinterpretq_u64_u32( vbicq_u32( vreinterpretq_u32_u64( joined ), vreinterpretq_u32_u64( without ) ) );
-                }
-            }
-            if constexpr ( sizeof...( Without ) > 0 )
-            {
-                vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
-                {
-                    if ( pool )
-                    {
-                        uint64x2_t without = vld1q_u64( &pool->bitfield.topMasks[ti] );
-                        joined = vreinterpretq_u64_u32( vbicq_u32( vreinterpretq_u32_u64( joined ), vreinterpretq_u32_u64( without ) ) );
-                    }
-                } );
-            }
             vals[0] = vgetq_lane_u64( joined, 0 );
             vals[1] = vgetq_lane_u64( joined, 1 );
             if ( ( vals[0] | vals[1] ) == 0 )
@@ -2488,6 +2616,50 @@ inline void vecsQueryEachParallel( vecsWorld* w, vecsQuery* q, uint32_t startInd
     for ( ; ti < endTi; ti++ )
     {
         processScalarTi( ti );
+    }
+}
+
+template< typename... With >
+inline vecsEntity vecsFirstMatch( vecsWorld* w )
+{
+    constexpr size_t N = sizeof...( With );
+    static_assert( N >= 1, "vecsFirstMatch requires at least one component type" );
+
+    if constexpr ( N == 1 )
+    {
+        using First = std::tuple_element_t<0, std::tuple<With...>>;
+        vecsPool* pool = vecsDetail::getPool<First>( w );
+        if ( pool && pool->count > 0 )
+        {
+            uint32_t entityIdx = pool->denseEntities[0];
+            return vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+        }
+        return VECS_INVALID_ENTITY;
+    }
+    else
+    {
+        auto pools = std::make_tuple( vecsDetail::getPool<With>( w )... );
+        bool invalid = false;
+        vecsDetail::forEachPool( pools, [&]( vecsPool* pool )
+        {
+            if ( !pool || pool->count == 0 )
+            {
+                invalid = true;
+            }
+        } );
+        if ( invalid )
+        {
+            return VECS_INVALID_ENTITY;
+        }
+
+        vecsSimdLevel simdLevel = vecsRuntimeSimdSupported();
+#if defined( VECS_SSE2 ) || defined( VECS_NEON ) || defined( VECS_AVX2 )
+        if ( simdLevel != VECS_SIMD_SCALAR )
+        {
+            return vecsDetail::findFirstSimd( w, pools );
+        }
+#endif
+        return vecsDetail::findFirstScalar( w, pools );
     }
 }
 
