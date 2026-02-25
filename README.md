@@ -186,11 +186,11 @@ Benchmarks performed on **Windows (AMD Ryzen 9 5950X)** comparing **Vecs (Auto S
 
 | Operation | Vecs | EnTT | Ratio |
 | :--- | :--- | :--- | :--- |
-| **Entity Create** | 1.75 B ops/s | 66.8 M ops/s | **26.2x** |
-| **Component Insert** | 159.9 M ops/s | 42.6 M ops/s | **3.7x** |
-| **Query Iterate** | 72.3 B ops/s | 0.99 B ops/s | **72.8x** |
-| **Full Destroy** | 38.0 M ops/s | 14.5 M ops/s | **2.6x** |
-| **Shotgun Deletion** | 38.2 M ops/s | 14.1 M ops/s | **2.7x** |
+| **Entity Create** | 1.65 B ops/s | 68.50 M ops/s | **24.0x** |
+| **Component Insert** | 154.46 M ops/s | 44.24 M ops/s | **3.4x** |
+| **Query Iterate** | 72.32 B ops/s | 936.24 M ops/s | **77.2x** |
+| **Full Destroy** | 37.77 M ops/s | 11.45 M ops/s | **3.2x** |
+| **Shotgun Deletion** | 34.94 M ops/s | 14.33 M ops/s | **2.4x** |
 
 There are also a lot of projects out there that use EnTT as a basis for comparison (this should already tell you a lot). This is one of those projects. Our benchmarks are completely wrong and incomplete, good at omitting basically all useful information, and we used the wrong function to compare several features. However, even if used poorly, no one cares because no one uses Vecs.
 

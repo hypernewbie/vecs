@@ -461,6 +461,7 @@ inline void* vecsPoolSet( vecsPool* pool, uint32_t entityIndex, const void* data
     assert( pool );
     assert( entityIndex < VECS_MAX_ENTITIES );
     assert( !vecsBitfieldHas( &pool->bitfield, entityIndex ) );
+    assert( pool->noData || data != nullptr );
     if ( pool->count == pool->capacity )
     {
         vecsPoolGrow( pool );
@@ -512,6 +513,7 @@ inline void vecsPoolUnset( vecsPool* pool, uint32_t entityIndex )
 inline void* vecsPoolGet( vecsPool* pool, uint32_t entityIndex )
 {
     assert( pool );
+    assert( entityIndex < VECS_MAX_ENTITIES );
     if ( !vecsBitfieldHas( &pool->bitfield, entityIndex ) )
     {
         return nullptr;
@@ -527,6 +529,7 @@ inline void* vecsPoolGet( vecsPool* pool, uint32_t entityIndex )
 inline bool vecsPoolHas( const vecsPool* pool, uint32_t entityIndex )
 {
     assert( pool );
+    assert( entityIndex < VECS_MAX_ENTITIES );
     return vecsBitfieldHas( &pool->bitfield, entityIndex );
 }
 
@@ -552,6 +555,7 @@ struct vecsObserverList
 
 inline void vecsObserverListGrow( vecsObserverList* list )
 {
+    assert( list );
     uint32_t cap = list->capacity ? list->capacity * 2u : 8u;
     vecsObserver* ptr = ( vecsObserver* )std::realloc( list->observers, cap * sizeof( vecsObserver ) );
     assert( ptr );
@@ -561,6 +565,7 @@ inline void vecsObserverListGrow( vecsObserverList* list )
 
 inline void vecsObserverListDestroy( vecsObserverList* list )
 {
+    assert( list );
     if ( list->observers )
     {
         std::free( list->observers );
@@ -572,14 +577,19 @@ inline void vecsObserverListDestroy( vecsObserverList* list )
 
 inline void vecsAddObserver( vecsObserverList* list, uint32_t componentId, void ( *callback )( vecsWorld*, vecsEntity, void* ), bool onAdd )
 {
+    assert( list );
+    assert( callback );
+    assert( componentId < VECS_MAX_COMPONENTS );
     if ( list->count == list->capacity )
     {
         vecsObserverListGrow( list );
     }
+    assert( list->count <= list->capacity );
     vecsObserver& obs = list->observers[list->count++];
     obs.callback = callback;
     obs.componentId = componentId;
     obs.onAdd = onAdd;
+    assert( list->count <= list->capacity );
 }
 
 // --------------------------------------------------------------------------
@@ -602,13 +612,18 @@ struct vecsRelationshipData
 
 inline vecsRelationshipData* vecsCreateRelationships( uint32_t maxEntities )
 {
+    assert( maxEntities > 0u );
+    assert( maxEntities <= VECS_MAX_ENTITIES );
     vecsRelationshipData* rel = ( vecsRelationshipData* )std::malloc( sizeof( vecsRelationshipData ) );
     assert( rel );
     rel->parents = ( vecsEntity* )std::calloc( maxEntities, sizeof( vecsEntity ) );
     rel->children = ( vecsEntity** )std::calloc( maxEntities, sizeof( vecsEntity* ) );
     rel->childCounts = ( uint32_t* )std::calloc( maxEntities, sizeof( uint32_t ) );
     rel->childCapacities = ( uint32_t* )std::calloc( maxEntities, sizeof( uint32_t ) );
+    assert( rel->parents );
     assert( rel->children );
+    assert( rel->childCounts );
+    assert( rel->childCapacities );
     rel->maxEntities = maxEntities;
     for ( uint32_t i = 0; i < maxEntities; i++ )
     {
@@ -619,6 +634,7 @@ inline vecsRelationshipData* vecsCreateRelationships( uint32_t maxEntities )
 
 inline void vecsDestroyRelationships( vecsRelationshipData* rel )
 {
+    assert( rel );
     if ( !rel )
     {
         return;
@@ -639,6 +655,9 @@ inline void vecsDestroyRelationships( vecsRelationshipData* rel )
 
 inline void vecsRemoveChildFromParent( vecsRelationshipData* rel, uint32_t parentIdx, vecsEntity child )
 {
+    assert( rel );
+    assert( parentIdx < rel->maxEntities );
+    assert( rel->childCounts[parentIdx] <= rel->childCapacities[parentIdx] );
     uint32_t count = rel->childCounts[parentIdx];
     for ( uint32_t i = 0; i < count; i++ )
     {
@@ -680,6 +699,7 @@ inline void vecsSetParent( vecsRelationshipData* rel, vecsEntity child, vecsEnti
 
     uint32_t parentIdx = vecsEntityIndex( parent );
     assert( parentIdx < rel->maxEntities );
+    assert( rel->childCounts[parentIdx] <= rel->childCapacities[parentIdx] );
     if ( rel->childCounts[parentIdx] >= rel->childCapacities[parentIdx] )
     {
         uint32_t newCap = rel->childCapacities[parentIdx] ? rel->childCapacities[parentIdx] * 2u : 4u;
@@ -687,14 +707,17 @@ inline void vecsSetParent( vecsRelationshipData* rel, vecsEntity child, vecsEnti
         assert( newChildren );
         rel->children[parentIdx] = newChildren;
         rel->childCapacities[parentIdx] = newCap;
+        assert( rel->childCounts[parentIdx] <= rel->childCapacities[parentIdx] );
     }
     rel->children[parentIdx][rel->childCounts[parentIdx]++] = child;
+    assert( rel->childCounts[parentIdx] <= rel->childCapacities[parentIdx] );
 }
 
 inline void vecsClearChildren( vecsRelationshipData* rel, vecsEntity parent )
 {
     assert( rel );
     uint32_t parentIdx = vecsEntityIndex( parent );
+    assert( parentIdx < rel->maxEntities );
     if ( parentIdx >= rel->maxEntities )
     {
         return;
@@ -717,6 +740,7 @@ inline vecsEntity vecsGetParent( vecsRelationshipData* rel, vecsEntity child )
 {
     assert( rel );
     uint32_t idx = vecsEntityIndex( child );
+    assert( idx < rel->maxEntities );
     if ( idx >= rel->maxEntities )
     {
         return VECS_INVALID_ENTITY;
@@ -728,6 +752,7 @@ inline uint32_t vecsGetChildCount( vecsRelationshipData* rel, vecsEntity parent 
 {
     assert( rel );
     uint32_t idx = vecsEntityIndex( parent );
+    assert( idx < rel->maxEntities );
     if ( idx >= rel->maxEntities )
     {
         return 0;
@@ -739,6 +764,7 @@ inline vecsEntity vecsGetChild( vecsRelationshipData* rel, vecsEntity parent, ui
 {
     assert( rel );
     uint32_t idx = vecsEntityIndex( parent );
+    assert( idx < rel->maxEntities );
     if ( idx >= rel->maxEntities || index >= rel->childCounts[idx] )
     {
         return VECS_INVALID_ENTITY;
@@ -805,6 +831,8 @@ inline uint32_t vecsTypeId()
 
 inline vecsWorld* vecsCreateWorld( uint32_t maxEntities = VECS_MAX_ENTITIES )
 {
+    assert( maxEntities > 0u );
+    assert( maxEntities <= VECS_MAX_ENTITIES );
     vecsWorld* world = ( vecsWorld* )std::malloc( sizeof( vecsWorld ) );
     assert( world );
     world->entities = vecsCreateEntityPool( maxEntities );
@@ -822,6 +850,7 @@ inline vecsWorld* vecsCreateWorld( uint32_t maxEntities = VECS_MAX_ENTITIES )
 
 inline void vecsDestroyWorld( vecsWorld* world )
 {
+    assert( world );
     if ( !world )
     {
         return;
@@ -851,6 +880,7 @@ inline void vecsDestroyWorld( vecsWorld* world )
 // Reset the world to its initial empty state, preserving allocated memory.
 inline void vecsClearWorld( vecsWorld* world )
 {
+    assert( world );
     if ( !world )
     {
         return;
@@ -998,6 +1028,8 @@ inline void vecsDestroyRecursive( vecsWorld* w, vecsEntity e )
 
 inline void vecsDestroy( vecsWorld* w, vecsEntity e )
 {
+    assert( w );
+    assert( vecsAlive( w, e ) );
     vecsDestroyRecursive( w, e );
 }
 
@@ -1010,6 +1042,7 @@ inline uint32_t vecsCount( vecsWorld* w )
 template< typename T >
 inline vecsPool* vecsEnsurePool( vecsWorld* w )
 {
+    assert( w );
     uint32_t id = vecsTypeId<T>();
     assert( id < VECS_MAX_COMPONENTS );
     if ( !w->pools[id] )
@@ -1028,10 +1061,12 @@ inline vecsPool* vecsEnsurePool( vecsWorld* w )
 template< typename T >
 inline T* vecsSet( vecsWorld* w, vecsEntity e, const T& val = {} )
 {
+    assert( w );
     assert( vecsAlive( w, e ) );
     vecsPool* pool = vecsEnsurePool<T>( w );
     uint32_t idx = vecsEntityIndex( e );
     uint32_t componentId = vecsTypeId<T>();
+    assert( componentId < VECS_MAX_COMPONENTS );
     if ( vecsPoolHas( pool, idx ) )
     {
         if constexpr ( std::is_empty<T>::value )
@@ -1074,11 +1109,13 @@ inline T* vecsSet( vecsWorld* w, vecsEntity e, const T& val = {} )
 template< typename T >
 inline void vecsUnset( vecsWorld* w, vecsEntity e )
 {
+    assert( w );
     assert( vecsAlive( w, e ) );
     vecsPool* pool = vecsEnsurePool<T>( w );
     uint32_t idx = vecsEntityIndex( e );
     assert( vecsPoolHas( pool, idx ) );
     uint32_t componentId = vecsTypeId<T>();
+    assert( componentId < VECS_MAX_COMPONENTS );
 
     w->entities->signatures[componentId >> 6][idx] &= ~( 1ULL << ( componentId & 63u ) );
 
@@ -1096,8 +1133,10 @@ inline void vecsUnset( vecsWorld* w, vecsEntity e )
 template< typename T >
 inline T* vecsGet( vecsWorld* w, vecsEntity e )
 {
+    assert( w );
     assert( vecsAlive( w, e ) );
     uint32_t id = vecsTypeId<T>();
+    assert( id < VECS_MAX_COMPONENTS );
     if ( id >= VECS_MAX_COMPONENTS || !w->pools[id] )
     {
         return nullptr;
@@ -1118,7 +1157,10 @@ inline T* vecsGet( vecsWorld* w, vecsEntity e )
 template< typename T >
 inline bool vecsHas( vecsWorld* w, vecsEntity e )
 {
+    assert( w );
+    assert( vecsAlive( w, e ) );
     uint32_t id = vecsTypeId<T>();
+    assert( id < VECS_MAX_COMPONENTS );
     if ( id >= VECS_MAX_COMPONENTS || !w->pools[id] )
     {
         return false;
@@ -1128,6 +1170,7 @@ inline bool vecsHas( vecsWorld* w, vecsEntity e )
 
 inline vecsEntity vecsClone( vecsWorld* w, vecsEntity src )
 {
+    assert( w );
     assert( vecsAlive( w, src ) );
     vecsEntity dst = vecsCreate( w );
     if ( dst == VECS_INVALID_ENTITY )
@@ -1273,30 +1316,35 @@ inline void vecsDestroyQuery( vecsQuery* q )
 inline void vecsQueryMarkRead( vecsQuery* q, uint32_t typeId )
 {
     assert( q );
+    assert( typeId < VECS_MAX_COMPONENTS );
     q->readAccess[typeId >> 6] |= ( 1ULL << ( typeId & 63u ) );
 }
 
 inline void vecsQueryMarkWrite( vecsQuery* q, uint32_t typeId )
 {
     assert( q );
+    assert( typeId < VECS_MAX_COMPONENTS );
     q->writeAccess[typeId >> 6] |= ( 1ULL << ( typeId & 63u ) );
 }
 
 inline bool vecsQueryReads( const vecsQuery* q, uint32_t typeId )
 {
     assert( q );
+    assert( typeId < VECS_MAX_COMPONENTS );
     return ( q->readAccess[typeId >> 6] & ( 1ULL << ( typeId & 63u ) ) ) != 0;
 }
 
 inline bool vecsQueryWrites( const vecsQuery* q, uint32_t typeId )
 {
     assert( q );
+    assert( typeId < VECS_MAX_COMPONENTS );
     return ( q->writeAccess[typeId >> 6] & ( 1ULL << ( typeId & 63u ) ) ) != 0;
 }
 
 inline void vecsQueryAddWith( vecsQuery* q, uint32_t typeId, vecsPool* pool )
 {
     assert( q );
+    assert( typeId < VECS_MAX_COMPONENTS );
     if ( q->withCount == q->withCapacity )
     {
         uint32_t cap = q->withCapacity ? q->withCapacity * 2u : 8u;
@@ -1304,8 +1352,10 @@ inline void vecsQueryAddWith( vecsQuery* q, uint32_t typeId, vecsPool* pool )
         assert( ptr );
         q->withIds = ptr;
         q->withCapacity = cap;
+        assert( q->withCount <= q->withCapacity );
     }
     q->withIds[q->withCount++] = typeId;
+    assert( q->withCount <= q->withCapacity );
     if ( pool )
     {
         for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti++ )
@@ -1323,6 +1373,7 @@ inline void vecsQueryAddWith( vecsQuery* q, uint32_t typeId, vecsPool* pool )
 inline void vecsQueryAddWithout( vecsQuery* q, uint32_t typeId )
 {
     assert( q );
+    assert( typeId < VECS_MAX_COMPONENTS );
     if ( q->withoutCount == q->withoutCapacity )
     {
         uint32_t cap = q->withoutCapacity ? q->withoutCapacity * 2u : 8u;
@@ -1330,13 +1381,16 @@ inline void vecsQueryAddWithout( vecsQuery* q, uint32_t typeId )
         assert( ptr );
         q->withoutIds = ptr;
         q->withoutCapacity = cap;
+        assert( q->withoutCount <= q->withoutCapacity );
     }
     q->withoutIds[q->withoutCount++] = typeId;
+    assert( q->withoutCount <= q->withoutCapacity );
 }
 
 inline void vecsQueryAddOptional( vecsQuery* q, uint32_t typeId )
 {
     assert( q );
+    assert( typeId < VECS_MAX_COMPONENTS );
     if ( q->optionalCount == q->optionalCapacity )
     {
         uint32_t cap = q->optionalCapacity ? q->optionalCapacity * 2u : 8u;
@@ -1344,8 +1398,10 @@ inline void vecsQueryAddOptional( vecsQuery* q, uint32_t typeId )
         assert( ptr );
         q->optionalIds = ptr;
         q->optionalCapacity = cap;
+        assert( q->optionalCount <= q->optionalCapacity );
     }
     q->optionalIds[q->optionalCount++] = typeId;
+    assert( q->optionalCount <= q->optionalCapacity );
 }
 
 namespace vecsDetail
@@ -1354,8 +1410,11 @@ namespace vecsDetail
 template< typename T >
 inline void buildQueryWithType( vecsWorld* w, vecsQuery* q )
 {
+    assert( w );
+    assert( q );
     using Raw = std::remove_cv_t<T>;
     uint32_t id = vecsTypeId<Raw>();
+    assert( id < VECS_MAX_COMPONENTS );
     vecsPool* pool = ( id < VECS_MAX_COMPONENTS ) ? w->pools[id] : nullptr;
     vecsQueryAddWith( q, id, pool );
     if constexpr ( std::is_const<T>::value )
@@ -1371,6 +1430,8 @@ inline void buildQueryWithType( vecsWorld* w, vecsQuery* q )
 template< typename... With >
 inline void buildQueryWith( vecsWorld* w, vecsQuery* q )
 {
+    assert( w );
+    assert( q );
     if constexpr ( sizeof...( With ) > 0 )
     {
         ( buildQueryWithType<With>( w, q ), ... );
@@ -1380,6 +1441,8 @@ inline void buildQueryWith( vecsWorld* w, vecsQuery* q )
 template< typename... Without >
 inline void buildQueryWithout( vecsWorld* w, vecsQuery* q )
 {
+    assert( w );
+    assert( q );
     ( void )w;
     if constexpr ( sizeof...( Without ) > 0 )
     {
@@ -1395,6 +1458,8 @@ inline void buildQueryWithout( vecsWorld* w, vecsQuery* q )
 template< typename... Optional >
 inline void buildQueryOptional( vecsWorld* w, vecsQuery* q )
 {
+    assert( w );
+    assert( q );
     ( void )w;
     if constexpr ( sizeof...( Optional ) > 0 )
     {
@@ -1412,6 +1477,7 @@ inline void buildQueryOptional( vecsWorld* w, vecsQuery* q )
 template< typename... With, typename... Without, typename... Optional >
 inline vecsQuery* vecsBuildQuery( vecsWorld* w )
 {
+    assert( w );
     vecsQuery* q = vecsCreateQuery();
     for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti++ )
     {
@@ -1748,6 +1814,8 @@ inline void eachJoinSimd( vecsWorld* w, Tuple& pools, Fn&& fn )
 template< typename... With, typename... Without, typename... Optional, typename Fn >
 inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
 {
+    assert( w );
+    assert( q );
     static_assert( sizeof...( With ) >= 1, "vecsQueryEach requires at least one With component" );
     
     if ( q->withCount == 0 )
@@ -2073,6 +2141,10 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
 template< typename... With, typename... Without, typename... Optional, typename Fn >
 inline void vecsQueryEachParallel( vecsWorld* w, vecsQuery* q, uint32_t startIndex, uint32_t endIndex, Fn&& fn )
 {
+    assert( w );
+    assert( q );
+    assert( startIndex <= VECS_TOP_COUNT );
+    assert( endIndex <= VECS_TOP_COUNT );
     static_assert( sizeof...( With ) >= 1, "vecsQueryEachParallel requires at least one With component" );
 
     if ( q->withCount == 0 )
@@ -2674,6 +2746,7 @@ inline void vecsEachNoEntity( vecsWorld* w, Fn&& fn )
 template< typename T >
 inline T* vecsSetSingleton( vecsWorld* w, const T& val = {} )
 {
+    assert( w );
     uint32_t id = vecsTypeId<T>();
     assert( id < VECS_MAX_COMPONENTS );
     auto& slot = w->singletons[id];
@@ -2703,7 +2776,9 @@ inline T* vecsSetSingleton( vecsWorld* w, const T& val = {} )
 template< typename T >
 inline T* vecsGetSingleton( vecsWorld* w )
 {
+    assert( w );
     uint32_t id = vecsTypeId<T>();
+    assert( id < VECS_MAX_COMPONENTS );
     if ( id >= VECS_MAX_COMPONENTS || !w->singletons[id].data )
     {
         return nullptr;
@@ -2714,18 +2789,31 @@ inline T* vecsGetSingleton( vecsWorld* w )
 template< typename T >
 inline void vecsOnAdd( vecsWorld* w, void ( *callback )( vecsWorld*, vecsEntity, T* ) )
 {
-    vecsAddObserver( w->observers, vecsTypeId<T>(), reinterpret_cast< void ( * )( vecsWorld*, vecsEntity, void* ) >( callback ), true );
+    assert( w );
+    assert( callback );
+    uint32_t id = vecsTypeId<T>();
+    assert( id < VECS_MAX_COMPONENTS );
+    vecsAddObserver( w->observers, id, reinterpret_cast< void ( * )( vecsWorld*, vecsEntity, void* ) >( callback ), true );
 }
 
 template< typename T >
 inline void vecsOnRemove( vecsWorld* w, void ( *callback )( vecsWorld*, vecsEntity, T* ) )
 {
-    vecsAddObserver( w->observers, vecsTypeId<T>(), reinterpret_cast< void ( * )( vecsWorld*, vecsEntity, void* ) >( callback ), false );
+    assert( w );
+    assert( callback );
+    uint32_t id = vecsTypeId<T>();
+    assert( id < VECS_MAX_COMPONENTS );
+    vecsAddObserver( w->observers, id, reinterpret_cast< void ( * )( vecsWorld*, vecsEntity, void* ) >( callback ), false );
 }
 
 inline void vecsSetChildOf( vecsWorld* w, vecsEntity child, vecsEntity parent )
 {
     assert( w );
+    assert( vecsAlive( w, child ) );
+    if ( parent != VECS_INVALID_ENTITY )
+    {
+        assert( vecsAlive( w, parent ) );
+    }
     if ( !w->relationships )
     {
         w->relationships = vecsCreateRelationships( w->maxEntities );
@@ -2736,6 +2824,7 @@ inline void vecsSetChildOf( vecsWorld* w, vecsEntity child, vecsEntity parent )
 inline vecsEntity vecsGetParentEntity( vecsWorld* w, vecsEntity child )
 {
     assert( w );
+    assert( vecsAlive( w, child ) );
     if ( !w->relationships )
     {
         return VECS_INVALID_ENTITY;
@@ -2746,6 +2835,7 @@ inline vecsEntity vecsGetParentEntity( vecsWorld* w, vecsEntity child )
 inline uint32_t vecsGetChildEntityCount( vecsWorld* w, vecsEntity parent )
 {
     assert( w );
+    assert( vecsAlive( w, parent ) );
     if ( !w->relationships )
     {
         return 0;
@@ -2756,6 +2846,7 @@ inline uint32_t vecsGetChildEntityCount( vecsWorld* w, vecsEntity parent )
 inline vecsEntity vecsGetChildEntity( vecsWorld* w, vecsEntity parent, uint32_t index )
 {
     assert( w );
+    assert( vecsAlive( w, parent ) );
     if ( !w->relationships )
     {
         return VECS_INVALID_ENTITY;
@@ -2907,6 +2998,7 @@ struct vecsCommandBuffer
 
 inline void vecsCmdGrowCommands( vecsCommandBuffer* cb )
 {
+    assert( cb );
     uint32_t cap = cb->commandCapacity ? cb->commandCapacity * 2u : 64u;
     vecsCommand* ptr = ( vecsCommand* )std::realloc( cb->commands, ( size_t )cap * sizeof( vecsCommand ) );
     assert( ptr );
@@ -2916,6 +3008,7 @@ inline void vecsCmdGrowCommands( vecsCommandBuffer* cb )
 
 inline void vecsCmdGrowData( vecsCommandBuffer* cb, uint32_t minExtra )
 {
+    assert( cb );
     uint32_t need = cb->dataSize + minExtra;
     if ( cb->dataCapacity >= need )
     {
@@ -2934,6 +3027,7 @@ inline void vecsCmdGrowData( vecsCommandBuffer* cb, uint32_t minExtra )
 
 inline void vecsCmdGrowCreated( vecsCommandBuffer* cb )
 {
+    assert( cb );
     uint32_t cap = cb->createdCapacity ? cb->createdCapacity * 2u : 32u;
     vecsEntity* ptr = ( vecsEntity* )std::realloc( cb->created, ( size_t )cap * sizeof( vecsEntity ) );
     assert( ptr );
@@ -2943,6 +3037,7 @@ inline void vecsCmdGrowCreated( vecsCommandBuffer* cb )
 
 inline vecsCommandBuffer* vecsCreateCommandBuffer( vecsWorld* w )
 {
+    assert( w );
     vecsCommandBuffer* cb = ( vecsCommandBuffer* )std::malloc( sizeof( vecsCommandBuffer ) );
     assert( cb );
     cb->world = w;
@@ -2999,6 +3094,8 @@ inline uint32_t vecsCmdCreate( vecsCommandBuffer* cb )
 inline void vecsCmdDestroy( vecsCommandBuffer* cb, vecsEntity e )
 {
     assert( cb );
+    assert( cb->world );
+    assert( e == VECS_INVALID_ENTITY || vecsAlive( cb->world, e ) );
     if ( cb->commandCount == cb->commandCapacity )
     {
         vecsCmdGrowCommands( cb );
@@ -3018,6 +3115,8 @@ template< typename T >
 inline void vecsCmdSet( vecsCommandBuffer* cb, vecsEntity e, const T& val )
 {
     assert( cb );
+    assert( cb->world );
+    assert( vecsAlive( cb->world, e ) );
     vecsPool* pool = vecsEnsurePool<T>( cb->world );
     if ( cb->commandCount == cb->commandCapacity )
     {
@@ -3046,6 +3145,7 @@ template< typename T >
 inline void vecsCmdSetCreated( vecsCommandBuffer* cb, uint32_t createdIndex, const T& val )
 {
     assert( cb );
+    assert( cb->world );
     assert( createdIndex < cb->createdCount );
     vecsPool* pool = vecsEnsurePool<T>( cb->world );
     if ( cb->commandCount == cb->commandCapacity )
@@ -3075,6 +3175,8 @@ template< typename T >
 inline void vecsCmdUnset( vecsCommandBuffer* cb, vecsEntity e )
 {
     assert( cb );
+    assert( cb->world );
+    assert( vecsAlive( cb->world, e ) );
     if ( cb->commandCount == cb->commandCapacity )
     {
         vecsCmdGrowCommands( cb );
@@ -3093,6 +3195,12 @@ inline void vecsCmdUnset( vecsCommandBuffer* cb, vecsEntity e )
 inline void vecsCmdSetParent( vecsCommandBuffer* cb, vecsEntity child, vecsEntity parent )
 {
     assert( cb );
+    assert( cb->world );
+    assert( vecsAlive( cb->world, child ) );
+    if ( parent != VECS_INVALID_ENTITY )
+    {
+        assert( vecsAlive( cb->world, parent ) );
+    }
     if ( cb->commandCount == cb->commandCapacity )
     {
         vecsCmdGrowCommands( cb );
@@ -3111,6 +3219,7 @@ inline void vecsCmdSetParent( vecsCommandBuffer* cb, vecsEntity child, vecsEntit
 inline void vecsFlush( vecsCommandBuffer* cb )
 {
     assert( cb );
+    assert( cb->world );
     for ( uint32_t i = 0; i < cb->commandCount; i++ )
     {
         const vecsCommand& cmd = cb->commands[i];

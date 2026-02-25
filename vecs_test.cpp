@@ -18,6 +18,7 @@
 struct Position { float x, y; Position() = default; Position( float x_, float y_ ) : x( x_ ), y( y_ ) {} };
 struct Velocity { float vx, vy; Velocity() = default; Velocity( float vx_, float vy_ ) : vx( vx_ ), vy( vy_ ) {} };
 struct Health { int hp; Health() = default; Health( int hp_ ) : hp( hp_ ) {} };
+struct HeavyPayload { uint32_t marker; uint8_t bytes[128]; };
 struct IsEnemy {};
 struct Dead {};
 template< size_t I > struct ExhaustComp { int value; };
@@ -2609,6 +2610,261 @@ UTEST( benchmark, simd_test_matrix )
     
     g_vecsSimdConfig = savedConfig;
     vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( edge_case, max_entities_exact_boundary )
+{
+    vecsWorld* w = vecsCreateWorld( VECS_MAX_ENTITIES );
+    std::vector<vecsEntity> entities;
+    entities.reserve( VECS_MAX_ENTITIES );
+
+    for ( uint32_t i = 0; i < VECS_MAX_ENTITIES; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        ASSERT_NE( e, VECS_INVALID_ENTITY );
+        entities.push_back( e );
+    }
+    ASSERT_EQ( vecsCount( w ), ( uint32_t )VECS_MAX_ENTITIES );
+    ASSERT_EQ( vecsCreate( w ), VECS_INVALID_ENTITY );
+
+    for ( vecsEntity e : entities )
+    {
+        vecsDestroy( w, e );
+    }
+    ASSERT_EQ( vecsCount( w ), 0u );
+
+    for ( uint32_t i = 0; i < VECS_MAX_ENTITIES; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        ASSERT_NE( e, VECS_INVALID_ENTITY );
+        ASSERT_TRUE( vecsAlive( w, e ) );
+    }
+    ASSERT_EQ( vecsCount( w ), ( uint32_t )VECS_MAX_ENTITIES );
+
+    vecsDestroyWorld( w );
+}
+
+UTEST( edge_case, shotgun_destroy_during_iteration )
+{
+    vecsWorld* w = vecsCreateWorld( 2048u );
+    for ( uint32_t i = 0; i < 1000u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { ( float )i, ( float )i } );
+        vecsSet<Velocity>( w, e, { ( float )i * 2.0f, 1.0f } );
+    }
+
+    vecsCommandBuffer* cb = vecsCreateCommandBuffer( w );
+    std::vector<vecsEntity> destroyed;
+    destroyed.reserve( 350u );
+    uint32_t iter = 0u;
+
+    vecsEach<Position, Velocity>( w, [&]( vecsEntity e, Position& p, Velocity& v )
+    {
+        ASSERT_EQ( v.vx, p.x * 2.0f );
+        if ( ( iter % 3u ) == 0u )
+        {
+            vecsCmdDestroy( cb, e );
+            destroyed.push_back( e );
+        }
+        iter++;
+    } );
+    vecsFlush( cb );
+
+    for ( vecsEntity e : destroyed )
+    {
+        ASSERT_FALSE( vecsAlive( w, e ) );
+    }
+
+    uint32_t survivors = 0u;
+    vecsEach<Position, Velocity>( w, [&]( vecsEntity, Position& p, Velocity& v )
+    {
+        ASSERT_EQ( v.vx, p.x * 2.0f );
+        survivors++;
+    } );
+
+    ASSERT_EQ( survivors, 1000u - ( uint32_t )destroyed.size() );
+    ASSERT_EQ( vecsCount( w ), survivors );
+
+    vecsDestroyCommandBuffer( cb );
+    vecsDestroyWorld( w );
+}
+
+UTEST( edge_case, deep_hierarchy_reparenting_cycle )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    vecsEntity a = vecsCreate( w );
+    vecsEntity b = vecsCreate( w );
+    vecsEntity c = vecsCreate( w );
+
+    vecsSetChildOf( w, b, a );
+    vecsSetChildOf( w, c, b );
+    ASSERT_EQ( vecsGetParentEntity( w, b ), a );
+    ASSERT_EQ( vecsGetParentEntity( w, c ), b );
+    ASSERT_EQ( vecsGetChildEntityCount( w, a ), 1u );
+    ASSERT_EQ( vecsGetChildEntityCount( w, b ), 1u );
+
+    vecsSetChildOf( w, c, a );
+    ASSERT_EQ( vecsGetParentEntity( w, c ), a );
+    ASSERT_EQ( vecsGetChildEntityCount( w, a ), 2u );
+    ASSERT_EQ( vecsGetChildEntityCount( w, b ), 0u );
+
+    vecsSetChildOf( w, c, VECS_INVALID_ENTITY );
+    ASSERT_EQ( vecsGetParentEntity( w, c ), VECS_INVALID_ENTITY );
+    ASSERT_EQ( vecsGetChildEntityCount( w, a ), 1u );
+    ASSERT_EQ( vecsGetChildEntity( w, a, 0u ), b );
+
+    vecsDestroyWorld( w );
+}
+
+UTEST( edge_case, rapid_component_churn )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    vecsEntity e = vecsCreate( w );
+
+    for ( uint32_t i = 0; i < 10000u; i++ )
+    {
+        if ( ( i & 1u ) == 0u )
+        {
+            vecsSet<Health>( w, e, { ( int )i } );
+        }
+        else if ( vecsHas<Health>( w, e ) )
+        {
+            vecsUnset<Health>( w, e );
+        }
+    }
+
+    ASSERT_FALSE( vecsHas<Health>( w, e ) );
+    vecsPool* pool = w->pools[vecsTypeId<Health>()];
+    ASSERT_TRUE( pool != nullptr );
+    ASSERT_EQ( pool->count, 0u );
+
+    vecsSet<Health>( w, e, { 777 } );
+    Health* health = vecsGet<Health>( w, e );
+    ASSERT_TRUE( health != nullptr );
+    ASSERT_EQ( health->hp, 777 );
+
+    vecsDestroyWorld( w );
+}
+
+UTEST( edge_case, query_with_all_optional_and_without )
+{
+    vecsWorld* w = vecsCreateWorld( 10000u );
+    vecsEntity e1 = vecsCreate( w );
+    vecsEntity e2 = vecsCreate( w );
+
+    vecsSet<Position>( w, e1, { 1.0f, 0.0f } );
+    vecsSet<Velocity>( w, e1, { 11.0f, 0.0f } );
+
+    vecsSet<Position>( w, e2, { 2.0f, 0.0f } );
+
+    // Keep excluded Position+Dead entities in a different top block so the
+    // top-level Without fast path does not mask the entire live block.
+    for ( uint32_t i = 0; i < 4094u; i++ )
+    {
+        ( void )vecsCreate( w );
+    }
+
+    vecsEntity e3 = vecsCreate( w );
+    vecsEntity e4 = vecsCreate( w );
+    vecsEntity e5 = vecsCreate( w );
+
+    vecsSet<Position>( w, e3, { 3.0f, 0.0f } );
+    vecsSet<Dead>( w, e3, {} );
+
+    vecsSet<Position>( w, e4, { 4.0f, 0.0f } );
+    vecsSet<Velocity>( w, e4, { 44.0f, 0.0f } );
+    vecsSet<Dead>( w, e4, {} );
+
+    vecsSet<Velocity>( w, e5, { 55.0f, 0.0f } );
+
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    vecsQueryAddOptional( q, vecsTypeId<Velocity>() );
+    vecsQueryAddWithout( q, vecsTypeId<Dead>() );
+
+    uint32_t touched = 0u;
+    uint32_t withVelocity = 0u;
+    uint32_t withoutVelocity = 0u;
+    bool sawE1 = false;
+    bool sawE2 = false;
+    bool sawE3 = false;
+    bool sawE4 = false;
+
+    vecsQueryEach<Position>( w, q, [&]( vecsEntity e, Position& )
+    {
+        ASSERT_FALSE( vecsHas<Dead>( w, e ) );
+        Velocity* v = vecsGet<Velocity>( w, e );
+        if ( v )
+        {
+            withVelocity++;
+        }
+        else
+        {
+            withoutVelocity++;
+        }
+
+        if ( e == e1 )
+        {
+            sawE1 = true;
+        }
+        else if ( e == e2 )
+        {
+            sawE2 = true;
+        }
+        else if ( e == e3 )
+        {
+            sawE3 = true;
+        }
+        else if ( e == e4 )
+        {
+            sawE4 = true;
+        }
+        touched++;
+    } );
+
+    ASSERT_EQ( touched, 2u );
+    ASSERT_EQ( withVelocity, 1u );
+    ASSERT_EQ( withoutVelocity, 1u );
+    ASSERT_TRUE( sawE1 );
+    ASSERT_TRUE( sawE2 );
+    ASSERT_FALSE( sawE3 );
+    ASSERT_FALSE( sawE4 );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( edge_case, zero_capacity_pool_growth )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    std::vector<vecsEntity> entities;
+    entities.reserve( 65u );
+
+    for ( uint32_t i = 0; i < 65u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        entities.push_back( e );
+
+        HeavyPayload payload = {};
+        payload.marker = i;
+        std::memset( payload.bytes, ( int )( i & 0xFFu ), sizeof( payload.bytes ) );
+        vecsSet<HeavyPayload>( w, e, payload );
+    }
+
+    vecsPool* pool = w->pools[vecsTypeId<HeavyPayload>()];
+    ASSERT_TRUE( pool != nullptr );
+    ASSERT_TRUE( pool->capacity >= 65u );
+    ASSERT_EQ( pool->count, 65u );
+
+    HeavyPayload* last = vecsGet<HeavyPayload>( w, entities[64] );
+    ASSERT_TRUE( last != nullptr );
+    ASSERT_EQ( last->marker, 64u );
+    for ( uint32_t i = 0; i < sizeof( last->bytes ); i++ )
+    {
+        ASSERT_EQ( last->bytes[i], ( uint8_t )64u );
+    }
+
     vecsDestroyWorld( w );
 }
 

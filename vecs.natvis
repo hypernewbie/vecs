@@ -253,6 +253,8 @@
       <Item Name="with count">withCount</Item>
       <Item Name="without count">withoutCount</Item>
       <Item Name="optional count">optionalCount</Item>
+      <Item Name="read access" ExcludeView="simple">readAccess, [4]</Item>
+      <Item Name="write access" ExcludeView="simple">writeAccess, [4]</Item>
       <Synthetic Name="[with components]" Condition="withCount > 0">
         <DisplayString>{withCount} required components</DisplayString>
         <Expand>
