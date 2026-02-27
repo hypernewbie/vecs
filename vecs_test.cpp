@@ -138,6 +138,38 @@ UTEST( entity, generation_overflow_wraps )
     vecsDestroyEntityPool( pool );
 }
 
+UTEST( entity, unallocated_index_not_alive )
+{
+    vecsWorld* w = vecsCreateWorld( 64u );
+    vecsEntity fake = vecsMakeEntity( 5u, 0u );
+    ASSERT_FALSE( vecsAlive( w, fake ) );
+
+    vecsEntity e = vecsCreate( w );
+    ASSERT_TRUE( vecsAlive( w, e ) );
+    vecsDestroy( w, e );
+    ASSERT_FALSE( vecsAlive( w, e ) );
+
+    vecsDestroyWorld( w );
+}
+
+UTEST( entity, stale_handle_not_alive_after_reuse )
+{
+    vecsWorld* w = vecsCreateWorld( 1u );
+    vecsEntity oldHandle = vecsCreate( w );
+    ASSERT_TRUE( vecsAlive( w, oldHandle ) );
+
+    vecsDestroy( w, oldHandle );
+    ASSERT_FALSE( vecsAlive( w, oldHandle ) );
+
+    vecsEntity newHandle = vecsCreate( w );
+    ASSERT_EQ( vecsEntityIndex( newHandle ), vecsEntityIndex( oldHandle ) );
+    ASSERT_NE( vecsEntityGeneration( newHandle ), vecsEntityGeneration( oldHandle ) );
+    ASSERT_TRUE( vecsAlive( w, newHandle ) );
+    ASSERT_FALSE( vecsAlive( w, oldHandle ) );
+
+    vecsDestroyWorld( w );
+}
+
 UTEST( bitfield, set_has_clear )
 {
     vecsBitfield bf = {};

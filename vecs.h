@@ -72,12 +72,32 @@ constexpr uint32_t VECS_INVALID_INDEX  = UINT32_MAX;
 inline uint32_t vecsTzcnt( uint64_t v )
 {
     assert( v != 0 );
+#if defined( _MSC_VER ) && !defined( __clang__ )
+    uint32_t count = 0u;
+    while ( ( v & 1ULL ) == 0ULL )
+    {
+        v >>= 1u;
+        count++;
+    }
+    return count;
+#else
     return ( uint32_t )__builtin_ctzll( v );
+#endif
 }
 
 inline uint32_t vecsPopcnt( uint64_t v )
 {
+#if defined( _MSC_VER ) && !defined( __clang__ )
+    uint32_t count = 0u;
+    while ( v )
+    {
+        v &= ( v - 1u );
+        count++;
+    }
+    return count;
+#else
     return ( uint32_t )__builtin_popcountll( v );
+#endif
 }
 
 // --------------------------------------------------------------------------
@@ -148,6 +168,7 @@ inline uint32_t vecsEntityGeneration( vecsEntity e )
 struct vecsEntityPool
 {
     uint32_t* generations;
+    uint8_t* allocated;
     uint32_t* freeList;
     // 256-bit bitmask per entity. Makes destruction O(active_components) instead of O(total_types).
     uint64_t* signatures[4];
@@ -161,8 +182,10 @@ inline vecsEntityPool* vecsCreateEntityPool( uint32_t maxEntities )
     vecsEntityPool* pool = ( vecsEntityPool* )std::malloc( sizeof( vecsEntityPool ) );
     assert( pool );
     pool->generations = ( uint32_t* )std::calloc( maxEntities, sizeof( uint32_t ) );
+    pool->allocated = ( uint8_t* )std::calloc( maxEntities, sizeof( uint8_t ) );
     pool->freeList = ( uint32_t* )std::malloc( maxEntities * sizeof( uint32_t ) );
     assert( pool->generations );
+    assert( pool->allocated );
     assert( pool->freeList );
 
     for ( uint32_t i = 0; i < 4; i++ )
@@ -187,6 +210,7 @@ inline void vecsDestroyEntityPool( vecsEntityPool* pool )
     {
         return;
     }
+    std::free( pool->allocated );
     std::free( pool->generations );
     std::free( pool->freeList );
     for ( uint32_t i = 0; i < 4; i++ )
@@ -204,6 +228,8 @@ inline vecsEntity vecsEntityPoolCreate( vecsEntityPool* pool )
         return VECS_INVALID_ENTITY;
     }
     uint32_t index = pool->freeList[--pool->freeCount];
+    assert( !pool->allocated[index] );
+    pool->allocated[index] = 1u;
     pool->alive++;
     return vecsMakeEntity( index, pool->generations[index] );
 }
@@ -215,6 +241,8 @@ inline void vecsEntityPoolDestroy( vecsEntityPool* pool, vecsEntity entity )
     assert( index < pool->maxEntities );
     assert( pool->generations[index] == vecsEntityGeneration( entity ) );
     assert( pool->freeCount < pool->maxEntities );
+    assert( pool->allocated[index] );
+    pool->allocated[index] = 0u;
     pool->generations[index]++;
     pool->freeList[pool->freeCount++] = index;
     assert( pool->alive > 0 );
@@ -226,6 +254,10 @@ inline bool vecsEntityPoolAlive( vecsEntityPool* pool, vecsEntity entity )
     assert( pool );
     uint32_t index = vecsEntityIndex( entity );
     if ( index >= pool->maxEntities )
+    {
+        return false;
+    }
+    if ( !pool->allocated[index] )
     {
         return false;
     }
@@ -926,6 +958,7 @@ inline void vecsClearWorld( vecsWorld* world )
     {
         ep->freeList[i] = world->maxEntities - i - 1;
     }
+    std::memset( ep->allocated, 0, world->maxEntities * sizeof( uint8_t ) );
     for ( uint32_t i = 0; i < 4; i++ )
     {
         std::memset( ep->signatures[i], 0, world->maxEntities * sizeof( uint64_t ) );
@@ -1474,7 +1507,7 @@ inline void buildQueryOptional( vecsWorld* w, vecsQuery* q )
 
 }
 
-template< typename... With, typename... Without, typename... Optional >
+template< typename... With >
 inline vecsQuery* vecsBuildQuery( vecsWorld* w )
 {
     assert( w );
@@ -1488,8 +1521,6 @@ inline vecsQuery* vecsBuildQuery( vecsWorld* w )
         }
     }
     vecsDetail::buildQueryWith<With...>( w, q );
-    vecsDetail::buildQueryWithout<Without...>( w, q );
-    vecsDetail::buildQueryOptional<Optional...>( w, q );
     return q;
 }
 
@@ -2097,7 +2128,7 @@ inline vecsEntity vecsQueryFirstMatch( vecsWorld* w, vecsQuery* q )
     return VECS_INVALID_ENTITY;
 }
 
-template< typename... With, typename... Without, typename... Optional, typename Fn >
+template< typename... With, typename Fn >
 inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
 {
     assert( w );
@@ -2123,8 +2154,8 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
         return;
     }
     
-    auto optionalPools = std::make_tuple( vecsDetail::getPool<Optional>( w )... );
-    auto withoutPools = std::make_tuple( vecsDetail::getPool<Without>( w )... );
+    auto optionalPools = std::tuple<>();
+    auto withoutPools = std::tuple<>();
     
     uint32_t ti = 0;
     vecsSimdLevel simdLevel = vecsRuntimeSimdSupported();
@@ -2158,7 +2189,7 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
                             l2 &= ~wp->bitfield.l2Masks[l2Idx];
                         }
                     }
-                    if constexpr ( sizeof...( Without ) > 0 )
+                    if constexpr ( true )
                     {
                         vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
                         {
@@ -2243,7 +2274,7 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
                             l2 &= ~wp->bitfield.l2Masks[l2Idx];
                         }
                     }
-                    if constexpr ( sizeof...( Without ) > 0 )
+                    if constexpr ( true )
                     {
                         vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
                         {
@@ -2291,7 +2322,7 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
         {
             continue;
         }
-        
+
         while ( top )
         {
             uint32_t tb = vecsTzcnt( top );
@@ -2306,7 +2337,7 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
                     l2 &= ~wp->bitfield.l2Masks[l2Idx];
                 }
             }
-            if constexpr ( sizeof...( Without ) > 0 )
+            if constexpr ( true )
             {
                 vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
                 {
@@ -2345,7 +2376,7 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
     }
 }
 
-template< typename... With, typename... Without, typename... Optional, typename Fn >
+template< typename... With, typename Fn >
 inline void vecsQueryEachParallel( vecsWorld* w, vecsQuery* q, uint32_t startIndex, uint32_t endIndex, Fn&& fn )
 {
     assert( w );
@@ -2380,8 +2411,8 @@ inline void vecsQueryEachParallel( vecsWorld* w, vecsQuery* q, uint32_t startInd
         return;
     }
 
-    auto optionalPools = std::make_tuple( vecsDetail::getPool<Optional>( w )... );
-    auto withoutPools = std::make_tuple( vecsDetail::getPool<Without>( w )... );
+    auto optionalPools = std::tuple<>();
+    auto withoutPools = std::tuple<>();
 
     auto processScalarTi = [&]( uint32_t ti )
     {
@@ -2390,7 +2421,6 @@ inline void vecsQueryEachParallel( vecsWorld* w, vecsQuery* q, uint32_t startInd
         {
             return;
         }
-
         while ( top )
         {
             uint32_t tb = vecsTzcnt( top );
@@ -2405,7 +2435,7 @@ inline void vecsQueryEachParallel( vecsWorld* w, vecsQuery* q, uint32_t startInd
                     l2 &= ~wp->bitfield.l2Masks[l2Idx];
                 }
             }
-            if constexpr ( sizeof...( Without ) > 0 )
+            if constexpr ( true )
             {
                 vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
                 {
@@ -2481,7 +2511,7 @@ inline void vecsQueryEachParallel( vecsWorld* w, vecsQuery* q, uint32_t startInd
                             l2 &= ~wp->bitfield.l2Masks[l2Idx];
                         }
                     }
-                    if constexpr ( sizeof...( Without ) > 0 )
+                    if constexpr ( true )
                     {
                         vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
                         {
@@ -2572,7 +2602,7 @@ inline void vecsQueryEachParallel( vecsWorld* w, vecsQuery* q, uint32_t startInd
                             l2 &= ~wp->bitfield.l2Masks[l2Idx];
                         }
                     }
-                    if constexpr ( sizeof...( Without ) > 0 )
+                    if constexpr ( true )
                     {
                         vecsDetail::forEachPool( withoutPools, [&]( vecsPool* pool )
                         {
