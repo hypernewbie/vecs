@@ -1,6 +1,7 @@
 # Build outputs
 build/
 build_release/
+build_llvm/
 
 # IDE/editor
 .vs/

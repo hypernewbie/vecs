@@ -1205,15 +1205,14 @@ UTEST( query, parallel_chunked_matches_full )
 
     uint32_t chunkCount = 0u;
     double chunkSum = 0.0;
-    for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti += 3u )
+    vecsQueryDispatch<Position, Velocity>( w, q, 4, [&]( auto execute_chunk )
     {
-        uint32_t end = ( ti + 3u < VECS_TOP_COUNT ) ? ti + 3u : VECS_TOP_COUNT;
-        vecsQueryEachParallel<Position, Velocity>( w, q, ti, end, [&]( vecsEntity, Position& p, Velocity& v )
+        execute_chunk( [&]( vecsEntity, Position& p, Velocity& v )
         {
             chunkCount++;
             chunkSum += ( double )p.x + ( double )v.vx;
         } );
-    }
+    } );
 
     ASSERT_EQ( chunkCount, fullCount );
     ASSERT_EQ( chunkSum, fullSum );
@@ -3080,9 +3079,12 @@ UTEST( query_bug, parallel_without_skips_chunk )
     vecsQueryAddWithout( q, vecsTypeId<Dead>() );
 
     std::atomic<uint32_t> count = 0;
-    vecsQueryEachParallel<Position>( w, q, 0, VECS_TOP_COUNT, [&]( vecsEntity, Position& )
+    vecsQueryDispatch<Position>( w, q, 4, [&]( auto execute_chunk )
     {
-        count++;
+        execute_chunk( [&]( vecsEntity, Position& )
+        {
+            count++;
+        } );
     } );
 
     // BUG: Same chunk skipping bug in parallel iteration.
@@ -3211,19 +3213,14 @@ UTEST( query_bug, parallel_stress_complex_filters_skip_chunk )
 
     std::atomic<uint32_t> actual_count = 0;
 
-    // Simulate multi-threaded ranged evaluation by slicing VECS_TOP_COUNT into smaller chunks
-    // For a max entity count of 65536, VECS_TOP_COUNT is 16.
-    const uint32_t CHUNK_SIZE = 2u; 
-    for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti += CHUNK_SIZE )
+    // Simulate multi-threaded ranged evaluation by dispatching chunks
+    vecsQueryDispatch<Position, Velocity>( w, q, 4, [&]( auto execute_chunk )
     {
-        uint32_t endTi = ( ti + CHUNK_SIZE < VECS_TOP_COUNT ) ? ( ti + CHUNK_SIZE ) : VECS_TOP_COUNT;
-        
-        // This simulates what a Task System would do by dispatching to worker threads
-        vecsQueryEachParallel<Position, Velocity>( w, q, ti, endTi, [&]( vecsEntity, Position&, Velocity& )
+        execute_chunk( [&]( vecsEntity, Position&, Velocity& )
         {
             actual_count++;
         } );
-    }
+    } );
 
     // BUG: This multi-threaded iterator uses the exact same `topMask` excluding logic.
     // It should aggressively under-count the true number of matching entities.
