@@ -1205,14 +1205,16 @@ UTEST( query, parallel_chunked_matches_full )
 
     uint32_t chunkCount = 0u;
     double chunkSum = 0.0;
-    vecsQueryDispatch<Position, Velocity>( w, q, 4, [&]( auto execute_chunk )
+    vecsQueryChunk chunks[4];
+    uint32_t numChunks = vecsQueryGetChunks( w, q, chunks, 4 );
+    for ( uint32_t i = 0; i < numChunks; i++ )
     {
-        execute_chunk( [&]( vecsEntity, Position& p, Velocity& v )
+        vecsQueryExecuteChunk<Position, Velocity>( w, q, &chunks[i], [&]( vecsEntity, Position& p, Velocity& v )
         {
             chunkCount++;
             chunkSum += ( double )p.x + ( double )v.vx;
         } );
-    } );
+    }
 
     ASSERT_EQ( chunkCount, fullCount );
     ASSERT_EQ( chunkSum, fullSum );
@@ -3079,13 +3081,15 @@ UTEST( query_bug, parallel_without_skips_chunk )
     vecsQueryAddWithout( q, vecsTypeId<Dead>() );
 
     std::atomic<uint32_t> count = 0;
-    vecsQueryDispatch<Position>( w, q, 4, [&]( auto execute_chunk )
+    vecsQueryChunk chunks[4];
+    uint32_t numChunks = vecsQueryGetChunks( w, q, chunks, 4 );
+    for ( uint32_t i = 0; i < numChunks; i++ )
     {
-        execute_chunk( [&]( vecsEntity, Position& )
+        vecsQueryExecuteChunk<Position>( w, q, &chunks[i], [&]( vecsEntity, Position& )
         {
             count++;
         } );
-    } );
+    }
 
     // BUG: Same chunk skipping bug in parallel iteration.
     ASSERT_EQ( count.load(), 1u );
@@ -3214,13 +3218,15 @@ UTEST( query_bug, parallel_stress_complex_filters_skip_chunk )
     std::atomic<uint32_t> actual_count = 0;
 
     // Simulate multi-threaded ranged evaluation by dispatching chunks
-    vecsQueryDispatch<Position, Velocity>( w, q, 4, [&]( auto execute_chunk )
+    vecsQueryChunk chunks[4];
+    uint32_t numChunks = vecsQueryGetChunks( w, q, chunks, 4 );
+    for ( uint32_t i = 0; i < numChunks; i++ )
     {
-        execute_chunk( [&]( vecsEntity, Position&, Velocity& )
+        vecsQueryExecuteChunk<Position, Velocity>( w, q, &chunks[i], [&]( vecsEntity, Position&, Velocity& )
         {
             actual_count++;
         } );
-    } );
+    }
 
     // BUG: This multi-threaded iterator uses the exact same `topMask` excluding logic.
     // It should aggressively under-count the true number of matching entities.
