@@ -3243,9 +3243,12 @@ struct NonPodData {
     std::vector<int> numbers;
 };
 
-inline std::ostream& operator<<(std::ostream& os, const NonPodData& data)
-{
-    return os << "NonPodData{text=\"" << data.text << "\", numbers.size()=" << data.numbers.size() << "}";
+inline void utest_type_printer(const std::string& s) {
+    UTEST_PRINTF("\"%s\"", s.c_str());
+}
+
+inline void utest_type_printer(const NonPodData& data) {
+    UTEST_PRINTF("NonPodData{text=\"%s\", numbers.size()=%zu}", data.text.c_str(), data.numbers.size());
 }
 
 UTEST( complex_types, single_entity_std_types )
