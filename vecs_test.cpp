@@ -3236,4 +3236,158 @@ UTEST( query_bug, parallel_stress_complex_filters_skip_chunk )
     vecsDestroyWorld( w );
 }
 
+struct NonPodData {
+    std::string text;
+    std::vector<int> numbers;
+};
+
+UTEST( complex_types, single_entity_std_types )
+{
+    vecsWorld* w = vecsCreateWorld( 1000u );
+    vecsEntity e = vecsCreate( w );
+    NonPodData initial;
+    initial.text = "Hello Context";
+    initial.numbers = { 1, 2, 3, 4, 5 };
+    vecsSet<NonPodData>( w, e, initial );
+    
+    NonPodData* p = vecsGet<NonPodData>( w, e );
+    ASSERT_EQ( p->text, "Hello Context" );
+    ASSERT_EQ( p->numbers.size(), 5u );
+    ASSERT_EQ( p->numbers[4], 5 );
+
+    vecsDestroyWorld( w );
+}
+
+UTEST( complex_types, pool_grow_with_std_types )
+{
+    vecsWorld* w = vecsCreateWorld( 1000u );
+    vecsEntity entities[80];
+    for ( int i = 0; i < 80; i++ )
+    {
+        entities[i] = vecsCreate( w );
+        NonPodData data;
+        data.text = std::to_string( i );
+        data.numbers.push_back( i );
+        vecsSet<NonPodData>( w, entities[i], data );
+    }
+
+    int count = 0;
+    vecsEach<NonPodData>( w, [&]( vecsEntity e, NonPodData& data )
+    {
+        ASSERT_EQ( data.text, std::to_string( count ) );
+        ASSERT_EQ( data.numbers.size(), 1u );
+        ASSERT_EQ( data.numbers[0], count );
+        count++;
+    } );
+    ASSERT_EQ( count, 80 );
+    
+    vecsDestroyWorld( w );
+}
+
+UTEST( complex_types, pool_compaction_remove )
+{
+    vecsWorld* w = vecsCreateWorld( 1000u );
+    vecsEntity entities[80];
+    for ( int i = 0; i < 80; i++ )
+    {
+        entities[i] = vecsCreate( w );
+        NonPodData data;
+        data.text = std::to_string( i );
+        data.numbers.push_back( i );
+        vecsSet<NonPodData>( w, entities[i], data );
+    }
+
+    for ( int i = 0; i < 80; i += 2 )
+    {
+        vecsDestroy( w, entities[i] );
+    }
+
+    int count = 0;
+    vecsEach<NonPodData>( w, [&]( vecsEntity, NonPodData& data )
+    {
+        count++;
+    } );
+    ASSERT_EQ( count, 40 );
+    
+    vecsDestroyWorld( w );
+}
+
+UTEST( complex_types, multithreaded_iteration )
+{
+    vecsWorld* w = vecsCreateWorld( 2000u );
+    vecsEntity entities[1000];
+    for ( int i = 0; i < 1000; i++ )
+    {
+        entities[i] = vecsCreate( w );
+        NonPodData data;
+        data.text = "ThreadTest";
+        data.numbers.push_back( i );
+        vecsSet<NonPodData>( w, entities[i], data );
+    }
+
+    vecsQuery* q = vecsBuildQuery<NonPodData>( w );
+    std::atomic<int> processed = 0;
+    
+    vecsQueryChunk chunks[4];
+    uint32_t numChunks = vecsQueryGetChunks( w, q, chunks, 4 );
+    
+    std::vector<std::thread> threads;
+    for ( uint32_t i = 0; i < numChunks; i++ )
+    {
+        threads.emplace_back( [&w, &q, &chunks, i, &processed]()
+        {
+            vecsQueryExecuteChunk<NonPodData>( w, q, &chunks[i], [&]( vecsEntity, NonPodData& d )
+            {
+                d.numbers.push_back( -1 );
+                processed++;
+            } );
+        } );
+    }
+    
+    for ( auto& t : threads )
+    {
+        t.join();
+    }
+    
+    ASSERT_EQ( processed.load(), 1000 );
+    
+    int count = 0;
+    vecsEach<NonPodData>( w, [&]( vecsEntity, NonPodData& data )
+    {
+        ASSERT_EQ( data.numbers.size(), 2u );
+        ASSERT_EQ( data.numbers[1], -1 );
+        count++;
+    } );
+    ASSERT_EQ( count, 1000 );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( complex_types, cmdbuf_operations )
+{
+    vecsWorld* w = vecsCreateWorld( 1000u );
+    vecsCommandBuffer* cb = vecsCreateCommandBuffer( w );
+    vecsEntity e = vecsCreate( w );
+    
+    NonPodData data;
+    data.text = "Deferred";
+    data.numbers = { 7, 7, 7 };
+    
+    vecsCmdSet<NonPodData>( cb, e, data );
+    vecsFlush( cb );
+    
+    ASSERT_TRUE( vecsHas<NonPodData>( w, e ) );
+    ASSERT_EQ( vecsGet<NonPodData>( w, e )->text, "Deferred" );
+    ASSERT_EQ( vecsGet<NonPodData>( w, e )->numbers.size(), 3u );
+    
+    vecsCmdUnset<NonPodData>( cb, e );
+    vecsFlush( cb );
+    
+    ASSERT_FALSE( vecsHas<NonPodData>( w, e ) );
+    
+    vecsDestroyCommandBuffer( cb );
+    vecsDestroyWorld( w );
+}
+
 UTEST_MAIN();

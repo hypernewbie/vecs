@@ -388,6 +388,8 @@ struct vecsPool
     uint32_t alignment;
     bool noData; // Optimised path for Zero-Byte Tags.
     void ( *destructor )( void* );
+    void ( *moveCtor )( void*, void* );
+    void ( *copyCtor )( void*, const void* );
 };
 
 inline void vecsPoolGrow( vecsPool* pool )
@@ -405,23 +407,47 @@ inline void vecsPoolGrow( vecsPool* pool )
 
     if ( !pool->noData )
     {
+        uint8_t* newDenseData = nullptr;
         if ( pool->alignment > 8 )
         {
-            uint8_t* newDenseData = ( uint8_t* )vecsAlignedRealloc( pool->denseData, ( size_t )newCapacity * pool->stride, pool->alignment );
-            assert( newDenseData );
-            pool->denseData = newDenseData;
+            newDenseData = ( uint8_t* )vecsAlignedAlloc( ( size_t )newCapacity * pool->stride, pool->alignment );
         }
         else
         {
-            uint8_t* newDenseData = ( uint8_t* )std::realloc( pool->denseData, ( size_t )newCapacity * pool->stride );
-            assert( newDenseData );
-            pool->denseData = newDenseData;
+            newDenseData = ( uint8_t* )std::malloc( ( size_t )newCapacity * pool->stride );
         }
+        assert( newDenseData );
+
+        if ( pool->moveCtor )
+        {
+            for ( uint32_t i = 0; i < pool->count; i++ )
+            {
+                pool->moveCtor( newDenseData + ( size_t )i * pool->stride, pool->denseData + ( size_t )i * pool->stride );
+                if ( pool->destructor )
+                {
+                    pool->destructor( pool->denseData + ( size_t )i * pool->stride );
+                }
+            }
+        }
+        else
+        {
+            std::memcpy( newDenseData, pool->denseData, ( size_t )pool->count * pool->stride );
+        }
+
+        if ( pool->alignment > 8 )
+        {
+            vecsAlignedFree( pool->denseData );
+        }
+        else
+        {
+            std::free( pool->denseData );
+        }
+        pool->denseData = newDenseData;
     }
     pool->capacity = newCapacity;
 }
 
-inline vecsPool* vecsCreatePool( uint32_t maxEntities, uint32_t stride, uint32_t alignment = 8u, void ( *dtor )( void* ) = nullptr, bool noData = false )
+inline vecsPool* vecsCreatePool( uint32_t maxEntities, uint32_t stride, uint32_t alignment = 8u, void ( *dtor )( void* ) = nullptr, void ( *moveC )( void*, void* ) = nullptr, void ( *copyC )( void*, const void* ) = nullptr, bool noData = false )
 {
     vecsPool* pool = ( vecsPool* )std::malloc( sizeof( vecsPool ) );
     assert( pool );
@@ -456,6 +482,8 @@ inline vecsPool* vecsCreatePool( uint32_t maxEntities, uint32_t stride, uint32_t
     pool->alignment = alignment;
     pool->noData = noData;
     pool->destructor = dtor;
+    pool->moveCtor = moveC;
+    pool->copyCtor = copyC;
     return pool;
 }
 
@@ -505,7 +533,14 @@ inline void* vecsPoolSet( vecsPool* pool, uint32_t entityIndex, const void* data
     if ( !pool->noData )
     {
         dst = pool->denseData + ( size_t )denseIdx * pool->stride;
-        std::memcpy( dst, data, pool->stride );
+        if ( pool->copyCtor )
+        {
+            pool->copyCtor( dst, data );
+        }
+        else
+        {
+            std::memcpy( dst, data, pool->stride );
+        }
     }
     vecsBitfieldSet( &pool->bitfield, entityIndex );
     return dst;
@@ -528,7 +563,18 @@ inline void vecsPoolUnset( vecsPool* pool, uint32_t entityIndex )
         if ( denseIdx != lastIdx )
         {
             uint8_t* lastPtr = pool->denseData + ( size_t )lastIdx * pool->stride;
-            std::memcpy( removePtr, lastPtr, pool->stride );
+            if ( pool->moveCtor )
+            {
+                pool->moveCtor( removePtr, lastPtr );
+                if ( pool->destructor )
+                {
+                    pool->destructor( lastPtr );
+                }
+            }
+            else
+            {
+                std::memcpy( removePtr, lastPtr, pool->stride );
+            }
         }
     }
     if ( denseIdx != lastIdx )
@@ -1082,11 +1128,18 @@ inline vecsPool* vecsEnsurePool( vecsWorld* w )
     {
         constexpr bool kTag = std::is_empty<T>::value;
         void ( *dtor )( void* ) = nullptr;
+        void ( *moveC )( void*, void* ) = nullptr;
+        void ( *copyC )( void*, const void* ) = nullptr;
         if constexpr ( !kTag && !std::is_trivially_destructible<T>::value )
         {
             dtor = []( void* ptr ) { static_cast<T*>( ptr )->~T(); };
         }
-        w->pools[id] = vecsCreatePool( w->maxEntities, kTag ? 0u : ( uint32_t )sizeof( T ), kTag ? 1u : ( uint32_t )alignof( T ), dtor, kTag );
+        if constexpr ( !kTag && !std::is_trivially_copyable<T>::value )
+        {
+            moveC = []( void* dst, void* src ) { new ( dst ) T( std::move( *static_cast<T*>( src ) ) ); };
+            copyC = []( void* dst, const void* src ) { new ( dst ) T( *static_cast<const T*>( src ) ); };
+        }
+        w->pools[id] = vecsCreatePool( w->maxEntities, kTag ? 0u : ( uint32_t )sizeof( T ), kTag ? 1u : ( uint32_t )alignof( T ), dtor, moveC, copyC, kTag );
     }
     return w->pools[id];
 }
@@ -1257,7 +1310,14 @@ inline void vecsInstantiateBatch( vecsWorld* w, vecsEntity prefab, vecsEntity* o
                 active[activeCount].cachedData = std::malloc( pool->stride );
                 assert( active[activeCount].cachedData );
                 uint32_t dense = pool->sparse[prefabIdx];
-                std::memcpy( active[activeCount].cachedData, pool->denseData + ( size_t )dense * pool->stride, pool->stride );
+                if ( pool->copyCtor )
+                {
+                    pool->copyCtor( active[activeCount].cachedData, pool->denseData + ( size_t )dense * pool->stride );
+                }
+                else
+                {
+                    std::memcpy( active[activeCount].cachedData, pool->denseData + ( size_t )dense * pool->stride, pool->stride );
+                }
             }
             else
             {
@@ -1288,6 +1348,10 @@ inline void vecsInstantiateBatch( vecsWorld* w, vecsEntity prefab, vecsEntity* o
     {
         if ( active[j].cachedData )
         {
+            if ( active[j].pool->destructor )
+            {
+                active[j].pool->destructor( active[j].cachedData );
+            }
             std::free( active[j].cachedData );
         }
     }
@@ -3376,7 +3440,19 @@ inline void vecsFlush( vecsCommandBuffer* cb )
                         void* data = cb->dataBuffer + cmd.dataOffset;
                         if ( vecsPoolHas( cmd.pool, idx ) )
                         {
-                            std::memcpy( vecsPoolGet( cmd.pool, idx ), data, cmd.dataSize );
+                            void* dst = vecsPoolGet( cmd.pool, idx );
+                            if ( cmd.pool->destructor )
+                            {
+                                cmd.pool->destructor( dst );
+                            }
+                            if ( cmd.pool->copyCtor )
+                            {
+                                cmd.pool->copyCtor( dst, data );
+                            }
+                            else
+                            {
+                                std::memcpy( dst, data, cmd.dataSize );
+                            }
                         }
                         else
                         {
