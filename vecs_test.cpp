@@ -6,7 +6,9 @@
 #include <thread>
 #include <atomic>
 #include <vector>
+#include <vector>
 #include <string>
+#include <ostream>
 
 #if defined( __has_include )
     #if __has_include( "entt/entt.hpp" )
@@ -3241,6 +3243,11 @@ struct NonPodData {
     std::vector<int> numbers;
 };
 
+inline std::ostream& operator<<(std::ostream& os, const NonPodData& data)
+{
+    return os << "NonPodData{text=\"" << data.text << "\", numbers.size()=" << data.numbers.size() << "}";
+}
+
 UTEST( complex_types, single_entity_std_types )
 {
     vecsWorld* w = vecsCreateWorld( 1000u );
@@ -3272,7 +3279,7 @@ UTEST( complex_types, pool_grow_with_std_types )
     }
 
     int count = 0;
-    vecsEach<NonPodData>( w, [&]( vecsEntity e, NonPodData& data )
+    vecsEach<NonPodData>( w, [&]( vecsEntity /*e*/, NonPodData& data )
     {
         ASSERT_EQ( data.text, std::to_string( count ) );
         ASSERT_EQ( data.numbers.size(), 1u );
@@ -3303,7 +3310,7 @@ UTEST( complex_types, pool_compaction_remove )
     }
 
     int count = 0;
-    vecsEach<NonPodData>( w, [&]( vecsEntity, NonPodData& data )
+    vecsEach<NonPodData>( w, [&]( vecsEntity, NonPodData& /*data*/ )
     {
         count++;
     } );
