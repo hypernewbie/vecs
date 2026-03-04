@@ -1577,6 +1577,20 @@ inline void buildQueryOptional( vecsWorld* w, vecsQuery* q )
 
 }
 
+// Builds a cached intersection query for the given component types.
+//
+// The With... types nominated here form the query's identity: the internal
+// withMask is intersected against each pool that exists at build time. For
+// pools that don't exist yet the mask stays all-ones; the execution paths
+// compensate by re-intersecting against current pool bitfields at runtime.
+//
+// CONTRACT: the With... list here must be a superset of (or identical to)
+// the component types you will pass to vecsQueryEach / vecsQueryExecuteChunk.
+// Passing a narrower set at build time and a wider set at execution time will
+// make getData<> dereference VECS_INVALID_INDEX from an unowned sparse slot,
+// causing memory corruption or an access violation.
+//
+// Destroy the returned query with vecsDestroyQuery().
 template< typename... With >
 inline vecsQuery* vecsBuildQuery( vecsWorld* w )
 {
@@ -2198,12 +2212,27 @@ inline vecsEntity vecsQueryFirstMatch( vecsWorld* w, vecsQuery* q )
     return VECS_INVALID_ENTITY;
 }
 
+// Iterates every entity that satisfies the query, invoking fn( entity, With&... ).
+//
+// The With... types MUST match those used in vecsBuildQuery (or be a subset).
+// Passing extra types not present in the query's build list will call getData<>
+// on a pool that the query mask never verified, returning garbage pointers.
 template< typename... With, typename Fn >
 inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
 {
     assert( w );
     assert( q );
     static_assert( sizeof...( With ) >= 1, "vecsQueryEach requires at least one With component" );
+
+#ifndef NDEBUG
+    assert( ( ( []( vecsQuery* query, uint32_t reqId ) {
+        for ( uint32_t i = 0; i < query->withCount; i++ )
+        {
+            if ( query->withIds[i] == reqId ) return true;
+        }
+        return false;
+    }( q, vecsTypeId<std::remove_cv_t<With>>() ) ) && ... ) && "Query execution requested a component not present in the query's With list!" );
+#endif
     
     if ( q->withCount == 0 )
     {
@@ -2250,6 +2279,7 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
                     uint32_t tb = vecsTzcnt( top );
                     uint32_t l2Idx = ( ti + k ) * 64u + tb;
                     uint64_t l2 = q->withMask.l2Masks[l2Idx];
+                    vecsDetail::forEachPool( withPools, [&]( vecsPool* pool ) { if ( pool ) l2 &= pool->bitfield.l2Masks[l2Idx]; } );
                     
                     for ( uint32_t i = 0; i < q->withoutCount; i++ )
                     {
@@ -2335,6 +2365,7 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
                     uint32_t tb = vecsTzcnt( top );
                     uint32_t l2Idx = ( ti + k ) * 64u + tb;
                     uint64_t l2 = q->withMask.l2Masks[l2Idx];
+                    vecsDetail::forEachPool( withPools, [&]( vecsPool* pool ) { if ( pool ) l2 &= pool->bitfield.l2Masks[l2Idx]; } );
                     
                     for ( uint32_t i = 0; i < q->withoutCount; i++ )
                     {
@@ -2398,6 +2429,7 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
             uint32_t tb = vecsTzcnt( top );
             uint32_t l2Idx = ti * 64u + tb;
             uint64_t l2 = q->withMask.l2Masks[l2Idx];
+            vecsDetail::forEachPool( withPools, [&]( vecsPool* pool ) { if ( pool ) l2 &= pool->bitfield.l2Masks[l2Idx]; } );
             
             for ( uint32_t i = 0; i < q->withoutCount; i++ )
             {
@@ -2493,6 +2525,11 @@ inline uint32_t vecsQueryGetChunks( vecsWorld* w, vecsQuery* q, vecsQueryChunk* 
     return jobsToDispatch;
 }
 
+// Executes the query over a single chunk (for multi-threaded dispatch via vecsQueryGetChunks).
+//
+// The With... types MUST match those used in vecsBuildQuery (or be a subset).
+// Passing extra types not present in the query's build list will call getData<>
+// on a pool that the query mask never verified, returning garbage pointers.
 template< typename... With, typename Fn >
 inline void vecsQueryExecuteChunk( vecsWorld* w, vecsQuery* q, const vecsQueryChunk* chunk, Fn&& fn )
 {
@@ -2500,6 +2537,16 @@ inline void vecsQueryExecuteChunk( vecsWorld* w, vecsQuery* q, const vecsQueryCh
     assert( q );
     assert( chunk );
     static_assert( sizeof...( With ) >= 1, "vecsQueryExecuteChunk requires at least one With component" );
+
+#ifndef NDEBUG
+    assert( ( ( []( vecsQuery* query, uint32_t reqId ) {
+        for ( uint32_t i = 0; i < query->withCount; i++ )
+        {
+            if ( query->withIds[i] == reqId ) return true;
+        }
+        return false;
+    }( q, vecsTypeId<std::remove_cv_t<With>>() ) ) && ... ) && "Query execution requested a component not present in the query's With list!" );
+#endif
 
     if ( q->withCount == 0 || chunk->count == 0 )
     {
@@ -2538,6 +2585,7 @@ inline void vecsQueryExecuteChunk( vecsWorld* w, vecsQuery* q, const vecsQueryCh
                 uint32_t tb = vecsTzcnt( top );
                 uint32_t l2Idx = ti * 64u + tb;
                 uint64_t l2 = q->withMask.l2Masks[l2Idx];
+                vecsDetail::forEachPool( withPools, [&]( vecsPool* pool ) { if ( pool ) l2 &= pool->bitfield.l2Masks[l2Idx]; } );
                 
                 for ( uint32_t k = 0; k < q->withoutCount; k++ )
                 {
@@ -2573,6 +2621,7 @@ inline void vecsQueryExecuteChunk( vecsWorld* w, vecsQuery* q, const vecsQueryCh
                 uint32_t tb = vecsTzcnt( top );
                 uint32_t l2Idx = ti * 64u + tb;
                 uint64_t l2 = q->withMask.l2Masks[l2Idx];
+                vecsDetail::forEachPool( withPools, [&]( vecsPool* pool ) { if ( pool ) l2 &= pool->bitfield.l2Masks[l2Idx]; } );
                 
                 for ( uint32_t k = 0; k < q->withoutCount; k++ )
                 {
@@ -2606,6 +2655,7 @@ inline void vecsQueryExecuteChunk( vecsWorld* w, vecsQuery* q, const vecsQueryCh
             uint32_t tb = vecsTzcnt( top );
             uint32_t l2Idx = ti * 64u + tb;
             uint64_t l2 = q->withMask.l2Masks[l2Idx];
+            vecsDetail::forEachPool( withPools, [&]( vecsPool* pool ) { if ( pool ) l2 &= pool->bitfield.l2Masks[l2Idx]; } );
             
             for ( uint32_t k = 0; k < q->withoutCount; k++ )
             {

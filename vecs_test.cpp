@@ -3400,4 +3400,65 @@ UTEST( complex_types, cmdbuf_operations )
     vecsDestroyWorld( w );
 }
 
+UTEST( query, bug_stale_mask_before_pool_exists )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    
+    // 1. Create one component type so its pool exists.
+    vecsEntity e1 = vecsCreate( w );
+    vecsSet<Velocity>( w, e1, { 1.0f, 1.0f } );
+    
+    // 2. Build query for <Position, Velocity> while Position has NO pool.
+    // withMask for Position will be UINT64_MAX, so the query will produce e1 
+    // because e1 has Velocity and intersect(UINT64_MAX, e1_velocity_bit) is true.
+    vecsQuery* q = vecsBuildQuery<Position, Velocity>( w );
+    
+    // 3. Now create Position pool by setting it on a DIFFERENT entity.
+    vecsEntity e2 = vecsCreate( w );
+    vecsSet<Position>( w, e2, { 2.0f, 2.0f } );
+    
+    // 4. Run the query. 
+    // It should NOT match e1 (lacks Position) and should NOT match e2 (lacks Velocity).
+    // Before the fix, this would crash in getData<Position>(poolPos, e1Idx) 
+    // because it iterates e1Idx due to the stale mask and tries to access sparse.
+    uint32_t count = 0;
+    vecsQueryEach<Position, Velocity>( w, q, [&]( vecsEntity, Position&, Velocity& ) {
+        count++;
+    } );
+    
+    ASSERT_EQ( count, 0u );
+    
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( query, bug_stale_mask_execute_chunk )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    
+    vecsEntity e1 = vecsCreate( w );
+    vecsSet<Velocity>( w, e1, { 1.0f, 1.0f } );
+    
+    vecsQuery* q = vecsBuildQuery<Position, Velocity>( w );
+    
+    vecsEntity e2 = vecsCreate( w );
+    vecsSet<Position>( w, e2, { 2.0f, 2.0f } );
+    
+    vecsQueryChunk chunks[16];
+    uint32_t chunkCount = vecsQueryGetChunks( w, q, chunks, 16u );
+    
+    uint32_t count = 0;
+    for ( uint32_t i = 0; i < chunkCount; i++ )
+    {
+        vecsQueryExecuteChunk<Position, Velocity>( w, q, &chunks[i], [&]( vecsEntity, Position&, Velocity& ) {
+            count++;
+        } );
+    }
+    
+    ASSERT_EQ( count, 0u );
+    
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
 UTEST_MAIN();
