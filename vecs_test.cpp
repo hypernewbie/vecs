@@ -6,7 +6,6 @@
 #include <thread>
 #include <atomic>
 #include <vector>
-#include <vector>
 #include <string>
 #include <ostream>
 
@@ -1108,8 +1107,8 @@ UTEST( world, clear_world )
     ASSERT_TRUE( w->relationships->parents[vecsEntityIndex( e1 )] == VECS_INVALID_ENTITY );
     ASSERT_TRUE( w->relationships->parents[vecsEntityIndex( e2 )] == VECS_INVALID_ENTITY );
 
-    // Observers cleared
-    ASSERT_TRUE( w->observers->count == 0 );
+    // Observers survive a world clear so engine systems stay registered
+    ASSERT_TRUE( w->observers->count == 1 );
 
     // Singleton data freed
     ASSERT_TRUE( w->singletons[vecsTypeId<TestSingleton>()].data == nullptr );
@@ -3461,4 +3460,1165 @@ UTEST( query, bug_stale_mask_execute_chunk )
     vecsDestroyWorld( w );
 }
 
+#include <map>
+
+// 1. Tags
+struct SoupTagA {};
+struct SoupTagB {};
+
+// 2. PODs
+struct SoupPodA { uint32_t id; uint32_t inverse; };
+struct SoupPodB { double v[4]; };
+
+// 3. Complex types
+struct SoupCompString { std::string text; };
+struct SoupCompVector { std::vector<int> nums; };
+struct SoupCompMap { std::map<int, std::string> dict; };
+
+// 4. Ground Truth
+struct SoupExpectedFlags {
+    uint32_t expectedId;
+    bool tagA, tagB;
+    bool podA, podB;
+    bool cString, cVector, cMap;
+};
+
+UTEST( vecs, big_soup_stress_test )
+{
+    vecsWorld* w = vecsCreateWorld( 60000 );
+    vecsCommandBuffer* cb = vecsCreateCommandBuffer( w );
+    
+    // Spawn 50,000 entities with patterned components
+    const uint32_t numEntities = 50000;
+    std::vector<vecsEntity> entities( numEntities );
+    
+    for ( uint32_t i = 0; i < numEntities; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        entities[i] = e;
+        
+        int mask = i % 128;
+        SoupExpectedFlags flags = { i, false, false, false, false, false, false, false };
+        
+        if ( mask & 1 ) { vecsAddTag<SoupTagA>( w, e ); flags.tagA = true; } // Nasty: vecsAddTag
+        if ( mask & 2 ) { vecsSet<SoupTagB>( w, e ); flags.tagB = true; }
+        if ( mask & 4 ) { vecsEmplace<SoupPodA>( w, e, SoupPodA{ i, ~i } ); flags.podA = true; } // Nasty: vecsEmplace
+        if ( mask & 8 ) { vecsSet<SoupPodB>( w, e, { { (double)i, (double)i*2, (double)i*3, (double)i*4 } } ); flags.podB = true; }
+        if ( mask & 16 ) { vecsEmplace<SoupCompString>( w, e, SoupCompString{ "str_" + std::to_string( i ) } ); flags.cString = true; } // Nasty: vecsEmplace complex
+        if ( mask & 32 ) { vecsSet<SoupCompVector>( w, e, { { (int)i, (int)i+1, (int)i+2 } } ); flags.cVector = true; }
+        if ( mask & 64 ) { 
+            SoupCompMap m; 
+            m.dict[i] = "val_" + std::to_string( i ); 
+            vecsSet<SoupCompMap>( w, e, m ); 
+            flags.cMap = true; 
+        }
+        
+        vecsSet<SoupExpectedFlags>( w, e, flags );
+
+        // Nasty: Hierarchy. Every 10th entity is a child of the previous one.
+        if ( i > 0 && i % 10 == 0 )
+        {
+            vecsSetChildOf( w, e, entities[i - 1] );
+        }
+    }
+    
+    auto RunGauntlet = [&]() {
+        // 1. Solo Tag
+        uint32_t countTagA = 0;
+        vecsQuery* qTagA = vecsBuildQuery<SoupExpectedFlags, SoupTagA>( w );
+        vecsQueryEach<SoupExpectedFlags, SoupTagA>( w, qTagA, [&]( vecsEntity, SoupExpectedFlags& flags, SoupTagA& ) {
+            ASSERT_TRUE( flags.tagA );
+            countTagA++;
+        } );
+        vecsDestroyQuery( qTagA );
+        
+        // 2. Heavy Data Combo
+        uint32_t countHeavy = 0;
+        vecsQuery* qHeavy = vecsBuildQuery<SoupExpectedFlags, SoupCompVector, SoupCompMap>( w );
+        vecsQueryEach<SoupExpectedFlags, SoupCompVector, SoupCompMap>( w, qHeavy, [&]( vecsEntity, SoupExpectedFlags& flags, SoupCompVector& vec, SoupCompMap& map ) {
+            ASSERT_TRUE( flags.cVector );
+            ASSERT_TRUE( flags.cMap );
+            uint32_t expectedId = flags.expectedId;
+            ASSERT_EQ( vec.nums.size(), 3ull );
+            ASSERT_EQ( vec.nums[0], (int)expectedId );
+            auto it = map.dict.find( expectedId );
+            ASSERT_NE( it, map.dict.end() );
+            ASSERT_EQ( it->second, "val_" + std::to_string( expectedId ) );
+            countHeavy++;
+        } );
+        vecsDestroyQuery( qHeavy );
+        
+        // 3. Tag + POD Mix
+        uint32_t countMix = 0;
+        vecsQuery* qMix = vecsBuildQuery<SoupExpectedFlags, SoupTagB, SoupPodB>( w );
+        vecsQueryEach<SoupExpectedFlags, SoupTagB, SoupPodB>( w, qMix, [&]( vecsEntity, SoupExpectedFlags& flags, SoupTagB&, SoupPodB& podB ) {
+            ASSERT_TRUE( flags.tagB );
+            ASSERT_TRUE( flags.podB );
+            uint32_t expectedId = flags.expectedId;
+            ASSERT_EQ( podB.v[0], (double)expectedId );
+            countMix++;
+        } );
+        vecsDestroyQuery( qMix );
+        
+        // 4. Everything Bagel
+        uint32_t countAll = 0;
+        vecsQuery* qAll = vecsBuildQuery<SoupExpectedFlags, SoupTagA, SoupTagB, SoupPodA, SoupPodB, SoupCompString, SoupCompVector, SoupCompMap>( w );
+        vecsQueryEach<SoupExpectedFlags, SoupTagA, SoupTagB, SoupPodA, SoupPodB, SoupCompString, SoupCompVector, SoupCompMap>( w, qAll, [&]( vecsEntity, SoupExpectedFlags& flags, SoupTagA&, SoupTagB&, SoupPodA& podA, SoupPodB& podB, SoupCompString& str, SoupCompVector& vec, SoupCompMap& map ) {
+            ASSERT_TRUE( flags.tagA );
+            ASSERT_TRUE( flags.tagB );
+            ASSERT_TRUE( flags.podA );
+            ASSERT_TRUE( flags.podB );
+            ASSERT_TRUE( flags.cString );
+            ASSERT_TRUE( flags.cVector );
+            ASSERT_TRUE( flags.cMap );
+            
+            uint32_t expectedId = flags.expectedId;
+            ASSERT_EQ( podA.id, expectedId );
+            ASSERT_EQ( podA.inverse, ~expectedId );
+            ASSERT_EQ( podB.v[0], (double)expectedId );
+            ASSERT_EQ( str.text, "str_" + std::to_string( expectedId ) );
+            ASSERT_EQ( vec.nums[0], (int)expectedId );
+            ASSERT_EQ( map.dict.at(expectedId), "val_" + std::to_string( expectedId ) );
+            
+            countAll++;
+        } );
+        vecsDestroyQuery( qAll );
+    };
+
+    // 1. Initial State Check
+    // This will immediately fail vecsValidate because vecsAddTag/vecsEmplace are missing the signature bit update!
+    RunGauntlet();
+    ASSERT_TRUE( vecsValidate( w ) );
+    
+    // 2. The Great Shuffle: Interleaved Deletions, Modifications, and Removals
+    for ( uint32_t i = 0; i < numEntities; i++ )
+    {
+        if ( entities[i] == VECS_INVALID_ENTITY ) continue;
+        if ( !vecsAlive( w, entities[i] ) ) continue; // Could have been destroyed recursively
+
+        vecsEntity e = entities[i];
+        SoupExpectedFlags* flags = vecsGet<SoupExpectedFlags>( w, e );
+        
+        // Strategy A: Delete completely (Every 5th entity) using Command Buffer
+        if ( i % 5 == 0 )
+        {
+            vecsCmdDestroy( cb, e );
+            entities[i] = VECS_INVALID_ENTITY;
+            continue;
+        }
+
+        // Strategy B: Mutate data (Every 3rd entity)
+        if ( i % 3 == 0 )
+        {
+            flags->expectedId += 100000;
+
+            if ( flags->podA ) 
+            {
+                SoupPodA* podA = vecsGet<SoupPodA>( w, e );
+                podA->id = flags->expectedId;
+                podA->inverse = ~( podA->id );
+            }
+            if ( flags->podB )
+            {
+                SoupPodB* podB = vecsGet<SoupPodB>( w, e );
+                podB->v[0] = (double)flags->expectedId;
+            }
+            if ( flags->cString )
+            {
+                SoupCompString* str = vecsGet<SoupCompString>( w, e );
+                str->text = "str_" + std::to_string( flags->expectedId );
+            }
+            if ( flags->cVector )
+            {
+                SoupCompVector* vec = vecsGet<SoupCompVector>( w, e );
+                vec->nums[0] = flags->expectedId; 
+            }
+            if ( flags->cMap )
+            {
+                SoupCompMap* map = vecsGet<SoupCompMap>( w, e );
+                uint32_t oldId = flags->expectedId - 100000;
+                map->dict.erase( oldId );
+                map->dict[flags->expectedId] = "val_" + std::to_string( flags->expectedId );
+                
+                // Add some chaotic garbage to the map to force reallocations
+                map->dict[i + 900000] = "garbage_data_to_pad_map";
+                map->dict[i + 900001] = "more_garbage_for_allocator";
+            }
+        }
+
+        // Strategy C: Remove Components (Every 7th entity)
+        if ( i % 7 == 0 )
+        {
+            if ( flags->tagA ) { vecsUnset<SoupTagA>( w, e ); flags->tagA = false; }
+            if ( flags->cVector ) { vecsUnset<SoupCompVector>( w, e ); flags->cVector = false; }
+            if ( flags->cString ) { vecsUnset<SoupCompString>( w, e ); flags->cString = false; }
+        }
+
+        // Strategy D: Add Components (Every 11th entity)
+        if ( i % 11 == 0 )
+        {
+            if ( !flags->tagB ) { vecsAddTag<SoupTagB>( w, e ); flags->tagB = true; } // Nasty: vecsAddTag
+            if ( !flags->cMap ) { 
+                SoupCompMap m;
+                m.dict[flags->expectedId] = "val_" + std::to_string( flags->expectedId );
+                vecsEmplace<SoupCompMap>( w, e, std::move(m) ); // Nasty: vecsEmplace complex
+                flags->cMap = true; 
+            }
+        }
+    }
+    
+    vecsFlush( cb );
+
+    // 3. Post-Shuffle Verification
+    RunGauntlet();
+    ASSERT_TRUE( vecsValidate( w ) );
+    
+    // 4. Pass 1: Delete Evens (Geometric Hole Punching)
+    for ( uint32_t i = 0; i < numEntities; i++ )
+    {
+        if ( i % 2 == 0 && entities[i] != VECS_INVALID_ENTITY && vecsAlive( w, entities[i] ) )
+        {
+            vecsDestroy( w, entities[i] );
+            entities[i] = VECS_INVALID_ENTITY;
+        }
+    }
+    RunGauntlet();
+    ASSERT_TRUE( vecsValidate( w ) );
+    
+    // 5. Pass 2: Delete Primes/Irregular gap
+    for ( uint32_t i = 0; i < numEntities; i++ )
+    {
+        if ( i % 7 == 0 && entities[i] != VECS_INVALID_ENTITY && vecsAlive( w, entities[i] ) )
+        {
+            vecsDestroy( w, entities[i] );
+            entities[i] = VECS_INVALID_ENTITY;
+        }
+    }
+    RunGauntlet();
+    ASSERT_TRUE( vecsValidate( w ) );
+    
+    vecsDestroyCommandBuffer( cb );
+    vecsDestroyWorld( w );
+}
+
+UTEST( edge_case, leaked_tags_on_entity_reuse )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    vecsEntity e = vecsCreate( w );
+    
+    // Use the buggy functions
+    vecsAddTag<SoupTagA>( w, e );
+    vecsEmplace<SoupPodA>( w, e, SoupPodA{ 42, ~42u } );
+    
+    // Ensure they are actually there
+    ASSERT_TRUE( vecsHas<SoupTagA>( w, e ) );
+    ASSERT_TRUE( vecsHas<SoupPodA>( w, e ) );
+    
+    // Delete the entity. Because signatures weren't updated, 
+    // vecsDestroyRecursive will skip cleaning up SoupTagA and SoupPodA bits!
+    vecsDestroy( w, e );
+    
+    // Create a new entity, which will recycle the index of the old entity
+    vecsEntity reused = vecsCreate( w );
+    ASSERT_EQ( vecsEntityIndex( reused ), vecsEntityIndex( e ) );
+    
+    // The new entity should NOT have the old components!
+    ASSERT_FALSE( vecsHas<SoupTagA>( w, reused ) );
+    ASSERT_FALSE( vecsHas<SoupPodA>( w, reused ) );
+    
+    vecsDestroyWorld( w );
+}
+
+UTEST( validation, captures_corruption )
+{
+    vecsWorld* w = vecsCreateWorld();
+
+    vecsEntity parent = vecsCreate( w );
+    vecsSet<Position>( w, parent, { 0, 0 } );
+
+    vecsEntity child = vecsCreate( w );
+    vecsSet<Position>( w, child, { 1, 1 } );
+    vecsSetChildOf( w, child, parent );
+
+    // Validation should succeed initially
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    // Verify emplace and addTag do not break validation!
+    struct EmptyTag {};
+    vecsEmplace<Velocity>( w, child, 2.0f, 2.0f );
+    vecsAddTag<EmptyTag>( w, child );
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    // 1. Corrupt component pool (sparse set mapping)
+    vecsPool* posPool = vecsEnsurePool<Position>( w );
+    uint32_t savedSparse = posPool->sparse[vecsEntityIndex( child )];
+    posPool->sparse[vecsEntityIndex( child )] = VECS_INVALID_INDEX; // Break bi-directional mapping
+    ASSERT_FALSE( vecsValidate( w ) );
+    posPool->sparse[vecsEntityIndex( child )] = savedSparse; // Restore
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    // 2. Corrupt entity pool allocation state
+    w->entities->allocated[vecsEntityIndex( child )] = 0; // Mark as dead while it's still alive in components
+    ASSERT_FALSE( vecsValidate( w ) );
+    w->entities->allocated[vecsEntityIndex( child )] = 1; // Restore
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    // 3. Corrupt bitfield
+    uint64_t oldMask = w->entities->signatures[vecsTypeId<Position>() >> 6][vecsEntityIndex( child )];
+    w->entities->signatures[vecsTypeId<Position>() >> 6][vecsEntityIndex( child )] = 0;
+    ASSERT_FALSE( vecsValidate( w ) );
+    w->entities->signatures[vecsTypeId<Position>() >> 6][vecsEntityIndex( child )] = oldMask; // Restore
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    // 4. Corrupt relationships
+    vecsEntity oldParent = w->relationships->parents[vecsEntityIndex( child )];
+    w->relationships->parents[vecsEntityIndex( child )] = VECS_INVALID_ENTITY; // Make child orphan without updating parent's children
+    ASSERT_FALSE( vecsValidate( w ) );
+    w->relationships->parents[vecsEntityIndex( child )] = oldParent; // Restore
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyWorld( w );
+}
+
+UTEST( chaos, deferred_interdependent_commands )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    vecsCommandBuffer* cb = vecsCreateCommandBuffer( w );
+
+    // 1. Create a pending entity and set component on it
+    uint32_t p1 = vecsCmdCreate( cb );
+    vecsCmdSetCreated<SoupPodA>( cb, p1, SoupPodA{ 123, 456 } );
+    vecsCmdSetCreated<SoupTagA>( cb, p1, {} );
+
+    // 2. Create another pending entity
+    uint32_t p2 = vecsCmdCreate( cb );
+    vecsCmdSetCreated<SoupPodB>( cb, p2, SoupPodB{ { 1.0, 2.0, 3.0, 4.0 } } );
+
+    // 3. Queue a destroy for an existing entity, then a set on it
+    vecsEntity victim = vecsCreate( w );
+    vecsCmdDestroy( cb, victim );
+    // This should be safely ignored or handled by vecsFlush if it checks aliveness
+    vecsCmdSet<SoupPodA>( cb, victim, SoupPodA{ 666, 666 } );
+
+    // 4. Interdependent: Set parent of an existing entity to a created one
+    // NOTE: vecsCmdSetParent currently asserts vecsAlive for parent, 
+    // so we can't easily link to a pending entity via the standard API 
+    // without it failing in Debug. We'll skip the illegal parent link 
+    // but test the rest of the deferred chaos.
+    
+    vecsFlush( cb );
+
+    vecsEntity e1 = vecsCmdGetCreated( cb, p1 );
+    vecsEntity e2 = vecsCmdGetCreated( cb, p2 );
+
+    ASSERT_TRUE( vecsAlive( w, e1 ) );
+    ASSERT_TRUE( vecsAlive( w, e2 ) );
+    ASSERT_FALSE( vecsAlive( w, victim ) );
+
+    ASSERT_TRUE( vecsHas<SoupPodA>( w, e1 ) );
+    ASSERT_TRUE( vecsHas<SoupTagA>( w, e1 ) );
+    ASSERT_EQ( vecsGet<SoupPodA>( w, e1 )->id, 123u );
+
+    ASSERT_TRUE( vecsHas<SoupPodB>( w, e2 ) );
+    ASSERT_EQ( vecsGet<SoupPodB>( w, e2 )->v[0], 1.0 );
+
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyCommandBuffer( cb );
+    vecsDestroyWorld( w );
+}
+
+UTEST( chaos, cascading_hierarchy_destructions )
+{
+    vecsWorld* w = vecsCreateWorld( 10000u );
+    
+    // Build a tree: 5 levels deep, 4 children per node = ~1365 entities
+    std::vector<vecsEntity> tree;
+    vecsEntity root = vecsCreate( w );
+    tree.push_back( root );
+    
+    uint32_t head = 0;
+    for ( int level = 0; level < 4; level++ )
+    {
+        uint32_t currentLevelSize = ( uint32_t )tree.size();
+        for ( uint32_t i = head; i < currentLevelSize; i++ )
+        {
+            for ( int c = 0; c < 4; c++ )
+            {
+                vecsEntity child = vecsCreate( w );
+                vecsSetChildOf( w, child, tree[i] );
+                tree.push_back( child );
+            }
+        }
+        head = currentLevelSize;
+    }
+
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    // Randomly destroy some middle nodes and reparent children to root
+    // Use deterministic LCG for randomness
+    uint32_t seed = 0x1337;
+    auto LcgNext = [&]( uint32_t mod ) {
+        seed = ( seed * 1103515245 + 12345 ) & 0x7fffffff;
+        return seed % mod;
+    };
+
+    for ( int i = 0; i < 100; i++ )
+    {
+        uint32_t idx = 1 + LcgNext( ( uint32_t )tree.size() - 1 );
+        vecsEntity e = tree[idx];
+        if ( !vecsAlive( w, e ) ) continue;
+
+        if ( LcgNext( 2 ) == 0 )
+        {
+            // Reparent first child to root before destroying
+            if ( vecsGetChildEntityCount( w, e ) > 0 )
+            {
+                vecsEntity firstChild = vecsGetChildEntity( w, e, 0 );
+                if ( firstChild != VECS_INVALID_ENTITY )
+                {
+                    vecsSetChildOf( w, firstChild, root );
+                }
+            }
+            vecsDestroy( w, e );
+        }
+        else
+        {
+            // Recursive destroy
+            vecsDestroyRecursive( w, e );
+        }
+    }
+
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    // Finally, destroy root recursively
+    vecsDestroyRecursive( w, root );
+
+    // Expect zero entities alive from the tree
+    for ( vecsEntity e : tree )
+    {
+        ASSERT_FALSE( vecsAlive( w, e ) );
+    }
+
+    ASSERT_TRUE( vecsValidate( w ) );
+    vecsDestroyWorld( w );
+}
+
+UTEST( chaos, parallel_mutation_and_command_buffers )
+{
+    const uint32_t numEntities = 10000;
+    vecsWorld* w = vecsCreateWorld( numEntities + 1000 );
+    
+    std::vector<vecsEntity> entities( numEntities );
+    for ( uint32_t i = 0; i < numEntities; i++ )
+    {
+        entities[i] = vecsCreate( w );
+    }
+
+    const int numThreads = 8;
+    std::vector<std::thread> threads;
+    std::vector<vecsCommandBuffer*> cbs( numThreads );
+
+    for ( int t = 0; t < numThreads; t++ )
+    {
+        cbs[t] = vecsCreateCommandBuffer( w );
+        threads.emplace_back( [t, &entities, &cbs, numEntities]() {
+            uint32_t seed = ( uint32_t )t + 42;
+            auto LcgNext = [&]( uint32_t mod ) {
+                seed = ( seed * 1103515245 + 12345 ) & 0x7fffffff;
+                return seed % mod;
+            };
+
+            // Each thread touches a random subset
+            for ( int i = 0; i < 2000; i++ )
+            {
+                uint32_t idx = LcgNext( numEntities );
+                vecsEntity e = entities[idx];
+                
+                int op = LcgNext( 4 );
+                switch ( op )
+                {
+                    case 0: vecsCmdSet<SoupTagA>( cbs[t], e, {} ); break;
+                    case 1: vecsCmdSet<SoupPodA>( cbs[t], e, { idx, ~idx } ); break;
+                    case 2: vecsCmdUnset<SoupTagA>( cbs[t], e ); break;
+                    case 3: vecsCmdDestroy( cbs[t], e ); break;
+                }
+            }
+        } );
+    }
+
+    for ( auto& t : threads ) t.join();
+
+    // Flush all buffers sequentially
+    for ( int t = 0; t < numThreads; t++ )
+    {
+        vecsFlush( cbs[t] );
+        vecsDestroyCommandBuffer( cbs[t] );
+    }
+
+    ASSERT_TRUE( vecsValidate( w ) );
+    vecsDestroyWorld( w );
+}
+
+UTEST( chaos, thrash_complex_types_and_recycling )
+{
+    vecsWorld* w = vecsCreateWorld( 2048u );
+    
+    uint32_t seed = 0xCAFE;
+    auto LcgNext = [&]( uint32_t mod ) {
+        seed = ( seed * 1103515245 + 12345 ) & 0x7fffffff;
+        return seed % mod;
+    };
+
+    std::vector<vecsEntity> persistent( 500, VECS_INVALID_ENTITY );
+
+    // 100,000 iterations of rapid creation and destruction
+    for ( int i = 0; i < 100000; i++ )
+    {
+        // 1. Transient entity
+        vecsEntity transient = vecsCreate( w );
+        if ( transient != VECS_INVALID_ENTITY )
+        {
+            if ( LcgNext( 2 ) == 0 )
+            {
+                SoupCompVector v;
+                v.nums = { i, i + 1, i + 2 };
+                vecsSet<SoupCompVector>( w, transient, v );
+            }
+            else
+            {
+                SoupCompMap m;
+                m.dict[i] = "thrash";
+                vecsSet<SoupCompMap>( w, transient, m );
+            }
+            vecsDestroy( w, transient );
+        }
+
+        // 2. Persistent entity rotation
+        uint32_t pIdx = LcgNext( ( uint32_t )persistent.size() );
+        if ( persistent[pIdx] == VECS_INVALID_ENTITY || !vecsAlive( w, persistent[pIdx] ) )
+        {
+            persistent[pIdx] = vecsCreate( w );
+        }
+        else
+        {
+            if ( LcgNext( 5 ) == 0 )
+            {
+                vecsDestroy( w, persistent[pIdx] );
+                persistent[pIdx] = VECS_INVALID_ENTITY;
+            }
+            else
+            {
+                // Mutate
+                if ( LcgNext( 2 ) == 0 )
+                {
+                    vecsSet<SoupCompString>( w, persistent[pIdx], { "iter_" + std::to_string( i ) } );
+                }
+                else
+                {
+                    if ( vecsHas<SoupCompString>( w, persistent[pIdx] ) )
+                    {
+                        vecsUnset<SoupCompString>( w, persistent[pIdx] );
+                    }
+                }
+            }
+        }
+
+        // Periodically validate
+        if ( i % 10000 == 0 )
+        {
+            ASSERT_TRUE( vecsValidate( w ) );
+        }
+    }
+
+    ASSERT_TRUE( vecsValidate( w ) );
+    vecsDestroyWorld( w );
+}
+
+UTEST( chaos, mid_iteration_structural_changes )
+{
+    vecsWorld* w = vecsCreateWorld( 6000u );
+    
+    // Spawn entities with TagA
+    for ( int i = 0; i < 5000; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsAddTag<SoupTagA>( w, e );
+    }
+
+    vecsQuery* q = vecsBuildQuery<SoupTagA>( w );
+    uint32_t processed = 0;
+
+    // During iteration, remove TagA and add TagB + Pod
+    vecsQueryEach<SoupTagA>( w, q, [&]( vecsEntity e, SoupTagA& ) {
+        vecsUnset<SoupTagA>( w, e );
+        vecsAddTag<SoupTagB>( w, e );
+        vecsSet<SoupPodA>( w, e, { processed, ~processed } );
+        processed++;
+    } );
+
+    ASSERT_EQ( processed, 5000u );
+    
+    // Verify results
+    uint32_t countB = 0;
+    vecsQuery* qB = vecsBuildQuery<SoupTagB, SoupPodA>( w );
+    vecsQueryEach<SoupTagB, SoupPodA>( w, qB, [&]( vecsEntity, SoupTagB&, SoupPodA& ) {
+        countB++;
+    } );
+    
+    ASSERT_EQ( countB, 5000u );
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyQuery( q );
+    vecsDestroyQuery( qB );
+    vecsDestroyWorld( w );
+}
+
+UTEST( chaos, deferred_unset_zombie_bits )
+{
+    vecsWorld* w = vecsCreateWorld( 128u );
+    vecsEntity e = vecsCreate( w );
+    vecsSet<SoupPodA>( w, e, { 1, 1 } );
+    ASSERT_TRUE( vecsHas<SoupPodA>( w, e ) );
+
+    vecsCommandBuffer* cb = vecsCreateCommandBuffer( w );
+    vecsCmdUnset<SoupPodA>( cb, e );
+    vecsFlush( cb );
+
+    // BUG: vecsPoolUnset was called, so the data is gone, 
+    // BUT the signature bit was never cleared!
+    // vecsHas<T> checks the bitfield first.
+    // If it returns true, but the pool doesn't actually have the index, we have a "Zombie Bit".
+    ASSERT_FALSE( vecsHas<SoupPodA>( w, e ) ); // This will fail!
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyCommandBuffer( cb );
+    vecsDestroyWorld( w );
+}
+
+UTEST( chaos, deferred_tag_ghosting )
+{
+    vecsWorld* w = vecsCreateWorld( 128u );
+    vecsEntity e = vecsCreate( w );
+
+    vecsCommandBuffer* cb = vecsCreateCommandBuffer( w );
+    vecsCmdSet<SoupTagA>( cb, e, {} );
+    vecsFlush( cb );
+
+    // BUG: The tag exists in the pool, but the bitmask is 0.
+    // Queries will skip this entity.
+    uint32_t count = 0;
+    vecsEach<SoupTagA>( w, [&]( vecsEntity, SoupTagA& ) {
+        count++;
+    } );
+
+    ASSERT_EQ( count, 1u ); // This will fail (count will be 0)!
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyCommandBuffer( cb );
+    vecsDestroyWorld( w );
+}
+
+UTEST( chaos, recycled_index_signature_bleed )
+{
+    vecsWorld* w = vecsCreateWorld( 128u );
+    
+    // 1. Create entity with component manually (sets signature)
+    vecsEntity e1 = vecsCreate( w );
+    vecsSet<SoupPodA>( w, e1, { 1, 1 } );
+    uint32_t idx = vecsEntityIndex( e1 );
+
+    // 2. Destroy it via command buffer
+    vecsCommandBuffer* cb = vecsCreateCommandBuffer( w );
+    vecsCmdDestroy( cb, e1 );
+    vecsFlush( cb );
+    // Signature should be cleared by vecsDestroy (which vecsFlush calls), 
+    // but let's see if there are any edge cases where it isn't.
+
+    // 3. Create new entity using the recycled index, but add NO components
+    vecsEntity e2 = vecsCreate( w );
+    ASSERT_EQ( vecsEntityIndex( e2 ), idx );
+
+    // 4. If signature wasn't perfectly cleared, e2 might "inherit" SoupPodA!
+    ASSERT_FALSE( vecsHas<SoupPodA>( w, e2 ) );
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyCommandBuffer( cb );
+    vecsDestroyWorld( w );
+}
+
+struct SoupUafTracker {
+    uint32_t* ptr;
+    SoupUafTracker() { ptr = new uint32_t(42); }
+    SoupUafTracker(const SoupUafTracker& o) { ptr = new uint32_t(*o.ptr); }
+    ~SoupUafTracker() { *ptr = 0xDEADBEEF; delete ptr; ptr = nullptr; }
+};
+
+struct SoupSingletonLifecycleTracker
+{
+    static int destroyed;
+    int value = 0;
+    ~SoupSingletonLifecycleTracker() { destroyed++; }
+};
+
+int SoupSingletonLifecycleTracker::destroyed = 0;
+
+struct SoupByteComp { char value; };
+struct SoupDoubleComp { double value; };
+
+static bool g_commandAlignmentOk = true;
+
+struct alignas( 32 ) SoupAlignedCommandPayload
+{
+    float values[8] = {};
+    uint32_t magic = 0;
+
+    SoupAlignedCommandPayload() = default;
+    SoupAlignedCommandPayload( const SoupAlignedCommandPayload& other )
+    {
+        g_commandAlignmentOk = ( reinterpret_cast<uintptr_t>( &other ) & ( alignof( SoupAlignedCommandPayload ) - 1u ) ) == 0u;
+        std::memcpy( values, other.values, sizeof( values ) );
+        magic = other.magic;
+    }
+};
+
+static vecsEntity g_reparentTarget = VECS_INVALID_ENTITY;
+
+static void onChaosReparentDuringDestroy( vecsWorld* w, vecsEntity e, SoupPodA* )
+{
+    if ( g_reparentTarget != VECS_INVALID_ENTITY && vecsAlive( w, g_reparentTarget ) )
+    {
+        vecsSetChildOf( w, e, g_reparentTarget );
+    }
+}
+
+UTEST( chaos, command_buffer_uaf_on_flush )
+{
+    vecsWorld* w = vecsCreateWorld( 128u );
+    vecsEntity e = vecsCreate( w );
+    vecsCommandBuffer* cb = vecsCreateCommandBuffer( w );
+
+    {
+        // Create temporary. vecsCmdSet memcpy's it into the command buffer.
+        SoupUafTracker temp;
+        vecsCmdSet<SoupUafTracker>( cb, e, temp );
+    } // temp is destroyed. temp.ptr is deleted and set to 0xDEADBEEF before deletion.
+
+    // vecsFlush calls the copy constructor using the memcpy'd bytes as the source.
+    // Since the source contains the old pointer, it dereferences it.
+    // In the best case (for an exploit), it reads the overwritten 0xDEADBEEF.
+    // In the worst case, it segfaults.
+    vecsFlush( cb );
+
+    SoupUafTracker* tracker = vecsGet<SoupUafTracker>( w, e );
+    
+    // BUG: The value will NOT be 42, because the pointer was left dangling
+    // and read during vecsFlush after the temporary was destroyed!
+    ASSERT_EQ( *tracker->ptr, 42u ); // This will fail! (Likely 0xDEADBEEF or crash)
+
+    vecsDestroyCommandBuffer( cb );
+    vecsDestroyWorld( w );
+}
+
+static int g_chaosObserverCount = 0;
+static void onChaosAdd( vecsWorld*, vecsEntity, SoupPodA* ) { g_chaosObserverCount++; }
+
+UTEST( chaos, clone_misses_observers )
+{
+    g_chaosObserverCount = 0;
+    vecsWorld* w = vecsCreateWorld( 128u );
+    vecsOnAdd<SoupPodA>( w, onChaosAdd );
+
+    vecsEntity src = vecsCreate( w );
+    vecsSet<SoupPodA>( w, src, { 42, 42 } );
+    ASSERT_EQ( g_chaosObserverCount, 1 );
+
+    // BUG: vecsClone copies the component data and updates signatures, 
+    // but FAILS to trigger the onAdd observer callbacks!
+    vecsEntity dst = vecsClone( w, src );
+    (void)dst;
+
+    ASSERT_EQ( g_chaosObserverCount, 2 ); // This will fail!
+
+    vecsDestroyWorld( w );
+}
+
+UTEST( chaos, instantiate_batch_misses_observers )
+{
+    g_chaosObserverCount = 0;
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    vecsOnAdd<SoupPodA>( w, onChaosAdd );
+
+    vecsEntity prefab = vecsCreate( w );
+    vecsSet<SoupPodA>( w, prefab, { 99, 99 } );
+    ASSERT_EQ( g_chaosObserverCount, 1 );
+
+    // BUG: vecsInstantiateBatch copies the component data and updates signatures, 
+    // but FAILS to trigger the onAdd observer callbacks for the newly spawned entities!
+    vecsEntity spawned[10];
+    vecsInstantiateBatch( w, prefab, spawned, 10 );
+
+    // 1 for prefab + 10 for spawned instances
+    ASSERT_EQ( g_chaosObserverCount, 11 ); // This will fail!
+
+    vecsDestroyWorld( w );
+}
+
+static int g_clearWorldObsCount = 0;
+static void onClearWorldChaos( vecsWorld*, vecsEntity, SoupPodA* ) { g_clearWorldObsCount++; }
+
+UTEST( chaos, clear_world_loses_observers )
+{
+    g_clearWorldObsCount = 0;
+    vecsWorld* w = vecsCreateWorld( 128u );
+    vecsOnAdd<SoupPodA>( w, onClearWorldChaos );
+
+    vecsEntity e1 = vecsCreate( w );
+    vecsSet<SoupPodA>( w, e1, { 1, 1 } );
+    ASSERT_EQ( g_clearWorldObsCount, 1 );
+
+    // Clear world. This should clear entities, but keep the systems/observers intact!
+    vecsClearWorld( w );
+
+    vecsEntity e2 = vecsCreate( w );
+    vecsSet<SoupPodA>( w, e2, { 2, 2 } );
+
+    // BUG: vecsClearWorld literally destroys the observer list! The callback will never fire again.
+    ASSERT_EQ( g_clearWorldObsCount, 2 ); // This will fail!
+
+    vecsDestroyWorld( w );
+}
+
+static int g_deferredObsCount = 0;
+static void onDeferredChaosAdd( vecsWorld*, vecsEntity, SoupPodB* ) { g_deferredObsCount++; }
+
+UTEST( chaos, deferred_set_misses_observers )
+{
+    g_deferredObsCount = 0;
+    vecsWorld* w = vecsCreateWorld( 128u );
+    vecsOnAdd<SoupPodB>( w, onDeferredChaosAdd );
+
+    vecsEntity e = vecsCreate( w );
+    vecsCommandBuffer* cb = vecsCreateCommandBuffer( w );
+
+    vecsCmdSet<SoupPodB>( cb, e, SoupPodB{ { 1.0, 2.0, 3.0, 4.0 } } );
+    
+    // vecsFlush calls vecsPoolSet but bypasses the observer callbacks!
+    vecsFlush( cb );
+
+    ASSERT_TRUE( vecsHas<SoupPodB>( w, e ) );
+    ASSERT_EQ( g_deferredObsCount, 1 ); // This will fail!
+
+    vecsDestroyCommandBuffer( cb );
+    vecsDestroyWorld( w );
+}
+
+UTEST( chaos, deferred_set_resurrects_dead_entity )
+{
+    vecsWorld* w = vecsCreateWorld( 128u );
+    vecsEntity e = vecsCreate( w );
+
+    vecsCommandBuffer* cb = vecsCreateCommandBuffer( w );
+    vecsCmdSet<SoupPodB>( cb, e, SoupPodB{ { 9.0, 9.0, 9.0, 9.0 } } );
+    vecsFlush( cb );
+
+    // Because vecsCmdSet misses updating the entity signature...
+    // vecsDestroyRecursive will NOT remove SoupPodB from the pool!
+    vecsDestroy( w, e );
+    
+    ASSERT_FALSE( vecsAlive( w, e ) );
+
+    uint32_t iterationCount = 0;
+    vecsEach<SoupPodB>( w, [&]( vecsEntity iterE, SoupPodB& ) {
+        iterationCount++;
+        // The query iterator just found our dead entity!
+        ASSERT_TRUE( vecsAlive( w, iterE ) ); // This will fail!
+    } );
+
+    // BUG: It will actually find 1 dead entity!
+    ASSERT_EQ( iterationCount, 0u ); // This will also fail!
+
+    vecsDestroyCommandBuffer( cb );
+    vecsDestroyWorld( w );
+}
+
+UTEST( chaos, hierarchy_cycle_crash )
+{
+    vecsWorld* w = vecsCreateWorld( 128u );
+    vecsEntity a = vecsCreate( w );
+    vecsEntity b = vecsCreate( w );
+    vecsSetChildOf( w, b, a );
+    vecsSetChildOf( w, a, b );
+
+    ASSERT_EQ( vecsGetParentEntity( w, b ), a );
+    ASSERT_EQ( vecsGetParentEntity( w, a ), VECS_INVALID_ENTITY );
+    ASSERT_EQ( vecsGetChildEntityCount( w, a ), 1u );
+    ASSERT_EQ( vecsGetChildEntityCount( w, b ), 0u );
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyRecursive( w, a );
+    ASSERT_FALSE( vecsAlive( w, a ) );
+    ASSERT_FALSE( vecsAlive( w, b ) );
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyWorld( w );
+}
+
+static void onRemoveSpawnComponent( vecsWorld* w, vecsEntity e, SoupPodA* )
+{
+    // During destruction, add a completely new component!
+    vecsSet<SoupPodB>( w, e, { { 1, 2, 3, 4 } } );
+}
+
+UTEST( chaos, observer_add_during_destroy_leaks )
+{
+    vecsWorld* w = vecsCreateWorld( 128u );
+    vecsOnRemove<SoupPodA>( w, onRemoveSpawnComponent );
+
+    vecsEntity e = vecsCreate( w );
+    vecsSet<SoupPodA>( w, e, { 1, 1 } );
+
+    uint32_t eIdx = vecsEntityIndex( e );
+
+    // When destroying, the onRemove observer for SoupPodA fires.
+    // It adds SoupPodB to the entity.
+    // vecsDestroyRecursive clears ALL signatures at the end of its loop.
+    // So the signature bit for SoupPodB is cleared, but the component remains in the pool!
+    vecsDestroy( w, e );
+
+    // Now recycle the entity index
+    vecsEntity reused = vecsCreate( w );
+    ASSERT_EQ( vecsEntityIndex( reused ), eIdx );
+
+    // It should be a completely fresh entity
+    ASSERT_FALSE( vecsHas<SoupPodB>( w, reused ) );
+
+    // BUG: The pool bitfield still has SoupPodB marked for this index!
+    vecsPool* pool = w->pools[vecsTypeId<SoupPodB>()];
+    ASSERT_FALSE( vecsPoolHas( pool, eIdx ) ); // This will fail!
+
+    vecsDestroyWorld( w );
+}
+
+UTEST( chaos, clone_hierarchy_desync )
+{
+    vecsWorld* w = vecsCreateWorld( 128u );
+    vecsEntity parent = vecsCreate( w );
+    vecsEntity child = vecsCreate( w );
+    vecsSetChildOf( w, child, parent );
+
+    ASSERT_EQ( vecsGetChildEntityCount( w, parent ), 1u );
+    ASSERT_EQ( vecsGetParentEntity( w, child ), parent );
+
+    // BUG: vecsClone blindly copies the vecsChildOf component pool.
+    // The clone will think its parent is 'parent', but 'parent' won't have the clone in its children list.
+    vecsEntity clone = vecsClone( w, child );
+
+    ASSERT_EQ( vecsGetParentEntity( w, clone ), parent );
+    
+    // This will fail: parent only knows about 1 child
+    ASSERT_EQ( vecsGetChildEntityCount( w, parent ), 2u );
+
+    // Validator should catch the one-way relationship
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyWorld( w );
+}
+
+UTEST( chaos, instantiate_batch_hierarchy_desync )
+{
+    vecsWorld* w = vecsCreateWorld( 128u );
+    vecsEntity parent = vecsCreate( w );
+    vecsEntity prefab = vecsCreate( w );
+    vecsSetChildOf( w, prefab, parent );
+
+    ASSERT_EQ( vecsGetChildEntityCount( w, parent ), 1u );
+
+    // BUG: Same as clone, but at scale. All 10 instances will think they are children of 'parent'.
+    vecsEntity spawned[10];
+    vecsInstantiateBatch( w, prefab, spawned, 10 );
+
+    for ( int i = 0; i < 10; i++ )
+    {
+        ASSERT_EQ( vecsGetParentEntity( w, spawned[i] ), parent );
+    }
+
+    // This will fail: parent still only knows about the prefab
+    ASSERT_EQ( vecsGetChildEntityCount( w, parent ), 11u );
+
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyWorld( w );
+}
+
+UTEST( chaos, singleton_lifecycle_thrash )
+{
+    vecsWorld* w = vecsCreateWorld( 128u );
+    SoupSingletonLifecycleTracker first = {};
+    SoupSingletonLifecycleTracker second = {};
+    first.value = 11;
+    second.value = 22;
+    SoupSingletonLifecycleTracker::destroyed = 0;
+
+    vecsSetSingleton<SoupSingletonLifecycleTracker>( w, first );
+    ASSERT_EQ( vecsGetSingleton<SoupSingletonLifecycleTracker>( w )->value, 11 );
+
+    vecsClearWorld( w );
+    ASSERT_EQ( SoupSingletonLifecycleTracker::destroyed, 1 );
+    ASSERT_TRUE( vecsGetSingleton<SoupSingletonLifecycleTracker>( w ) == nullptr );
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsSetSingleton<SoupSingletonLifecycleTracker>( w, second );
+    ASSERT_EQ( vecsGetSingleton<SoupSingletonLifecycleTracker>( w )->value, 22 );
+
+    vecsDestroyWorld( w );
+    ASSERT_EQ( SoupSingletonLifecycleTracker::destroyed, 2 );
+}
+
+UTEST( chaos, query_cache_drift_recreation )
+{
+    vecsWorld* w = vecsCreateWorld( 512u );
+    vecsEntity original = vecsCreate( w );
+    vecsSet<SoupPodA>( w, original, { 1u, ~1u } );
+
+    vecsQuery* q = vecsBuildQuery<SoupPodA>( w );
+    uint32_t baseline = 0u;
+    vecsQueryEach<SoupPodA>( w, q, [&]( vecsEntity e, SoupPodA& pod )
+    {
+        baseline++;
+        ASSERT_EQ( e, original );
+        ASSERT_EQ( pod.id, 1u );
+    } );
+    ASSERT_EQ( baseline, 1u );
+
+    vecsUnset<SoupPodA>( w, original );
+
+    vecsEntity shifted = VECS_INVALID_ENTITY;
+    for ( uint32_t i = 0; i < 64u; i++ )
+    {
+        shifted = vecsCreate( w );
+    }
+    vecsSet<SoupPodA>( w, shifted, { 2u, ~2u } );
+
+    uint32_t matched = 0u;
+    vecsQueryEach<SoupPodA>( w, q, [&]( vecsEntity e, SoupPodA& pod )
+    {
+        matched++;
+        ASSERT_EQ( e, shifted );
+        ASSERT_EQ( pod.id, 2u );
+    } );
+
+    ASSERT_EQ( matched, 1u );
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( chaos, query_chunk_cache_drift_after_mutation )
+{
+    vecsWorld* w = vecsCreateWorld( 8192u );
+    vecsEntity original = vecsCreate( w );
+    vecsSet<Position>( w, original, { 1.0f, 2.0f } );
+
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    vecsQueryChunk chunks[4] = {};
+    uint32_t chunkCount = vecsQueryGetChunks( w, q, chunks, 4u );
+    ASSERT_EQ( chunkCount, 1u );
+
+    vecsUnset<Position>( w, original );
+
+    vecsEntity shifted = VECS_INVALID_ENTITY;
+    for ( uint32_t i = 0; i < 64u; i++ )
+    {
+        shifted = vecsCreate( w );
+    }
+    vecsSet<Position>( w, shifted, { 7.0f, 9.0f } );
+
+    uint32_t matched = 0u;
+    vecsEntity found = VECS_INVALID_ENTITY;
+    vecsQueryExecuteChunk<Position>( w, q, &chunks[0], [&]( vecsEntity e, Position& pos )
+    {
+        matched++;
+        found = e;
+        ASSERT_EQ( pos.x, 7.0f );
+        ASSERT_EQ( pos.y, 9.0f );
+    } );
+
+    ASSERT_EQ( matched, 1u );
+    ASSERT_EQ( found, shifted );
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( chaos, command_buffer_alignment_corruption )
+{
+    vecsWorld* w = vecsCreateWorld( 128u );
+    vecsEntity e = vecsCreate( w );
+    vecsCommandBuffer* cb = vecsCreateCommandBuffer( w );
+    SoupAlignedCommandPayload payload = {};
+    payload.values[0] = 3.5f;
+    payload.magic = 0xA11ECAFEu;
+    g_commandAlignmentOk = true;
+
+    vecsCmdSet<SoupByteComp>( cb, e, { 'x' } );
+    vecsCmdSet<SoupDoubleComp>( cb, e, { 9.25 } );
+    vecsCmdSet<SoupAlignedCommandPayload>( cb, e, payload );
+    vecsFlush( cb );
+
+    ASSERT_TRUE( g_commandAlignmentOk );
+    ASSERT_EQ( vecsGet<SoupAlignedCommandPayload>( w, e )->magic, 0xA11ECAFEu );
+    ASSERT_EQ( vecsGet<SoupByteComp>( w, e )->value, 'x' );
+    ASSERT_EQ( vecsGet<SoupDoubleComp>( w, e )->value, 9.25 );
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyCommandBuffer( cb );
+    vecsDestroyWorld( w );
+}
+
+UTEST( chaos, relationship_duplicate_registration )
+{
+    vecsWorld* w = vecsCreateWorld( 128u );
+    vecsEntity parent = vecsCreate( w );
+    vecsEntity child = vecsCreate( w );
+
+    vecsSetChildOf( w, child, parent );
+    vecsSetChildOf( w, child, parent );
+    vecsSetChildOf( w, child, parent );
+
+    ASSERT_EQ( vecsGetParentEntity( w, child ), parent );
+    ASSERT_EQ( vecsGetChildEntityCount( w, parent ), 1u );
+    ASSERT_EQ( vecsGetChildEntity( w, parent, 0u ), child );
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyWorld( w );
+}
+
+UTEST( chaos, destruction_reparenting_recursion_hell )
+{
+    vecsWorld* w = vecsCreateWorld( 128u );
+    vecsOnRemove<SoupPodA>( w, onChaosReparentDuringDestroy );
+
+    vecsEntity root = vecsCreate( w );
+    vecsEntity child = vecsCreate( w );
+    vecsEntity safeParent = vecsCreate( w );
+    vecsSetChildOf( w, child, root );
+    vecsSet<SoupPodA>( w, child, { 77u, ~77u } );
+    g_reparentTarget = safeParent;
+
+    vecsDestroyRecursive( w, root );
+
+    ASSERT_FALSE( vecsAlive( w, root ) );
+    ASSERT_FALSE( vecsAlive( w, child ) );
+    ASSERT_TRUE( vecsAlive( w, safeParent ) );
+    ASSERT_EQ( vecsGetChildEntityCount( w, safeParent ), 0u );
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    g_reparentTarget = VECS_INVALID_ENTITY;
+    vecsDestroyWorld( w );
+}
+
 UTEST_MAIN();
+

@@ -23,6 +23,9 @@ endif()
 
 option( BUILD_DEMO "Build the SIMD Survivors game demo" OFF )
 if ( BUILD_DEMO )
-    add_executable( simd_survivors simd_survivors.cpp )
+    add_executable( simd_survivors demos/simd_survivors.cpp )
     target_include_directories( simd_survivors PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} )
+
+    add_executable( adventure demos/adventure.cpp )
+    target_include_directories( adventure PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} )
 endif()

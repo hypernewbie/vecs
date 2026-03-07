@@ -926,6 +926,197 @@ inline vecsWorld* vecsCreateWorld( uint32_t maxEntities = VECS_MAX_ENTITIES )
     return world;
 }
 
+inline void vecsSetSignatureBit( vecsWorld* w, uint32_t entityIndex, uint32_t componentId )
+{
+    assert( w );
+    assert( entityIndex < w->maxEntities );
+    assert( componentId < VECS_MAX_COMPONENTS );
+    w->entities->signatures[componentId >> 6][entityIndex] |= ( 1ULL << ( componentId & 63u ) );
+}
+
+inline void vecsClearSignatureBit( vecsWorld* w, uint32_t entityIndex, uint32_t componentId )
+{
+    assert( w );
+    assert( entityIndex < w->maxEntities );
+    assert( componentId < VECS_MAX_COMPONENTS );
+    w->entities->signatures[componentId >> 6][entityIndex] &= ~( 1ULL << ( componentId & 63u ) );
+}
+
+inline void vecsNotifyObservers( vecsWorld* w, vecsEntity e, uint32_t componentId, bool onAdd, void* data )
+{
+    assert( w );
+    assert( componentId < VECS_MAX_COMPONENTS );
+    if ( !w->observers )
+    {
+        return;
+    }
+    for ( uint32_t i = 0; i < w->observers->count; i++ )
+    {
+        vecsObserver& obs = w->observers->observers[i];
+        if ( obs.onAdd == onAdd && obs.componentId == componentId )
+        {
+            obs.callback( w, e, data );
+        }
+    }
+}
+
+inline void vecsUnsetById( vecsWorld* w, vecsEntity e, uint32_t componentId )
+{
+    assert( w );
+    assert( vecsEntityPoolAlive( w->entities, e ) );
+    assert( componentId < VECS_MAX_COMPONENTS );
+    uint32_t idx = vecsEntityIndex( e );
+    vecsPool* pool = w->pools[componentId];
+    vecsClearSignatureBit( w, idx, componentId );
+    vecsNotifyObservers( w, e, componentId, false, nullptr );
+    if ( pool && vecsPoolHas( pool, idx ) )
+    {
+        vecsPoolUnset( pool, idx );
+    }
+}
+
+inline bool vecsValidate( vecsWorld* w )
+{
+    if ( !w ) return true;
+
+    vecsEntityPool* ep = w->entities;
+    if ( ep->alive + ep->freeCount != ep->maxEntities ) { printf("Validation failed: alive + freeCount != maxEntities\n"); return false; }
+
+    uint32_t allocatedCount = 0;
+    for ( uint32_t i = 0; i < ep->maxEntities; i++ )
+    {
+        if ( ep->allocated[i] ) allocatedCount++;
+    }
+    if ( allocatedCount != ep->alive ) { printf("Validation failed: allocatedCount != alive (%u != %u)\n", allocatedCount, ep->alive); return false; }
+
+    for ( uint32_t i = 0; i < ep->freeCount; i++ )
+    {
+        uint32_t fIdx = ep->freeList[i];
+        if ( fIdx >= ep->maxEntities ) { printf("Validation failed: freeList index %u >= maxEntities\n", fIdx); return false; }
+        if ( ep->allocated[fIdx] != 0 ) { printf("Validation failed: freeList index %u is allocated\n", fIdx); return false; }
+    }
+
+    for ( uint32_t c = 0; c < VECS_MAX_COMPONENTS; c++ )
+    {
+        vecsPool* pool = w->pools[c];
+        if ( !pool ) continue;
+
+        if ( pool->count > pool->capacity ) { printf("Validation failed: pool %u count > capacity\n", c); return false; }
+        if ( pool->capacity > VECS_MAX_ENTITIES ) { printf("Validation failed: pool %u capacity > VECS_MAX_ENTITIES\n", c); return false; }
+
+        uint32_t bitcount = vecsBitfieldCount( &pool->bitfield );
+        if ( bitcount != pool->count ) { printf("Validation failed: pool %u bitcount != count (%u != %u)\n", c, bitcount, pool->count); return false; }
+
+        for ( uint32_t i = 0; i < pool->count; i++ )
+        {
+            uint32_t entityIdx = pool->denseEntities[i];
+            if ( entityIdx >= ep->maxEntities ) { printf("Validation failed: pool %u denseEntities[%u] = %u >= maxEntities\n", c, i, entityIdx); return false; }
+            if ( pool->sparse[entityIdx] != i ) { printf("Validation failed: pool %u sparse[%u] != %u\n", c, entityIdx, i); return false; }
+            if ( !ep->allocated[entityIdx] ) { printf("Validation failed: pool %u denseEntities[%u] = %u is not allocated\n", c, i, entityIdx); return false; }
+        }
+
+        for ( uint32_t entityIdx = 0; entityIdx < ep->maxEntities; entityIdx++ )
+        {
+            if ( pool->sparse[entityIdx] != VECS_INVALID_INDEX )
+            {
+                if ( pool->sparse[entityIdx] >= pool->count ) { printf("Validation failed: pool %u sparse[%u] = %u >= count %u\n", c, entityIdx, pool->sparse[entityIdx], pool->count); return false; }
+            }
+        }
+    }
+
+    for ( uint32_t e = 0; e < ep->maxEntities; e++ )
+    {
+        if ( !ep->allocated[e] )
+        {
+            if ( ep->signatures[0][e] != 0 || ep->signatures[1][e] != 0 ||
+                 ep->signatures[2][e] != 0 || ep->signatures[3][e] != 0 )
+            {
+                printf("Validation failed: dead entity %u has non-zero signature\n", e);
+                return false;
+            }
+        }
+        else
+        {
+            for ( uint32_t c = 0; c < VECS_MAX_COMPONENTS; c++ )
+            {
+                bool hasSig = ( ep->signatures[c / 64u][e] & ( 1ULL << ( c % 64u ) ) ) != 0;
+                bool hasPool = w->pools[c] != nullptr;
+                bool hasBit = false;
+                if ( hasPool )
+                {
+                    hasBit = vecsBitfieldHas( &w->pools[c]->bitfield, e );
+                }
+                if ( hasSig != hasBit ) { printf("Validation failed: entity %u signature for component %u out of sync with bitfield (sig=%d, bit=%d)\n", e, c, hasSig, hasBit); return false; }
+            }
+        }
+    }
+
+    if ( w->relationships )
+    {
+        vecsRelationshipData* rel = w->relationships;
+        for ( uint32_t e = 0; e < ep->maxEntities; e++ )
+        {
+            if ( !ep->allocated[e] )
+            {
+                if ( rel->parents[e] != VECS_INVALID_ENTITY ) { printf("Validation failed: dead entity %u still has a parent\n", e); return false; }
+                if ( rel->childCounts[e] != 0 ) { printf("Validation failed: dead entity %u still has children\n", e); return false; }
+                continue;
+            }
+
+            vecsEntity parent = rel->parents[e];
+            if ( parent != VECS_INVALID_ENTITY )
+            {
+                uint32_t depth = 0;
+                vecsEntity cursor = parent;
+                while ( cursor != VECS_INVALID_ENTITY )
+                {
+                    if ( cursor == vecsMakeEntity( e, ep->generations[e] ) ) { printf("Validation failed: entity %u participates in a hierarchy cycle\n", e); return false; }
+                    uint32_t cursorIdx = vecsEntityIndex( cursor );
+                    if ( cursorIdx >= ep->maxEntities ) { printf("Validation failed: entity %u parent chain index >= maxEntities\n", e); return false; }
+                    if ( !ep->allocated[cursorIdx] ) { printf("Validation failed: entity %u parent chain touches dead entity\n", e); return false; }
+                    if ( ep->generations[cursorIdx] != vecsEntityGeneration( cursor ) ) { printf("Validation failed: entity %u parent chain generation mismatch\n", e); return false; }
+                    if ( ++depth > ep->maxEntities ) { printf("Validation failed: entity %u parent chain exceeded world size\n", e); return false; }
+                    cursor = rel->parents[cursorIdx];
+                }
+
+                uint32_t parentIdx = vecsEntityIndex( parent );
+                if ( parentIdx >= ep->maxEntities ) { printf("Validation failed: entity %u parent index >= maxEntities\n", e); return false; }
+                if ( !ep->allocated[parentIdx] ) { printf("Validation failed: entity %u parent is not allocated\n", e); return false; }
+                if ( ep->generations[parentIdx] != vecsEntityGeneration( parent ) ) { printf("Validation failed: entity %u parent generation mismatch\n", e); return false; }
+
+                bool found = false;
+                for ( uint32_t i = 0; i < rel->childCounts[parentIdx]; i++ )
+                {
+                    if ( vecsEntityIndex( rel->children[parentIdx][i] ) == e )
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if ( !found ) { printf("Validation failed: entity %u is not in parent %u child array\n", e, parentIdx); return false; }
+            }
+
+            if ( rel->childCounts[e] > rel->childCapacities[e] ) { printf("Validation failed: entity %u childCount > capacity\n", e); return false; }
+
+            for ( uint32_t i = 0; i < rel->childCounts[e]; i++ )
+            {
+                vecsEntity child = rel->children[e][i];
+                uint32_t childIdx = vecsEntityIndex( child );
+                if ( childIdx >= ep->maxEntities ) { printf("Validation failed: entity %u child index >= maxEntities\n", e); return false; }
+                if ( !ep->allocated[childIdx] ) { printf("Validation failed: entity %u child %u is not allocated\n", e, childIdx); return false; }
+                if ( ep->generations[childIdx] != vecsEntityGeneration( child ) ) { printf("Validation failed: entity %u child generation mismatch\n", e); return false; }
+                if ( rel->parents[childIdx] != vecsMakeEntity( e, ep->generations[e] ) ) { printf("Validation failed: entity %u child's parent is not %u\n", e, e); return false; }
+                for ( uint32_t j = i + 1; j < rel->childCounts[e]; j++ )
+                {
+                    if ( rel->children[e][j] == child ) { printf("Validation failed: entity %u has duplicate child registration\n", e); return false; }
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
 inline void vecsDestroyWorld( vecsWorld* world )
 {
     assert( world );
@@ -1026,14 +1217,6 @@ inline void vecsClearWorld( vecsWorld* world )
         rel->childCounts[i] = 0;
         rel->childCapacities[i] = 0;
     }
-
-    if ( world->observers )
-    {
-        vecsObserverListDestroy( world->observers );
-        world->observers->observers = nullptr;
-        world->observers->count = 0;
-        world->observers->capacity = 0;
-    }
 }
 
 inline vecsEntity vecsCreate( vecsWorld* w )
@@ -1078,28 +1261,29 @@ inline void vecsDestroyRecursive( vecsWorld* w, vecsEntity e )
     }
     
     uint32_t entityIndex = vecsEntityIndex( e );
-    for ( uint32_t k = 0; k < 4; k++ )
+    for ( ;; )
     {
-        uint64_t mask = w->entities->signatures[k][entityIndex];
-        while ( mask )
+        uint32_t componentId = VECS_INVALID_INDEX;
+        for ( uint32_t k = 0; k < 4; k++ )
         {
-            uint32_t bit = vecsTzcnt( mask );
-            uint32_t componentId = ( k << 6 ) | bit;
-            vecsPool* pool = w->pools[componentId];
-            assert( pool );
-
-            for ( uint32_t j = 0; j < w->observers->count; j++ )
+            uint64_t mask = w->entities->signatures[k][entityIndex];
+            if ( mask )
             {
-                vecsObserver& obs = w->observers->observers[j];
-                if ( !obs.onAdd && obs.componentId == componentId )
-                {
-                    obs.callback( w, e, nullptr );
-                }
+                componentId = ( k << 6 ) | vecsTzcnt( mask );
+                break;
             }
-            vecsPoolUnset( pool, entityIndex );
-            mask &= ( mask - 1 );
         }
-        w->entities->signatures[k][entityIndex] = 0;
+        if ( componentId == VECS_INVALID_INDEX )
+        {
+            break;
+        }
+        vecsUnsetById( w, e, componentId );
+    }
+
+    if ( w->relationships )
+    {
+        vecsSetParent( w->relationships, e, VECS_INVALID_ENTITY );
+        vecsClearChildren( w->relationships, e );
     }
 
     vecsEntityPoolDestroy( w->entities, e );
@@ -1179,16 +1363,8 @@ inline T* vecsSet( vecsWorld* w, vecsEntity e, const T& val = {} )
         result = ( T* )vecsPoolSet( pool, idx, &val );
     }
 
-    w->entities->signatures[componentId >> 6][idx] |= ( 1ULL << ( componentId & 63u ) );
-
-    for ( uint32_t i = 0; i < w->observers->count; i++ )
-    {
-        vecsObserver& obs = w->observers->observers[i];
-        if ( obs.onAdd && obs.componentId == componentId )
-        {
-            obs.callback( w, e, result );
-        }
-    }
+    vecsSetSignatureBit( w, idx, componentId );
+    vecsNotifyObservers( w, e, componentId, true, result );
     return result;
 }
 
@@ -1202,18 +1378,8 @@ inline void vecsUnset( vecsWorld* w, vecsEntity e )
     assert( vecsPoolHas( pool, idx ) );
     uint32_t componentId = vecsTypeId<T>();
     assert( componentId < VECS_MAX_COMPONENTS );
-
-    w->entities->signatures[componentId >> 6][idx] &= ~( 1ULL << ( componentId & 63u ) );
-
-    for ( uint32_t i = 0; i < w->observers->count; i++ )
-    {
-        vecsObserver& obs = w->observers->observers[i];
-        if ( !obs.onAdd && obs.componentId == componentId )
-        {
-            obs.callback( w, e, nullptr );
-        }
-    }
-    vecsPoolUnset( pool, idx );
+    ( void )pool;
+    vecsUnsetById( w, e, componentId );
 }
 
 template< typename T >
@@ -1272,8 +1438,17 @@ inline vecsEntity vecsClone( vecsWorld* w, vecsEntity src )
         if ( pool && vecsPoolHas( pool, srcIdx ) )
         {
             void* srcData = vecsPoolGet( pool, srcIdx );
-            vecsPoolSet( pool, dstIdx, srcData );
-            w->entities->signatures[i >> 6][dstIdx] |= ( 1ULL << ( i & 63u ) );
+            void* dstData = vecsPoolSet( pool, dstIdx, srcData );
+            vecsSetSignatureBit( w, dstIdx, i );
+            vecsNotifyObservers( w, dst, i, true, pool->noData ? nullptr : dstData );
+        }
+    }
+    if ( w->relationships )
+    {
+        vecsEntity parent = vecsGetParent( w->relationships, src );
+        if ( parent != VECS_INVALID_ENTITY )
+        {
+            vecsSetParent( w->relationships, dst, parent );
         }
     }
     return dst;
@@ -1339,8 +1514,17 @@ inline void vecsInstantiateBatch( vecsWorld* w, vecsEntity prefab, vecsEntity* o
         uint32_t dstIdx = vecsEntityIndex( e );
         for ( uint32_t j = 0; j < activeCount; j++ )
         {
-            vecsPoolSet( active[j].pool, dstIdx, active[j].cachedData );
-            w->entities->signatures[active[j].componentId >> 6][dstIdx] |= ( 1ULL << ( active[j].componentId & 63u ) );
+            void* dstData = vecsPoolSet( active[j].pool, dstIdx, active[j].cachedData );
+            vecsSetSignatureBit( w, dstIdx, active[j].componentId );
+            vecsNotifyObservers( w, e, active[j].componentId, true, active[j].pool->noData ? nullptr : dstData );
+        }
+        if ( w->relationships )
+        {
+            vecsEntity parent = vecsGetParent( w->relationships, prefab );
+            if ( parent != VECS_INVALID_ENTITY )
+            {
+                vecsSetParent( w->relationships, e, parent );
+            }
         }
     }
 
@@ -1442,6 +1626,44 @@ inline bool vecsQueryWrites( const vecsQuery* q, uint32_t typeId )
     assert( q );
     assert( typeId < VECS_MAX_COMPONENTS );
     return ( q->writeAccess[typeId >> 6] & ( 1ULL << ( typeId & 63u ) ) ) != 0;
+}
+
+inline void vecsQueryRefreshWithMask( vecsWorld* w, vecsQuery* q )
+{
+    assert( w );
+    assert( q );
+    vecsBitfieldClearAll( &q->withMask );
+    if ( q->withCount == 0 )
+    {
+        return;
+    }
+
+    for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti++ )
+    {
+        q->withMask.topMasks[ti] = UINT64_MAX;
+        for ( uint32_t i = 0; i < 64u && ( ti * 64u + i ) < VECS_L2_COUNT; i++ )
+        {
+            q->withMask.l2Masks[ti * 64u + i] = UINT64_MAX;
+        }
+    }
+
+    for ( uint32_t i = 0; i < q->withCount; i++ )
+    {
+        vecsPool* pool = w->pools[q->withIds[i]];
+        if ( !pool || pool->count == 0u )
+        {
+            vecsBitfieldClearAll( &q->withMask );
+            return;
+        }
+        for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti++ )
+        {
+            q->withMask.topMasks[ti] &= pool->bitfield.topMasks[ti];
+            for ( uint32_t l2 = 0; l2 < 64u && ( ti * 64u + l2 ) < VECS_L2_COUNT; l2++ )
+            {
+                q->withMask.l2Masks[ti * 64u + l2] &= pool->bitfield.l2Masks[ti * 64u + l2];
+            }
+        }
+    }
 }
 
 inline void vecsQueryAddWith( vecsQuery* q, uint32_t typeId, vecsPool* pool )
@@ -2067,6 +2289,7 @@ inline vecsEntity vecsQueryFirstMatch( vecsWorld* w, vecsQuery* q )
 {
     assert( w );
     assert( q );
+    vecsQueryRefreshWithMask( w, q );
 
     if ( q->withCount == 0 )
     {
@@ -2223,6 +2446,7 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
     assert( w );
     assert( q );
     static_assert( sizeof...( With ) >= 1, "vecsQueryEach requires at least one With component" );
+    vecsQueryRefreshWithMask( w, q );
 
 #ifndef NDEBUG
     assert( ( ( []( vecsQuery* query, uint32_t reqId ) {
@@ -2484,6 +2708,7 @@ inline uint32_t vecsQueryGetChunks( vecsWorld* w, vecsQuery* q, vecsQueryChunk* 
     assert( q );
     assert( outChunks );
     assert( maxChunks > 0 );
+    vecsQueryRefreshWithMask( w, q );
 
     if ( q->withCount == 0 )
     {
@@ -2537,6 +2762,7 @@ inline void vecsQueryExecuteChunk( vecsWorld* w, vecsQuery* q, const vecsQueryCh
     assert( q );
     assert( chunk );
     static_assert( sizeof...( With ) >= 1, "vecsQueryExecuteChunk requires at least one With component" );
+    vecsQueryRefreshWithMask( w, q );
 
 #ifndef NDEBUG
     assert( ( ( []( vecsQuery* query, uint32_t reqId ) {
@@ -2814,10 +3040,11 @@ inline T* vecsEmplace( vecsWorld* w, vecsEntity e, Args&&... args )
         result = ( T* )( pool->denseData + ( size_t )denseIdx * pool->stride );
         new ( result ) T( std::forward<Args>( args )... );
         vecsBitfieldSet( &pool->bitfield, idx );
-    }
-    
-    for ( uint32_t i = 0; i < w->observers->count; i++ )
-    {
+        }
+
+        w->entities->signatures[componentId >> 6][idx] |= ( 1ULL << ( componentId & 63u ) );
+
+        for ( uint32_t i = 0; i < w->observers->count; i++ )    {
         vecsObserver& obs = w->observers->observers[i];
         if ( obs.onAdd && obs.componentId == componentId )
         {
@@ -2844,6 +3071,8 @@ inline void vecsAddTag( vecsWorld* w, vecsEntity e )
     vecsPoolSet( pool, idx, nullptr );
     static T tagValue = {};
     
+    w->entities->signatures[componentId >> 6][idx] |= ( 1ULL << ( componentId & 63u ) );
+
     for ( uint32_t i = 0; i < w->observers->count; i++ )
     {
         vecsObserver& obs = w->observers->observers[i];
@@ -3039,13 +3268,31 @@ inline void vecsSetChildOf( vecsWorld* w, vecsEntity child, vecsEntity parent )
 {
     assert( w );
     assert( vecsAlive( w, child ) );
-    if ( parent != VECS_INVALID_ENTITY )
-    {
-        assert( vecsAlive( w, parent ) );
-    }
     if ( !w->relationships )
     {
         w->relationships = vecsCreateRelationships( w->maxEntities );
+    }
+    if ( parent != VECS_INVALID_ENTITY )
+    {
+        assert( vecsAlive( w, parent ) );
+        if ( child == parent )
+        {
+            return;
+        }
+        vecsEntity cursor = parent;
+        uint32_t guard = 0;
+        while ( cursor != VECS_INVALID_ENTITY )
+        {
+            if ( cursor == child )
+            {
+                return;
+            }
+            if ( ++guard > w->maxEntities )
+            {
+                return;
+            }
+            cursor = vecsGetParent( w->relationships, cursor );
+        }
     }
     vecsSetParent( w->relationships, child, parent );
 }
@@ -3209,6 +3456,9 @@ struct vecsCommand
     uint32_t createdIndex;
     vecsPool* pool;
     vecsEntity parent;
+    void* dataPtr;
+    void ( *dataDestructor )( void* );
+    uint32_t dataAlignment;
 };
 
 struct vecsCommandBuffer
@@ -3224,6 +3474,15 @@ struct vecsCommandBuffer
     uint32_t createdCount;
     uint32_t createdCapacity;
 };
+
+constexpr uint32_t VECS_COMMAND_BUFFER_ALIGNMENT = 64u;
+
+inline uint32_t vecsAlignUp( uint32_t value, uint32_t alignment )
+{
+    assert( alignment > 0u );
+    assert( ( alignment & ( alignment - 1u ) ) == 0u );
+    return ( value + alignment - 1u ) & ~( alignment - 1u );
+}
 
 inline void vecsCmdGrowCommands( vecsCommandBuffer* cb )
 {
@@ -3248,10 +3507,35 @@ inline void vecsCmdGrowData( vecsCommandBuffer* cb, uint32_t minExtra )
     {
         cap *= 2u;
     }
-    uint8_t* ptr = ( uint8_t* )std::realloc( cb->dataBuffer, cap );
+    uint8_t* ptr = cb->dataBuffer
+        ? ( uint8_t* )vecsAlignedRealloc( cb->dataBuffer, cap, VECS_COMMAND_BUFFER_ALIGNMENT )
+        : ( uint8_t* )vecsAlignedAlloc( cap, VECS_COMMAND_BUFFER_ALIGNMENT );
     assert( ptr );
     cb->dataBuffer = ptr;
     cb->dataCapacity = cap;
+}
+
+inline void vecsCmdDestroyStoredData( vecsCommand& cmd )
+{
+    if ( !cmd.dataPtr )
+    {
+        return;
+    }
+    if ( cmd.dataDestructor )
+    {
+        cmd.dataDestructor( cmd.dataPtr );
+    }
+    if ( cmd.dataAlignment > 8u )
+    {
+        vecsAlignedFree( cmd.dataPtr );
+    }
+    else
+    {
+        std::free( cmd.dataPtr );
+    }
+    cmd.dataPtr = nullptr;
+    cmd.dataDestructor = nullptr;
+    cmd.dataAlignment = 0u;
 }
 
 inline void vecsCmdGrowCreated( vecsCommandBuffer* cb )
@@ -3288,8 +3572,12 @@ inline void vecsDestroyCommandBuffer( vecsCommandBuffer* cb )
     {
         return;
     }
+    for ( uint32_t i = 0; i < cb->commandCount; i++ )
+    {
+        vecsCmdDestroyStoredData( cb->commands[i] );
+    }
     std::free( cb->commands );
-    std::free( cb->dataBuffer );
+    vecsAlignedFree( cb->dataBuffer );
     std::free( cb->created );
     std::free( cb );
 }
@@ -3317,6 +3605,9 @@ inline uint32_t vecsCmdCreate( vecsCommandBuffer* cb )
     cmd.createdIndex = index;
     cmd.pool = nullptr;
     cmd.parent = VECS_INVALID_ENTITY;
+    cmd.dataPtr = nullptr;
+    cmd.dataDestructor = nullptr;
+    cmd.dataAlignment = 0u;
     return index;
 }
 
@@ -3338,6 +3629,9 @@ inline void vecsCmdDestroy( vecsCommandBuffer* cb, vecsEntity e )
     cmd.createdIndex = VECS_INVALID_INDEX;
     cmd.pool = nullptr;
     cmd.parent = VECS_INVALID_ENTITY;
+    cmd.dataPtr = nullptr;
+    cmd.dataDestructor = nullptr;
+    cmd.dataAlignment = 0u;
 }
 
 template< typename T >
@@ -3360,13 +3654,35 @@ inline void vecsCmdSet( vecsCommandBuffer* cb, vecsEntity e, const T& val )
     cmd.createdIndex = VECS_INVALID_INDEX;
     cmd.pool = pool;
     cmd.parent = VECS_INVALID_ENTITY;
+    cmd.dataPtr = nullptr;
+    cmd.dataDestructor = nullptr;
+    cmd.dataAlignment = 0u;
     if constexpr ( !std::is_empty<T>::value )
     {
-        vecsCmdGrowData( cb, sizeof( T ) );
-        cmd.dataOffset = cb->dataSize;
-        cmd.dataSize = sizeof( T );
-        std::memcpy( cb->dataBuffer + cb->dataSize, &val, sizeof( T ) );
-        cb->dataSize += sizeof( T );
+        if constexpr ( std::is_trivially_copyable<T>::value && alignof( T ) <= VECS_COMMAND_BUFFER_ALIGNMENT )
+        {
+            uint32_t alignedOffset = vecsAlignUp( cb->dataSize, ( uint32_t )alignof( T ) );
+            vecsCmdGrowData( cb, ( alignedOffset - cb->dataSize ) + ( uint32_t )sizeof( T ) );
+            cmd.dataOffset = alignedOffset;
+            cmd.dataSize = ( uint32_t )sizeof( T );
+            std::memcpy( cb->dataBuffer + alignedOffset, &val, sizeof( T ) );
+            cb->dataSize = alignedOffset + ( uint32_t )sizeof( T );
+        }
+        else
+        {
+            constexpr uint32_t kAlignment = ( uint32_t )alignof( T );
+            size_t allocSize = vecsAlignUp( ( uint32_t )sizeof( T ), kAlignment );
+            void* storage = ( kAlignment > 8u ) ? vecsAlignedAlloc( allocSize, kAlignment ) : std::malloc( sizeof( T ) );
+            assert( storage );
+            new ( storage ) T( val );
+            cmd.dataPtr = storage;
+            cmd.dataSize = ( uint32_t )sizeof( T );
+            cmd.dataAlignment = kAlignment;
+            if constexpr ( !std::is_trivially_destructible<T>::value )
+            {
+                cmd.dataDestructor = []( void* ptr ) { static_cast<T*>( ptr )->~T(); };
+            }
+        }
     }
 }
 
@@ -3390,13 +3706,35 @@ inline void vecsCmdSetCreated( vecsCommandBuffer* cb, uint32_t createdIndex, con
     cmd.createdIndex = createdIndex;
     cmd.pool = pool;
     cmd.parent = VECS_INVALID_ENTITY;
+    cmd.dataPtr = nullptr;
+    cmd.dataDestructor = nullptr;
+    cmd.dataAlignment = 0u;
     if constexpr ( !std::is_empty<T>::value )
     {
-        vecsCmdGrowData( cb, sizeof( T ) );
-        cmd.dataOffset = cb->dataSize;
-        cmd.dataSize = sizeof( T );
-        std::memcpy( cb->dataBuffer + cb->dataSize, &val, sizeof( T ) );
-        cb->dataSize += sizeof( T );
+        if constexpr ( std::is_trivially_copyable<T>::value && alignof( T ) <= VECS_COMMAND_BUFFER_ALIGNMENT )
+        {
+            uint32_t alignedOffset = vecsAlignUp( cb->dataSize, ( uint32_t )alignof( T ) );
+            vecsCmdGrowData( cb, ( alignedOffset - cb->dataSize ) + ( uint32_t )sizeof( T ) );
+            cmd.dataOffset = alignedOffset;
+            cmd.dataSize = ( uint32_t )sizeof( T );
+            std::memcpy( cb->dataBuffer + alignedOffset, &val, sizeof( T ) );
+            cb->dataSize = alignedOffset + ( uint32_t )sizeof( T );
+        }
+        else
+        {
+            constexpr uint32_t kAlignment = ( uint32_t )alignof( T );
+            size_t allocSize = vecsAlignUp( ( uint32_t )sizeof( T ), kAlignment );
+            void* storage = ( kAlignment > 8u ) ? vecsAlignedAlloc( allocSize, kAlignment ) : std::malloc( sizeof( T ) );
+            assert( storage );
+            new ( storage ) T( val );
+            cmd.dataPtr = storage;
+            cmd.dataSize = ( uint32_t )sizeof( T );
+            cmd.dataAlignment = kAlignment;
+            if constexpr ( !std::is_trivially_destructible<T>::value )
+            {
+                cmd.dataDestructor = []( void* ptr ) { static_cast<T*>( ptr )->~T(); };
+            }
+        }
     }
 }
 
@@ -3419,6 +3757,9 @@ inline void vecsCmdUnset( vecsCommandBuffer* cb, vecsEntity e )
     cmd.createdIndex = VECS_INVALID_INDEX;
     cmd.pool = vecsDetail::getPool<T>( cb->world );
     cmd.parent = VECS_INVALID_ENTITY;
+    cmd.dataPtr = nullptr;
+    cmd.dataDestructor = nullptr;
+    cmd.dataAlignment = 0u;
 }
 
 inline void vecsCmdSetParent( vecsCommandBuffer* cb, vecsEntity child, vecsEntity parent )
@@ -3443,6 +3784,9 @@ inline void vecsCmdSetParent( vecsCommandBuffer* cb, vecsEntity child, vecsEntit
     cmd.createdIndex = VECS_INVALID_INDEX;
     cmd.pool = nullptr;
     cmd.parent = parent;
+    cmd.dataPtr = nullptr;
+    cmd.dataDestructor = nullptr;
+    cmd.dataAlignment = 0u;
 }
 
 inline void vecsFlush( vecsCommandBuffer* cb )
@@ -3478,17 +3822,19 @@ inline void vecsFlush( vecsCommandBuffer* cb )
                         break;
                     }
                     uint32_t idx = vecsEntityIndex( target );
+                    bool hadComponent = vecsPoolHas( cmd.pool, idx );
+                    void* observerData = nullptr;
                     if ( cmd.pool->noData )
                     {
-                        if ( !vecsPoolHas( cmd.pool, idx ) )
+                        if ( !hadComponent )
                         {
                             vecsPoolSet( cmd.pool, idx, nullptr );
                         }
                     }
                     else
                     {
-                        void* data = cb->dataBuffer + cmd.dataOffset;
-                        if ( vecsPoolHas( cmd.pool, idx ) )
+                        const void* data = cmd.dataPtr ? cmd.dataPtr : ( cb->dataBuffer + cmd.dataOffset );
+                        if ( hadComponent )
                         {
                             void* dst = vecsPoolGet( cmd.pool, idx );
                             if ( cmd.pool->destructor )
@@ -3506,8 +3852,13 @@ inline void vecsFlush( vecsCommandBuffer* cb )
                         }
                         else
                         {
-                            vecsPoolSet( cmd.pool, idx, data );
+                            observerData = vecsPoolSet( cmd.pool, idx, data );
                         }
+                    }
+                    if ( !hadComponent )
+                    {
+                        vecsSetSignatureBit( cb->world, idx, cmd.componentId );
+                        vecsNotifyObservers( cb->world, target, cmd.componentId, true, cmd.pool->noData ? nullptr : observerData );
                     }
                 }
                 break;
@@ -3517,7 +3868,7 @@ inline void vecsFlush( vecsCommandBuffer* cb )
                     uint32_t idx = vecsEntityIndex( cmd.entity );
                     if ( vecsPoolHas( cmd.pool, idx ) )
                     {
-                        vecsPoolUnset( cmd.pool, idx );
+                        vecsUnsetById( cb->world, cmd.entity, cmd.componentId );
                     }
                 }
                 break;
@@ -3531,6 +3882,7 @@ inline void vecsFlush( vecsCommandBuffer* cb )
                 assert( false );
                 break;
         }
+        vecsCmdDestroyStoredData( cb->commands[i] );
     }
     cb->commandCount = 0;
     cb->dataSize = 0;
