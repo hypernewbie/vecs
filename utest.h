@@ -454,7 +454,10 @@ UTEST_EXTERN struct utest_state_s utest_state;
 
 template <typename T, bool is_enum = std::is_enum<T>::value>
 struct utest_type_deducer final {
-  static void _(const T t);
+  static void _(const T t) {
+    (void)t;
+    UTEST_PRINTF("undef");
+  }
 };
 
 template <> struct utest_type_deducer<char, false> {
