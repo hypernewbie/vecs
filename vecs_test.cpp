@@ -1,13 +1,21 @@
 #include "utest.h"
 #include "vecs.h"
+#include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
-#include <random>
-#include <thread>
-#include <atomic>
-#include <vector>
-#include <string>
+#include <cstring>
+#include <functional>
+#include <map>
+#include <memory>
 #include <ostream>
+#include <random>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #if defined( __has_include )
     #if __has_include( "entt/entt.hpp" )
@@ -23,6 +31,24 @@ struct HeavyPayload { uint32_t marker; uint8_t bytes[128]; };
 struct IsEnemy {};
 struct Dead {};
 template< size_t I > struct ExhaustComp { int value; };
+template< size_t I > struct ExhaustTag {};
+using OverflowPod = ExhaustComp<1001>;
+using OverflowPodAlt = ExhaustComp<1002>;
+using OverflowTag = ExhaustTag<1001>;
+using OverflowTagAlt = ExhaustTag<1002>;
+
+static int g_overflowOnAddCount = 0;
+static int g_overflowOnRemoveCount = 0;
+
+static void onOverflowPodAdd( vecsWorld*, vecsEntity, OverflowPod* )
+{
+    g_overflowOnAddCount++;
+}
+
+static void onOverflowPodRemove( vecsWorld*, vecsEntity, OverflowPod* )
+{
+    g_overflowOnRemoveCount++;
+}
 
 template< size_t... I >
 static void vecsCollectExhaustIds( uint32_t* out, std::index_sequence<I...> )
@@ -66,12 +92,755 @@ static void vecs_test_clear_world_dummy_observer( vecsWorld*, vecsEntity, void* 
 {
 }
 
+static uint32_t vecsTestClampEntities( uint32_t desired )
+{
+    return desired < VECS_MAX_ENTITIES ? desired : ( uint32_t )VECS_MAX_ENTITIES;
+}
+
+static uint32_t vecsTestClampIndex( uint32_t desired )
+{
+    return desired < ( VECS_MAX_ENTITIES - 1u ) ? desired : ( uint32_t )VECS_MAX_ENTITIES - 1u;
+}
+
+static uint32_t vecsTestTopSpan()
+{
+    const uint32_t tops = VECS_TOP_COUNT > 0u ? ( uint32_t )VECS_TOP_COUNT : 1u;
+    return ( ( uint32_t )VECS_L2_COUNT / tops ) * 64u;
+}
+
+static uint32_t vecsTestSeparatedPlacementStart( uint32_t reserveSlots )
+{
+    const uint32_t preferred = VECS_TOP_COUNT > 1u ? vecsTestTopSpan() : ( VECS_L2_COUNT > 1u ? 64u : 2u );
+    if ( VECS_MAX_ENTITIES <= reserveSlots )
+    {
+        return 0u;
+    }
+    const uint32_t maxStart = ( uint32_t )VECS_MAX_ENTITIES - reserveSlots;
+    return preferred < maxStart ? preferred : maxStart;
+}
+
+static uint32_t vecsTestHierarchyNodesPerRoot( uint32_t childDepth, uint32_t childrenPerLevel )
+{
+    uint32_t total = 1u;
+    uint32_t levelCount = 1u;
+    for ( uint32_t d = 0; d < childDepth; d++ )
+    {
+        levelCount *= childrenPerLevel;
+        total += levelCount;
+    }
+    return total;
+}
+
+static uint32_t vecsTestHierarchyRootCount( uint32_t desiredRoots, uint32_t childDepth, uint32_t childrenPerLevel, uint32_t capacity )
+{
+    const uint32_t nodesPerRoot = vecsTestHierarchyNodesPerRoot( childDepth, childrenPerLevel );
+    const uint32_t maxRoots = nodesPerRoot > 0u ? capacity / nodesPerRoot : 0u;
+    if ( maxRoots == 0u )
+    {
+        return 1u;
+    }
+    return desiredRoots < maxRoots ? desiredRoots : maxRoots;
+}
+
+static std::vector<uint32_t> vecsTestBoundaryCounts()
+{
+    std::vector<uint32_t> counts = { 1u, 2u, 63u, 64u, 65u, 127u, 128u, 129u, 255u, 256u, 257u, 4095u, 4096u, 4097u };
+    if ( VECS_MAX_ENTITIES > 1u )
+    {
+        counts.push_back( ( uint32_t )VECS_MAX_ENTITIES - 1u );
+    }
+    counts.push_back( ( uint32_t )VECS_MAX_ENTITIES );
+    counts.erase( std::remove_if( counts.begin(), counts.end(), []( uint32_t value ) { return value == 0u || value > VECS_MAX_ENTITIES; } ), counts.end() );
+    std::sort( counts.begin(), counts.end() );
+    counts.erase( std::unique( counts.begin(), counts.end() ), counts.end() );
+    return counts;
+}
+
+static uint64_t vecsHashMix( uint64_t hash, uint64_t value )
+{
+    hash ^= value + 0x9E3779B97F4A7C15ull + ( hash << 6u ) + ( hash >> 2u );
+    return hash;
+}
+
+static uint32_t vecsHashFloatBits( float value )
+{
+    uint32_t bits = 0u;
+    std::memcpy( &bits, &value, sizeof( bits ) );
+    return bits;
+}
+
+static void vecsSortEntities( std::vector<vecsEntity>& entities )
+{
+    std::sort( entities.begin(), entities.end(), []( vecsEntity a, vecsEntity b )
+    {
+        const uint32_t indexA = vecsEntityIndex( a );
+        const uint32_t indexB = vecsEntityIndex( b );
+        if ( indexA != indexB )
+        {
+            return indexA < indexB;
+        }
+        return vecsEntityGeneration( a ) < vecsEntityGeneration( b );
+    } );
+}
+
+static bool vecsAssertEntitySetsEqual( const std::vector<vecsEntity>& lhs, const std::vector<vecsEntity>& rhs )
+{
+    if ( lhs.size() != rhs.size() )
+    {
+        return false;
+    }
+    for ( size_t i = 0; i < lhs.size(); i++ )
+    {
+        if ( lhs[i] != rhs[i] )
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+template< typename... With >
+static std::vector<vecsEntity> vecsCollectEachEntities( vecsWorld* w )
+{
+    std::vector<vecsEntity> entities;
+    vecsEach<With...>( w, [&]( vecsEntity e, With&... ) { entities.push_back( e ); } );
+    vecsSortEntities( entities );
+    return entities;
+}
+
+template< typename... With >
+static std::vector<vecsEntity> vecsCollectQueryEntities( vecsWorld* w, vecsQuery* q )
+{
+    std::vector<vecsEntity> entities;
+    vecsQueryEach<With...>( w, q, [&]( vecsEntity e, With&... ) { entities.push_back( e ); } );
+    vecsSortEntities( entities );
+    return entities;
+}
+
+template< typename... With >
+static std::vector<vecsEntity> vecsCollectFreshChunkEntities( vecsWorld* w, vecsQuery* q, uint32_t maxChunks )
+{
+    std::vector<vecsEntity> entities;
+    std::vector<vecsQueryChunk> chunks( maxChunks ? maxChunks : 1u );
+    uint32_t chunkCount = vecsQueryGetChunks( w, q, chunks.data(), ( uint32_t )chunks.size() );
+    for ( uint32_t i = 0; i < chunkCount; i++ )
+    {
+        vecsQueryExecuteChunk<With...>( w, q, &chunks[i], [&]( vecsEntity e, With&... ) { entities.push_back( e ); } );
+    }
+    vecsSortEntities( entities );
+    return entities;
+}
+
+static std::vector<vecsEntity> vecsCollectAliveHandles( vecsWorld* w )
+{
+    std::vector<vecsEntity> entities;
+    for ( uint32_t index = 0; index < w->maxEntities; index++ )
+    {
+        if ( w->entities->allocated[index] != 0u )
+        {
+            entities.push_back( vecsMakeEntity( index, w->entities->generations[index] ) );
+        }
+    }
+    return entities;
+}
+
+struct ShadowSingletonValue
+{
+    int value = 0;
+};
+
+struct LifetimeTracker
+{
+    static inline std::atomic<int> liveCount = 0;
+    static inline std::atomic<int> destroyedCount = 0;
+    static inline std::atomic<int> copiedCount = 0;
+    static inline std::atomic<int> movedCount = 0;
+
+    int value = 0;
+
+    LifetimeTracker() noexcept
+    {
+        liveCount.fetch_add( 1, std::memory_order_relaxed );
+    }
+
+    explicit LifetimeTracker( int v ) noexcept : value( v )
+    {
+        liveCount.fetch_add( 1, std::memory_order_relaxed );
+    }
+
+    LifetimeTracker( const LifetimeTracker& other ) noexcept : value( other.value )
+    {
+        liveCount.fetch_add( 1, std::memory_order_relaxed );
+        copiedCount.fetch_add( 1, std::memory_order_relaxed );
+    }
+
+    LifetimeTracker( LifetimeTracker&& other ) noexcept : value( other.value )
+    {
+        liveCount.fetch_add( 1, std::memory_order_relaxed );
+        movedCount.fetch_add( 1, std::memory_order_relaxed );
+    }
+
+    LifetimeTracker& operator=( const LifetimeTracker& other ) noexcept
+    {
+        value = other.value;
+        copiedCount.fetch_add( 1, std::memory_order_relaxed );
+        return *this;
+    }
+
+    ~LifetimeTracker()
+    {
+        liveCount.fetch_sub( 1, std::memory_order_relaxed );
+        destroyedCount.fetch_add( 1, std::memory_order_relaxed );
+    }
+
+    static void reset()
+    {
+        liveCount.store( 0, std::memory_order_relaxed );
+        destroyedCount.store( 0, std::memory_order_relaxed );
+        copiedCount.store( 0, std::memory_order_relaxed );
+        movedCount.store( 0, std::memory_order_relaxed );
+    }
+};
+
+struct EventLedger
+{
+    struct Event
+    {
+        const char* label;
+        vecsEntity entity;
+        int value;
+    };
+
+    std::vector<Event> events;
+
+    void clear()
+    {
+        events.clear();
+    }
+
+    void record( const char* label, vecsEntity entity, int value = 0 )
+    {
+        events.push_back( { label, entity, value } );
+    }
+};
+
+struct ChunkCoverageBitmap
+{
+    explicit ChunkCoverageBitmap( uint32_t capacity ) : capacity( capacity ), seen( new std::atomic<uint32_t>[capacity] )
+    {
+        reset();
+    }
+
+    void reset()
+    {
+        for ( uint32_t i = 0; i < capacity; i++ )
+        {
+            seen[i].store( 0u, std::memory_order_relaxed );
+        }
+    }
+
+    void mark( vecsEntity e )
+    {
+        seen[vecsEntityIndex( e )].fetch_add( 1u, std::memory_order_relaxed );
+    }
+
+    uint32_t count( uint32_t index ) const
+    {
+        return seen[index].load( std::memory_order_relaxed );
+    }
+
+    uint32_t capacity;
+    std::unique_ptr<std::atomic<uint32_t>[]> seen;
+};
+
+struct SeededOpStream
+{
+    explicit SeededOpStream( uint32_t seed ) : state( seed ? seed : 1u )
+    {
+    }
+
+    uint32_t next()
+    {
+        state = state * 1664525u + 1013904223u;
+        return state;
+    }
+
+    uint32_t nextBounded( uint32_t bound )
+    {
+        return bound ? next() % bound : 0u;
+    }
+
+    bool oneIn( uint32_t n )
+    {
+        return n > 0u && nextBounded( n ) == 0u;
+    }
+
+    float nextFloat( float scale = 1.0f )
+    {
+        return ( float )( next() & 0xFFFFu ) / 65535.0f * scale;
+    }
+
+    uint32_t state;
+};
+
+struct ShadowWorld
+{
+    struct EntityState
+    {
+        bool alive = false;
+        vecsEntity handle = VECS_INVALID_ENTITY;
+        bool hasPosition = false;
+        Position position = {};
+        bool hasVelocity = false;
+        Velocity velocity = {};
+        bool hasHealth = false;
+        Health health = {};
+        bool hasEnemy = false;
+        bool hasDead = false;
+        vecsEntity parent = VECS_INVALID_ENTITY;
+    };
+
+    EntityState& ensure( uint32_t index )
+    {
+        if ( entities.size() <= index )
+        {
+            entities.resize( index + 1u );
+        }
+        return entities[index];
+    }
+
+    EntityState* get( vecsEntity e )
+    {
+        uint32_t index = vecsEntityIndex( e );
+        if ( index >= entities.size() )
+        {
+            return nullptr;
+        }
+        EntityState& state = entities[index];
+        return state.alive && state.handle == e ? &state : nullptr;
+    }
+
+    const EntityState* get( vecsEntity e ) const
+    {
+        uint32_t index = vecsEntityIndex( e );
+        if ( index >= entities.size() )
+        {
+            return nullptr;
+        }
+        const EntityState& state = entities[index];
+        return state.alive && state.handle == e ? &state : nullptr;
+    }
+
+    void create( vecsEntity e )
+    {
+        EntityState& state = ensure( vecsEntityIndex( e ) );
+        state = {};
+        state.alive = true;
+        state.handle = e;
+    }
+
+    void destroyRecursive( vecsEntity e )
+    {
+        const EntityState* state = get( e );
+        if ( !state )
+        {
+            return;
+        }
+
+        std::vector<vecsEntity> children;
+        for ( const EntityState& candidate : entities )
+        {
+            if ( candidate.alive && candidate.parent == e )
+            {
+                children.push_back( candidate.handle );
+            }
+        }
+        for ( vecsEntity child : children )
+        {
+            destroyRecursive( child );
+        }
+
+        EntityState& target = ensure( vecsEntityIndex( e ) );
+        target.alive = false;
+        target.handle = VECS_INVALID_ENTITY;
+        target.hasPosition = false;
+        target.hasVelocity = false;
+        target.hasHealth = false;
+        target.hasEnemy = false;
+        target.hasDead = false;
+        target.parent = VECS_INVALID_ENTITY;
+    }
+
+    void setPosition( vecsEntity e, Position position )
+    {
+        if ( EntityState* state = get( e ) )
+        {
+            state->hasPosition = true;
+            state->position = position;
+        }
+    }
+
+    void unsetPosition( vecsEntity e )
+    {
+        if ( EntityState* state = get( e ) )
+        {
+            state->hasPosition = false;
+        }
+    }
+
+    void setVelocity( vecsEntity e, Velocity velocity )
+    {
+        if ( EntityState* state = get( e ) )
+        {
+            state->hasVelocity = true;
+            state->velocity = velocity;
+        }
+    }
+
+    void unsetVelocity( vecsEntity e )
+    {
+        if ( EntityState* state = get( e ) )
+        {
+            state->hasVelocity = false;
+        }
+    }
+
+    void setHealth( vecsEntity e, Health health )
+    {
+        if ( EntityState* state = get( e ) )
+        {
+            state->hasHealth = true;
+            state->health = health;
+        }
+    }
+
+    void unsetHealth( vecsEntity e )
+    {
+        if ( EntityState* state = get( e ) )
+        {
+            state->hasHealth = false;
+        }
+    }
+
+    void setEnemy( vecsEntity e, bool value )
+    {
+        if ( EntityState* state = get( e ) )
+        {
+            state->hasEnemy = value;
+        }
+    }
+
+    void setDead( vecsEntity e, bool value )
+    {
+        if ( EntityState* state = get( e ) )
+        {
+            state->hasDead = value;
+        }
+    }
+
+    void setParent( vecsEntity child, vecsEntity parent )
+    {
+        if ( EntityState* state = get( child ) )
+        {
+            if ( parent != VECS_INVALID_ENTITY )
+            {
+                if ( child == parent )
+                {
+                    return;
+                }
+                vecsEntity cursor = parent;
+                uint32_t guard = 0u;
+                while ( cursor != VECS_INVALID_ENTITY )
+                {
+                    if ( cursor == child )
+                    {
+                        return;
+                    }
+                    const EntityState* cursorState = get( cursor );
+                    if ( !cursorState )
+                    {
+                        break;
+                    }
+                    if ( ++guard > entities.size() )
+                    {
+                        return;
+                    }
+                    cursor = cursorState->parent;
+                }
+            }
+            state->parent = parent;
+        }
+    }
+
+    void cloneTo( vecsEntity src, vecsEntity dst )
+    {
+        const EntityState* source = get( src );
+        if ( !source )
+        {
+            return;
+        }
+        create( dst );
+        EntityState* target = get( dst );
+        assert( target != nullptr );
+        target->hasPosition = source->hasPosition;
+        target->position = source->position;
+        target->hasVelocity = source->hasVelocity;
+        target->velocity = source->velocity;
+        target->hasHealth = source->hasHealth;
+        target->health = source->health;
+        target->hasEnemy = source->hasEnemy;
+        target->hasDead = source->hasDead;
+        target->parent = source->parent;
+    }
+
+    void instantiateFrom( vecsEntity prefab, const std::vector<vecsEntity>& instances )
+    {
+        for ( vecsEntity e : instances )
+        {
+            if ( e != VECS_INVALID_ENTITY )
+            {
+                cloneTo( prefab, e );
+            }
+        }
+    }
+
+    void clear()
+    {
+        for ( EntityState& state : entities )
+        {
+            state = {};
+        }
+        hasSingleton = false;
+        singleton = {};
+    }
+
+    void setSingleton( int value )
+    {
+        hasSingleton = true;
+        singleton.value = value;
+    }
+
+    std::vector<vecsEntity> aliveHandles() const
+    {
+        std::vector<vecsEntity> out;
+        for ( const EntityState& state : entities )
+        {
+            if ( state.alive )
+            {
+                out.push_back( state.handle );
+            }
+        }
+        return out;
+    }
+
+    template< typename Pred >
+    std::vector<vecsEntity> collect( Pred&& pred ) const
+    {
+        std::vector<vecsEntity> out;
+        for ( const EntityState& state : entities )
+        {
+            if ( state.alive && pred( state ) )
+            {
+                out.push_back( state.handle );
+            }
+        }
+        vecsSortEntities( out );
+        return out;
+    }
+
+    uint64_t hash() const
+    {
+        uint64_t h = 1469598103934665603ull;
+        for ( const EntityState& state : entities )
+        {
+            if ( !state.alive )
+            {
+                continue;
+            }
+            h = vecsHashMix( h, state.handle );
+            h = vecsHashMix( h, state.hasPosition ? 0x10ull : 0x11ull );
+            if ( state.hasPosition )
+            {
+                h = vecsHashMix( h, vecsHashFloatBits( state.position.x ) );
+                h = vecsHashMix( h, vecsHashFloatBits( state.position.y ) );
+            }
+            h = vecsHashMix( h, state.hasVelocity ? 0x20ull : 0x21ull );
+            if ( state.hasVelocity )
+            {
+                h = vecsHashMix( h, vecsHashFloatBits( state.velocity.vx ) );
+                h = vecsHashMix( h, vecsHashFloatBits( state.velocity.vy ) );
+            }
+            h = vecsHashMix( h, state.hasHealth ? 0x30ull : 0x31ull );
+            if ( state.hasHealth )
+            {
+                h = vecsHashMix( h, ( uint64_t )( uint32_t )state.health.hp );
+            }
+            h = vecsHashMix( h, state.hasEnemy ? 0x40ull : 0x41ull );
+            h = vecsHashMix( h, state.hasDead ? 0x50ull : 0x51ull );
+            h = vecsHashMix( h, state.parent );
+        }
+        h = vecsHashMix( h, hasSingleton ? 0x60ull : 0x61ull );
+        if ( hasSingleton )
+        {
+            h = vecsHashMix( h, ( uint64_t )( uint32_t )singleton.value );
+        }
+        return h;
+    }
+
+    bool matchesWorld( vecsWorld* w ) const
+    {
+        if ( !w )
+        {
+            return false;
+        }
+        for ( uint32_t index = 0; index < w->maxEntities; index++ )
+        {
+            const bool actualAlive = w->entities->allocated[index] != 0u;
+            const bool expectedAlive = index < entities.size() && entities[index].alive;
+            if ( actualAlive != expectedAlive )
+            {
+                return false;
+            }
+            if ( !expectedAlive )
+            {
+                continue;
+            }
+
+            const EntityState& expected = entities[index];
+            if ( !vecsAlive( w, expected.handle ) || vecsEntityIndex( expected.handle ) != index || w->entities->generations[index] != vecsEntityGeneration( expected.handle ) )
+            {
+                return false;
+            }
+
+            const bool actualHasPosition = vecsHas<Position>( w, expected.handle );
+            if ( actualHasPosition != expected.hasPosition )
+            {
+                return false;
+            }
+            if ( expected.hasPosition )
+            {
+                Position* position = vecsGet<Position>( w, expected.handle );
+                if ( !position || position->x != expected.position.x || position->y != expected.position.y )
+                {
+                    return false;
+                }
+            }
+
+            const bool actualHasVelocity = vecsHas<Velocity>( w, expected.handle );
+            if ( actualHasVelocity != expected.hasVelocity )
+            {
+                return false;
+            }
+            if ( expected.hasVelocity )
+            {
+                Velocity* velocity = vecsGet<Velocity>( w, expected.handle );
+                if ( !velocity || velocity->vx != expected.velocity.vx || velocity->vy != expected.velocity.vy )
+                {
+                    return false;
+                }
+            }
+
+            const bool actualHasHealth = vecsHas<Health>( w, expected.handle );
+            if ( actualHasHealth != expected.hasHealth )
+            {
+                return false;
+            }
+            if ( expected.hasHealth )
+            {
+                Health* health = vecsGet<Health>( w, expected.handle );
+                if ( !health || health->hp != expected.health.hp )
+                {
+                    return false;
+                }
+            }
+
+            const bool actualHasEnemy = vecsHas<IsEnemy>( w, expected.handle );
+            const bool actualHasDead = vecsHas<Dead>( w, expected.handle );
+            const vecsEntity actualParent = vecsGetParentEntity( w, expected.handle );
+            if ( actualHasEnemy != expected.hasEnemy || actualHasDead != expected.hasDead || actualParent != expected.parent )
+            {
+                return false;
+            }
+        }
+
+        ShadowSingletonValue* singletonPtr = vecsGetSingleton<ShadowSingletonValue>( w );
+        if ( ( singletonPtr != nullptr ) != hasSingleton )
+        {
+            return false;
+        }
+        if ( hasSingleton )
+        {
+            if ( !singletonPtr || singletonPtr->value != singleton.value )
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    std::vector<EntityState> entities;
+    bool hasSingleton = false;
+    ShadowSingletonValue singleton = {};
+};
+
+inline uint64_t hash_world_state( vecsWorld* w )
+{
+    uint64_t h = 1469598103934665603ull;
+    for ( uint32_t index = 0; index < w->maxEntities; index++ )
+    {
+        if ( w->entities->allocated[index] == 0u )
+        {
+            continue;
+        }
+
+        vecsEntity e = vecsMakeEntity( index, w->entities->generations[index] );
+        h = vecsHashMix( h, e );
+
+        const bool hasPosition = vecsHas<Position>( w, e );
+        h = vecsHashMix( h, hasPosition ? 0x10ull : 0x11ull );
+        if ( hasPosition )
+        {
+            Position* position = vecsGet<Position>( w, e );
+            h = vecsHashMix( h, vecsHashFloatBits( position->x ) );
+            h = vecsHashMix( h, vecsHashFloatBits( position->y ) );
+        }
+
+        const bool hasVelocity = vecsHas<Velocity>( w, e );
+        h = vecsHashMix( h, hasVelocity ? 0x20ull : 0x21ull );
+        if ( hasVelocity )
+        {
+            Velocity* velocity = vecsGet<Velocity>( w, e );
+            h = vecsHashMix( h, vecsHashFloatBits( velocity->vx ) );
+            h = vecsHashMix( h, vecsHashFloatBits( velocity->vy ) );
+        }
+
+        const bool hasHealth = vecsHas<Health>( w, e );
+        h = vecsHashMix( h, hasHealth ? 0x30ull : 0x31ull );
+        if ( hasHealth )
+        {
+            Health* health = vecsGet<Health>( w, e );
+            h = vecsHashMix( h, ( uint64_t )( uint32_t )health->hp );
+        }
+
+        h = vecsHashMix( h, vecsHas<IsEnemy>( w, e ) ? 0x40ull : 0x41ull );
+        h = vecsHashMix( h, vecsHas<Dead>( w, e ) ? 0x50ull : 0x51ull );
+        h = vecsHashMix( h, vecsGetParentEntity( w, e ) );
+    }
+
+    ShadowSingletonValue* singleton = vecsGetSingleton<ShadowSingletonValue>( w );
+    h = vecsHashMix( h, singleton ? 0x60ull : 0x61ull );
+    if ( singleton )
+    {
+        h = vecsHashMix( h, ( uint64_t )( uint32_t )singleton->value );
+    }
+    return h;
+}
+
 UTEST( vecs, smoke )
 {
     ASSERT_NE( VECS_INVALID_ENTITY, 0ULL );
-    ASSERT_EQ( ( uint32_t )VECS_MAX_ENTITIES, 65536u );
-    ASSERT_EQ( ( uint32_t )VECS_L2_COUNT, 1024u );
-    ASSERT_EQ( ( uint32_t )VECS_TOP_COUNT, 16u );
+    ASSERT_EQ( ( uint32_t )VECS_L2_COUNT, ( ( uint32_t )VECS_MAX_ENTITIES + 63u ) / 64u );
+    ASSERT_EQ( ( uint32_t )VECS_TOP_COUNT, ( ( uint32_t )VECS_L2_COUNT + 63u ) / 64u );
 }
 
 UTEST( bits, tzcnt_single_bits )
@@ -184,28 +953,49 @@ UTEST( bitfield, set_has_clear )
 UTEST( bitfield, scattered_bits )
 {
     vecsBitfield bf = {};
-    vecsBitfieldSet( &bf, 0u );
-    vecsBitfieldSet( &bf, 63u );
-    vecsBitfieldSet( &bf, 64u );
-    vecsBitfieldSet( &bf, 4095u );
-    vecsBitfieldSet( &bf, 4096u );
-    vecsBitfieldSet( &bf, 65535u );
-    ASSERT_EQ( vecsBitfieldCount( &bf ), 6u );
+    const std::vector<uint32_t> indices = {
+        0u,
+        vecsTestClampIndex( 63u ),
+        vecsTestClampIndex( 64u ),
+        vecsTestClampIndex( 4095u ),
+        vecsTestClampIndex( 4096u ),
+        vecsTestClampIndex( VECS_MAX_ENTITIES - 1u )
+    };
+    for ( uint32_t index : indices )
+    {
+        vecsBitfieldSet( &bf, index );
+    }
+
+    uint32_t uniqueCount = 0u;
+    uint32_t last = UINT32_MAX;
+    for ( uint32_t index : indices )
+    {
+        if ( index != last )
+        {
+            uniqueCount++;
+            last = index;
+        }
+    }
+
+    ASSERT_EQ( vecsBitfieldCount( &bf ), uniqueCount );
     ASSERT_TRUE( vecsBitfieldHas( &bf, 0u ) );
-    ASSERT_TRUE( vecsBitfieldHas( &bf, 63u ) );
-    ASSERT_TRUE( vecsBitfieldHas( &bf, 64u ) );
-    ASSERT_TRUE( vecsBitfieldHas( &bf, 4095u ) );
-    ASSERT_TRUE( vecsBitfieldHas( &bf, 4096u ) );
-    ASSERT_TRUE( vecsBitfieldHas( &bf, 65535u ) );
+    ASSERT_TRUE( vecsBitfieldHas( &bf, vecsTestClampIndex( 63u ) ) );
+    ASSERT_TRUE( vecsBitfieldHas( &bf, vecsTestClampIndex( 64u ) ) );
+    ASSERT_TRUE( vecsBitfieldHas( &bf, vecsTestClampIndex( 4095u ) ) );
+    ASSERT_TRUE( vecsBitfieldHas( &bf, vecsTestClampIndex( 4096u ) ) );
+    ASSERT_TRUE( vecsBitfieldHas( &bf, vecsTestClampIndex( VECS_MAX_ENTITIES - 1u ) ) );
     ASSERT_FALSE( vecsBitfieldHas( &bf, 1u ) );
     ASSERT_FALSE( vecsBitfieldHas( &bf, 62u ) );
-    ASSERT_FALSE( vecsBitfieldHas( &bf, 65u ) );
+    if ( VECS_MAX_ENTITIES > 65u )
+    {
+        ASSERT_FALSE( vecsBitfieldHas( &bf, 65u ) );
+    }
 }
 
 UTEST( bitfield, iteration_order )
 {
     vecsBitfield bf = {};
-    uint32_t expected[] = { 5u, 100u, 1000u, 50000u };
+    uint32_t expected[] = { 5u, 100u, 1000u, vecsTestClampIndex( 50000u ) };
     for ( uint32_t idx : expected )
     {
         vecsBitfieldSet( &bf, idx );
@@ -255,9 +1045,11 @@ UTEST( bitfield, top_mask_auto_clear )
 UTEST( bitfield, clear_all )
 {
     vecsBitfield bf = {};
-    for ( uint32_t i = 0; i < 1000u; i++ )
+    const uint32_t stride = 50u;
+    const uint32_t setCount = std::min<uint32_t>( 1000u, ( ( uint32_t )VECS_MAX_ENTITIES + stride - 1u ) / stride );
+    for ( uint32_t i = 0; i < setCount; i++ )
     {
-        vecsBitfieldSet( &bf, i * 50u );
+        vecsBitfieldSet( &bf, i * stride );
     }
     vecsBitfieldClearAll( &bf );
     ASSERT_EQ( vecsBitfieldCount( &bf ), 0u );
@@ -1506,13 +2298,15 @@ UTEST( query, mutability_read_write_signature )
 
 UTEST( simd, scalar_fallback_exact_match )
 {
-    vecsWorld* w = vecsCreateWorld( 20000u );
+    const uint32_t entityCount = vecsTestClampEntities( 10000u );
+    const uint32_t worldCapacity = vecsTestClampEntities( entityCount * 2u );
+    vecsWorld* w = vecsCreateWorld( worldCapacity );
     std::mt19937 rng( 1337u );
     std::uniform_real_distribution<float> distPos( -500.0f, 500.0f );
     std::uniform_real_distribution<float> distVel( -50.0f, 50.0f );
     std::uniform_int_distribution<int> bit( 0, 99 );
 
-    for ( uint32_t i = 0; i < 10000u; i++ )
+    for ( uint32_t i = 0; i < entityCount; i++ )
     {
         vecsEntity e = vecsCreate( w );
         vecsSet<Position>( w, e, { distPos( rng ), distPos( rng ) } );
@@ -1531,8 +2325,8 @@ UTEST( simd, scalar_fallback_exact_match )
 
     std::vector<uint64_t> simdResults;
     std::vector<uint64_t> scalarResults;
-    simdResults.reserve( 10000u );
-    scalarResults.reserve( 10000u );
+    simdResults.reserve( entityCount );
+    scalarResults.reserve( entityCount );
 
     g_vecsSimdConfig = VECS_SIMD_AUTO;
     vecsQueryEach<Position, Velocity>( w, q, [&]( vecsEntity e, Position& p, Velocity& v )
@@ -1806,8 +2600,9 @@ UTEST( benchmark, vecs_vs_entt )
 {
     ( void )utest_result;
 #if defined( VECS_HAS_ENTT )
-    const uint32_t activeCapacity = VECS_MAX_ENTITIES;
+    const uint32_t activeCapacity = vecsTestClampEntities( 50000u );
     const uint64_t opTarget = 1000000ULL;
+    const uint64_t createTarget = activeCapacity;
 
     double vecsCreateOps = 0.0;
     double enttCreateOps = 0.0;
@@ -1815,23 +2610,23 @@ UTEST( benchmark, vecs_vs_entt )
         vecsWorld* w = vecsCreateWorld( activeCapacity );
         std::vector<vecsEntity> entities( activeCapacity );
         const auto start = std::chrono::high_resolution_clock::now();
-        for ( uint64_t i = 0; i < opTarget; i++ )
+        for ( uint64_t i = 0; i < createTarget; i++ )
         {
-            entities[( size_t )( i % activeCapacity )] = vecsCreate( w );
+            entities[( size_t )i] = vecsCreate( w );
         }
-        vecsCreateOps = vecsBenchOpsPerSecond( start, opTarget );
+        vecsCreateOps = vecsBenchOpsPerSecond( start, createTarget );
         vecsDestroyWorld( w );
     }
     {
         entt::registry registry;
         std::vector<entt::entity> entities;
-        entities.resize( ( size_t )opTarget );
+        entities.resize( ( size_t )createTarget );
         const auto start = std::chrono::high_resolution_clock::now();
-        for ( uint64_t i = 0; i < opTarget; i++ )
+        for ( uint64_t i = 0; i < createTarget; i++ )
         {
             entities[( size_t )i] = registry.create();
         }
-        enttCreateOps = vecsBenchOpsPerSecond( start, opTarget );
+        enttCreateOps = vecsBenchOpsPerSecond( start, createTarget );
     }
     std::printf( "[BENCHMARK] Entity Create | Vecs: %s | EnTT: %s\n", vecsFormatOps( vecsCreateOps ).c_str(), vecsFormatOps( enttCreateOps ).c_str() );
 
@@ -1857,8 +2652,8 @@ UTEST( benchmark, vecs_vs_entt )
     {
         entt::registry registry;
         std::vector<entt::entity> entities;
-        entities.resize( ( size_t )opTarget );
-        for ( uint64_t i = 0; i < opTarget; i++ )
+        entities.resize( activeCapacity );
+        for ( uint32_t i = 0; i < activeCapacity; i++ )
         {
             entities[( size_t )i] = registry.create();
         }
@@ -1867,8 +2662,9 @@ UTEST( benchmark, vecs_vs_entt )
         {
             const Position p = { ( float )i, 0.0f };
             const Velocity v = { 0.0f, ( float )i };
-            registry.emplace_or_replace<Position>( entities[( size_t )i], p );
-            registry.emplace_or_replace<Velocity>( entities[( size_t )i], v );
+            entt::entity e = entities[( size_t )( i % activeCapacity )];
+            registry.emplace_or_replace<Position>( e, p );
+            registry.emplace_or_replace<Velocity>( e, v );
         }
         enttSetOps = vecsBenchOpsPerSecond( start, opTarget * 2u );
     }
@@ -1898,8 +2694,8 @@ UTEST( benchmark, vecs_vs_entt )
     {
         entt::registry registry;
         std::vector<entt::entity> entities;
-        entities.resize( ( size_t )opTarget );
-        for ( uint64_t i = 0; i < opTarget; i++ )
+        entities.resize( activeCapacity );
+        for ( uint32_t i = 0; i < activeCapacity; i++ )
         {
             entt::entity e = registry.create();
             entities[( size_t )i] = e;
@@ -1909,10 +2705,13 @@ UTEST( benchmark, vecs_vs_entt )
 
         uint64_t processed = 0u;
         const auto start = std::chrono::high_resolution_clock::now();
-        registry.view<Position, Velocity>().each( [&]( Position&, Velocity& )
+        while ( processed < opTarget )
         {
-            processed++;
-        } );
+            registry.view<Position, Velocity>().each( [&]( Position&, Velocity& )
+            {
+                processed++;
+            } );
+        }
         enttIterOps = vecsBenchOpsPerSecond( start, processed );
     }
     std::printf( "[BENCHMARK] Query Iterate | Vecs: %s | EnTT: %s\n", vecsFormatOps( vecsIterOps ).c_str(), vecsFormatOps( enttIterOps ).c_str() );
@@ -1920,11 +2719,12 @@ UTEST( benchmark, vecs_vs_entt )
     double vecsFullDestroyOps = 0.0;
     double enttFullDestroyOps = 0.0;
     {
-        const uint32_t rootCount = 1000u;
         const uint32_t childDepth = 2u;
         const uint32_t childrenPerLevel = 5u;
-        const uint32_t estimatedEntities = rootCount * ( 1 + childrenPerLevel + childrenPerLevel * childrenPerLevel );
-        vecsWorld* w = vecsCreateWorld( estimatedEntities + 1000u );
+        const uint32_t rootCount = vecsTestHierarchyRootCount( 1000u, childDepth, childrenPerLevel, activeCapacity );
+        const uint32_t nodesPerRoot = vecsTestHierarchyNodesPerRoot( childDepth, childrenPerLevel );
+        const uint32_t estimatedEntities = rootCount * nodesPerRoot;
+        vecsWorld* w = vecsCreateWorld( estimatedEntities );
         std::vector<vecsEntity> roots( rootCount );
         uint64_t totalEntities = 0;
         for ( uint32_t r = 0; r < rootCount; r++ )
@@ -1962,9 +2762,9 @@ UTEST( benchmark, vecs_vs_entt )
     }
     {
         struct Parent { std::vector<entt::entity> children; };
-        const uint32_t rootCount = 1000u;
         const uint32_t childDepth = 2u;
         const uint32_t childrenPerLevel = 5u;
+        const uint32_t rootCount = vecsTestHierarchyRootCount( 1000u, childDepth, childrenPerLevel, activeCapacity );
         entt::registry registry;
         std::vector<entt::entity> roots( rootCount );
         uint64_t totalEntities = 0;
@@ -2020,7 +2820,7 @@ UTEST( benchmark, vecs_vs_entt )
     double vecsChurnOps = 0.0;
     double enttChurnOps = 0.0;
     {
-        const uint32_t entityCount = 50000u;
+        const uint32_t entityCount = vecsTestClampEntities( 50000u );
         vecsWorld* w = vecsCreateWorld( entityCount );
         std::vector<vecsEntity> entities( entityCount );
         for ( uint32_t i = 0; i < entityCount; i++ )
@@ -2042,7 +2842,7 @@ UTEST( benchmark, vecs_vs_entt )
         vecsDestroyWorld( w );
     }
     {
-        const uint32_t entityCount = 50000u;
+        const uint32_t entityCount = vecsTestClampEntities( 50000u );
         entt::registry registry;
         std::vector<entt::entity> entities( entityCount );
         for ( uint32_t i = 0; i < entityCount; i++ )
@@ -2067,7 +2867,7 @@ UTEST( benchmark, vecs_vs_entt )
     double vecsShotgunOps = 0.0;
     double enttShotgunOps = 0.0;
     {
-        const uint32_t entityCount = 60000u;
+        const uint32_t entityCount = vecsTestClampEntities( 60000u );
         vecsWorld* w = vecsCreateWorld( entityCount );
         std::vector<vecsEntity> entities( entityCount );
         for ( uint32_t i = 0; i < entityCount; i++ )
@@ -2087,7 +2887,7 @@ UTEST( benchmark, vecs_vs_entt )
         vecsDestroyWorld( w );
     }
     {
-        const uint32_t entityCount = 60000u;
+        const uint32_t entityCount = vecsTestClampEntities( 60000u );
         entt::registry registry;
         std::vector<entt::entity> entities( entityCount );
         for ( uint32_t i = 0; i < entityCount; i++ )
@@ -2109,31 +2909,6 @@ UTEST( benchmark, vecs_vs_entt )
 #else
     std::printf( "[BENCHMARK] Vecs vs EnTT skipped (entt/entt.hpp not found).\n" );
 #endif
-}
-
-UTEST( entity, component_id_exhaustion_boundary )
-{
-    uint32_t savedCounter = vecsGetTypeIdCounter();
-    vecsSetTypeIdCounter( VECS_MAX_COMPONENTS - 10 );
-    
-    constexpr size_t kTypeCount = 10;
-    std::vector<uint32_t> ids( kTypeCount );
-    vecsCollectExhaustIds( ids.data(), std::make_index_sequence<kTypeCount>() );
-    for ( size_t i = 1; i < kTypeCount; i++ )
-    {
-        ASSERT_TRUE( ids[i] > ids[i - 1u] );
-    }
-
-    uint32_t overflowId = vecsTypeId<ExhaustComp<kTypeCount>>();
-    ASSERT_GE( overflowId, ( uint32_t )VECS_MAX_COMPONENTS );
-
-    vecsWorld* w = vecsCreateWorld( 16u );
-    vecsEntity e = vecsCreate( w );
-    uint32_t setCount = vecsTrySetExhaustComponents( w, e, std::make_index_sequence<kTypeCount>() );
-    ASSERT_TRUE( setCount <= 10u );
-    vecsDestroyWorld( w );
-    
-    vecsSetTypeIdCounter( savedCounter );
 }
 
 struct Transform
@@ -2784,7 +3559,9 @@ UTEST( edge_case, rapid_component_churn )
 
 UTEST( edge_case, query_with_all_optional_and_without )
 {
-    vecsWorld* w = vecsCreateWorld( 10000u );
+    const uint32_t secondaryStart = vecsTestSeparatedPlacementStart( 3u );
+    const uint32_t fillerCount = secondaryStart > 2u ? secondaryStart - 2u : 0u;
+    vecsWorld* w = vecsCreateWorld( vecsTestClampEntities( secondaryStart + 3u ) );
     vecsEntity e1 = vecsCreate( w );
     vecsEntity e2 = vecsCreate( w );
 
@@ -2795,7 +3572,7 @@ UTEST( edge_case, query_with_all_optional_and_without )
 
     // Keep excluded Position+Dead entities in a different top block so the
     // top-level Without fast path does not mask the entire live block.
-    for ( uint32_t i = 0; i < 4094u; i++ )
+    for ( uint32_t i = 0; i < fillerCount; i++ )
     {
         ( void )vecsCreate( w );
     }
@@ -3000,13 +3777,14 @@ UTEST( first_match, equivalent_to_foreach )
 
 UTEST( first_match, simd_levels )
 {
-    vecsWorld* w = vecsCreateWorld( 10000u );
-    // Create an entity at the very end of the pool so it spans across many SIMD chunks
-    for ( int i = 0; i < 8000; ++i )
+    const uint32_t entityCount = vecsTestClampEntities( 8000u );
+    const uint32_t matchIndex = entityCount > 512u ? entityCount - 512u : entityCount / 2u;
+    vecsWorld* w = vecsCreateWorld( entityCount );
+    for ( uint32_t i = 0; i < entityCount; ++i )
     {
         vecsEntity e = vecsCreate( w );
         vecsSet<Position>( w, e, { 1.0f, 1.0f } );
-        if ( i == 7500 )
+        if ( i == matchIndex )
         {
             vecsSet<Velocity>( w, e, { 1.0f, 1.0f } );
         }
@@ -3101,10 +3879,10 @@ UTEST( query_bug, parallel_without_skips_chunk )
 
 UTEST( query_bug, stress_complex_filters_skip_chunk )
 {
-    vecsWorld* w = vecsCreateWorld( 10000u );
+    const uint32_t entityCount = vecsTestClampEntities( 1000u );
+    vecsWorld* w = vecsCreateWorld( entityCount );
     
-    // Create 1000 entities
-    for ( uint32_t i = 0; i < 1000u; i++ )
+    for ( uint32_t i = 0; i < entityCount; i++ )
     {
         vecsEntity e = vecsCreate( w );
         vecsSet<Position>( w, e, { 1.0f, 1.0f } );
@@ -3121,7 +3899,7 @@ UTEST( query_bug, stress_complex_filters_skip_chunk )
     vecsQueryAddWithout( q, vecsTypeId<IsEnemy>() );
 
     uint32_t expected_count = 0;
-    for ( uint32_t i = 0; i < 1000u; i++ )
+    for ( uint32_t i = 0; i < entityCount; i++ )
     {
         bool has_pos = true;
         bool has_vel = ( i % 2 == 0 );
@@ -3150,10 +3928,10 @@ UTEST( query_bug, stress_complex_filters_skip_chunk )
 
 UTEST( query_bug, stress_dense_with_sparse_without )
 {
-    vecsWorld* w = vecsCreateWorld( 10000u );
+    const uint32_t entityCount = vecsTestClampEntities( 1000u );
+    vecsWorld* w = vecsCreateWorld( entityCount );
     
-    // 1000 entities, densely packed With components
-    for ( uint32_t i = 0; i < 1000u; i++ )
+    for ( uint32_t i = 0; i < entityCount; i++ )
     {
         vecsEntity e = vecsCreate( w );
         vecsSet<Position>( w, e, { 1.0f, 1.0f } );
@@ -3166,7 +3944,7 @@ UTEST( query_bug, stress_dense_with_sparse_without )
     vecsQuery* q = vecsBuildQuery<Position, Velocity>( w );
     vecsQueryAddWithout( q, vecsTypeId<Dead>() );
 
-    uint32_t expected_count = 1000u - ( 1000u / 64u ) - ( 1000u % 64u == 0 ? 0 : 1 );
+    uint32_t expected_count = entityCount - ( entityCount / 64u ) - ( entityCount % 64u == 0 ? 0u : 1u );
 
     uint32_t actual_count = 0;
     vecsQueryEach<Position, Velocity>( w, q, [&]( vecsEntity, Position&, Velocity& )
@@ -3184,9 +3962,10 @@ UTEST( query_bug, stress_dense_with_sparse_without )
 
 UTEST( query_bug, parallel_stress_complex_filters_skip_chunk )
 {
-    vecsWorld* w = vecsCreateWorld( 10000u );
+    const uint32_t entityCount = vecsTestClampEntities( 2000u );
+    vecsWorld* w = vecsCreateWorld( entityCount );
     
-    for ( uint32_t i = 0; i < 2000u; i++ )
+    for ( uint32_t i = 0; i < entityCount; i++ )
     {
         vecsEntity e = vecsCreate( w );
         vecsSet<Position>( w, e, { 1.0f, 1.0f } );
@@ -3203,7 +3982,7 @@ UTEST( query_bug, parallel_stress_complex_filters_skip_chunk )
     vecsQueryAddWithout( q, vecsTypeId<IsEnemy>() );
 
     uint32_t expected_count = 0;
-    for ( uint32_t i = 0; i < 2000u; i++ )
+    for ( uint32_t i = 0; i < entityCount; i++ )
     {
         bool has_pos = true;
         bool has_vel = ( i % 2 == 0 );
@@ -3460,7 +4239,657 @@ UTEST( query, bug_stale_mask_execute_chunk )
     vecsDestroyWorld( w );
 }
 
-#include <map>
+template< size_t Size, size_t Align >
+struct alignas( Align ) CmdPayload
+{
+    std::array<uint8_t, Size> bytes = {};
+};
+
+template< size_t Size, size_t Align >
+static CmdPayload<Size, Align> vecsMakeCmdPayload( uint32_t salt )
+{
+    CmdPayload<Size, Align> payload = {};
+    for ( size_t i = 0; i < Size; i++ )
+    {
+        payload.bytes[i] = ( uint8_t )( ( salt + ( uint32_t )i * 13u ) & 0xFFu );
+    }
+    return payload;
+}
+
+template< size_t Size, size_t Align >
+static bool vecsAssertCmdPayload( vecsWorld* w, vecsEntity e, uint32_t salt )
+{
+    CmdPayload<Size, Align>* payload = vecsGet<CmdPayload<Size, Align>>( w, e );
+    if ( !payload )
+    {
+        return false;
+    }
+    for ( size_t i = 0; i < Size; i++ )
+    {
+        if ( payload->bytes[i] != ( uint8_t )( ( salt + ( uint32_t )i * 13u ) & 0xFFu ) )
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+template< int Id > struct BoundaryTag {};
+template< int Id > struct BoundaryPod { uint32_t value; };
+template< int Id > struct BoundaryComplex { std::string text; };
+
+static int g_boundaryObserverCount = 0;
+
+static void onBoundaryPodAdd64( vecsWorld*, vecsEntity, BoundaryPod<64>* )
+{
+    g_boundaryObserverCount++;
+}
+
+static EventLedger* g_eventLedger = nullptr;
+static vecsCommandBuffer* g_eventCommandBuffer = nullptr;
+static vecsEntity g_eventSibling = VECS_INVALID_ENTITY;
+
+static void onLedgerPositionAddSelfUnset( vecsWorld* w, vecsEntity e, Position* )
+{
+    assert( g_eventLedger != nullptr );
+    g_eventLedger->record( "position.add", e );
+    vecsUnset<Position>( w, e );
+}
+
+static void onLedgerPositionRemove( vecsWorld*, vecsEntity e, Position* )
+{
+    assert( g_eventLedger != nullptr );
+    g_eventLedger->record( "position.remove", e );
+}
+
+static void onLedgerHealthAddOverwrite( vecsWorld* w, vecsEntity e, Health* )
+{
+    assert( g_eventLedger != nullptr );
+    g_eventLedger->record( "health.add", e );
+    vecsSet<Health>( w, e, { 200 } );
+}
+
+static void onLedgerHealthRemoveDestroySibling( vecsWorld* w, vecsEntity e, Health* )
+{
+    assert( g_eventLedger != nullptr );
+    g_eventLedger->record( "health.remove", e );
+    if ( g_eventSibling != VECS_INVALID_ENTITY && vecsAlive( w, g_eventSibling ) )
+    {
+        vecsDestroy( w, g_eventSibling );
+    }
+}
+
+static void onLedgerPositionRemoveAddVelocity( vecsWorld* w, vecsEntity e, Position* )
+{
+    assert( g_eventLedger != nullptr );
+    g_eventLedger->record( "position.remove", e );
+    vecsSet<Velocity>( w, e, { 3.0f, 4.0f } );
+}
+
+static void onLedgerVelocityAdd( vecsWorld*, vecsEntity e, Velocity* )
+{
+    assert( g_eventLedger != nullptr );
+    g_eventLedger->record( "velocity.add", e );
+}
+
+static void onLedgerPositionAddQueueDeferred( vecsWorld*, vecsEntity e, Position* )
+{
+    assert( g_eventLedger != nullptr );
+    g_eventLedger->record( "position.add", e );
+    assert( g_eventCommandBuffer != nullptr );
+    vecsCmdSet<Dead>( g_eventCommandBuffer, e, {} );
+}
+
+UTEST( query, boundary_geometry_sweep_exact_sets )
+{
+    enum Layout : uint32_t
+    {
+        Layout_Checkerboard,
+        Layout_OnePerL2,
+        Layout_OnePerTop,
+        Layout_LastOnly
+    };
+
+    const std::vector<uint32_t> counts = vecsTestBoundaryCounts();
+    for ( uint32_t count : counts )
+    {
+        for ( uint32_t layout = 0; layout < 4u; layout++ )
+        {
+            vecsWorld* w = vecsCreateWorld( count );
+            for ( uint32_t i = 0; i < count; i++ )
+            {
+                vecsEntity e = vecsCreate( w );
+                vecsSet<Position>( w, e, { ( float )i, ( float )layout } );
+
+                bool matched = false;
+                switch ( layout )
+                {
+                    case Layout_Checkerboard: matched = ( i & 1u ) == 0u; break;
+                    case Layout_OnePerL2: matched = ( i % 64u ) == 0u; break;
+                    case Layout_OnePerTop: matched = ( i % vecsTestTopSpan() ) == 0u; break;
+                    case Layout_LastOnly: matched = ( i + 1u ) == count; break;
+                    default: break;
+                }
+
+                if ( matched )
+                {
+                    vecsSet<Velocity>( w, e, { ( float )( i + 1u ), 1.0f } );
+                }
+            }
+
+            std::vector<vecsEntity> eachEntities = vecsCollectEachEntities<Position, Velocity>( w );
+            vecsQuery* q = vecsBuildQuery<Position, Velocity>( w );
+            std::vector<vecsEntity> cachedEntities = vecsCollectQueryEntities<Position, Velocity>( w, q );
+            std::vector<vecsEntity> freshChunkEntities = vecsCollectFreshChunkEntities<Position, Velocity>( w, q, 31u );
+
+            ASSERT_TRUE( vecsAssertEntitySetsEqual( eachEntities, cachedEntities ) );
+            ASSERT_TRUE( vecsAssertEntitySetsEqual( eachEntities, freshChunkEntities ) );
+
+            const vecsEntity expectedFirst = eachEntities.empty() ? VECS_INVALID_ENTITY : eachEntities.front();
+            const vecsEntity firstEach = vecsFirstMatch<Position, Velocity>( w );
+            const vecsEntity firstCached = vecsQueryFirstMatch<Position, Velocity>( w, q );
+            ASSERT_EQ( firstEach, expectedFirst );
+            ASSERT_EQ( firstCached, expectedFirst );
+            ASSERT_EQ( freshChunkEntities.empty() ? VECS_INVALID_ENTITY : freshChunkEntities.front(), expectedFirst );
+            ASSERT_TRUE( vecsValidate( w ) );
+
+            vecsDestroyQuery( q );
+            vecsDestroyWorld( w );
+        }
+    }
+}
+
+UTEST( query, cold_build_alias_and_seeded_shadow_replay )
+{
+    const uint32_t seeds[] = { 0xC0FFEEu, 0x1234567u, 0xBAD5EEDu };
+    for ( uint32_t seed : seeds )
+    {
+        vecsWorld* w = vecsCreateWorld( vecsTestClampEntities( 1024u ) );
+
+        vecsQuery* qPos = vecsBuildQuery<Position>( w );
+        vecsQueryAddOptional( qPos, vecsTypeId<Velocity>() );
+        vecsQueryAddOptional( qPos, vecsTypeId<Health>() );
+        vecsQueryAddWithout( qPos, vecsTypeId<Dead>() );
+
+        vecsQuery* qPosVel = vecsBuildQuery<Position, Velocity>( w );
+        vecsQueryAddWithout( qPosVel, vecsTypeId<Dead>() );
+
+        vecsQuery* qHealth = vecsBuildQuery<Health>( w );
+        vecsQueryAddOptional( qHealth, vecsTypeId<Position>() );
+        vecsQueryAddWithout( qHealth, vecsTypeId<Dead>() );
+
+        auto compareQueries = [&]()
+        {
+            vecsQuery* freshPos = vecsBuildQuery<Position>( w );
+            vecsQueryAddOptional( freshPos, vecsTypeId<Velocity>() );
+            vecsQueryAddOptional( freshPos, vecsTypeId<Health>() );
+            vecsQueryAddWithout( freshPos, vecsTypeId<Dead>() );
+
+            vecsQuery* freshPosVel = vecsBuildQuery<Position, Velocity>( w );
+            vecsQueryAddWithout( freshPosVel, vecsTypeId<Dead>() );
+
+            vecsQuery* freshHealth = vecsBuildQuery<Health>( w );
+            vecsQueryAddOptional( freshHealth, vecsTypeId<Position>() );
+            vecsQueryAddWithout( freshHealth, vecsTypeId<Dead>() );
+
+            const std::vector<vecsEntity> expectedPos = vecsCollectQueryEntities<Position>( w, freshPos );
+            const std::vector<vecsEntity> expectedPosVel = vecsCollectQueryEntities<Position, Velocity>( w, freshPosVel );
+            const std::vector<vecsEntity> expectedHealth = vecsCollectQueryEntities<Health>( w, freshHealth );
+
+            ASSERT_TRUE( vecsAssertEntitySetsEqual( expectedPos, vecsCollectQueryEntities<Position>( w, qPos ) ) );
+            ASSERT_TRUE( vecsAssertEntitySetsEqual( expectedPosVel, vecsCollectQueryEntities<Position, Velocity>( w, qPosVel ) ) );
+            ASSERT_TRUE( vecsAssertEntitySetsEqual( expectedPosVel, vecsCollectFreshChunkEntities<Position, Velocity>( w, qPosVel, 17u ) ) );
+            ASSERT_TRUE( vecsAssertEntitySetsEqual( expectedHealth, vecsCollectQueryEntities<Health>( w, qHealth ) ) );
+
+            const vecsEntity expectedFirst = expectedPosVel.empty() ? VECS_INVALID_ENTITY : expectedPosVel.front();
+            const vecsEntity firstCached = vecsQueryFirstMatch<Position, Velocity>( w, qPosVel );
+            ASSERT_EQ( firstCached, expectedFirst );
+
+            ASSERT_TRUE( vecsValidate( w ) );
+
+            vecsDestroyQuery( freshPos );
+            vecsDestroyQuery( freshPosVel );
+            vecsDestroyQuery( freshHealth );
+        };
+
+        compareQueries();
+
+        SeededOpStream stream( seed );
+        for ( uint32_t step = 0; step < 384u; step++ )
+        {
+            std::vector<vecsEntity> alive = vecsCollectAliveHandles( w );
+            const uint32_t op = stream.nextBounded( 11u );
+
+            switch ( op )
+            {
+                case 0:
+                    if ( vecsCount( w ) < w->maxEntities )
+                    {
+                        ( void )vecsCreate( w );
+                    }
+                    break;
+                case 1:
+                    if ( !alive.empty() )
+                    {
+                        vecsEntity e = alive[stream.nextBounded( ( uint32_t )alive.size() )];
+                        Position value = { stream.nextFloat( 100.0f ), stream.nextFloat( 100.0f ) };
+                        vecsSet<Position>( w, e, value );
+                    }
+                    break;
+                case 2:
+                    if ( !alive.empty() )
+                    {
+                        vecsEntity e = alive[stream.nextBounded( ( uint32_t )alive.size() )];
+                        if ( vecsHas<Position>( w, e ) )
+                        {
+                            vecsUnset<Position>( w, e );
+                        }
+                    }
+                    break;
+                case 3:
+                    if ( !alive.empty() )
+                    {
+                        vecsEntity e = alive[stream.nextBounded( ( uint32_t )alive.size() )];
+                        Velocity value = { stream.nextFloat( 50.0f ), stream.nextFloat( 50.0f ) };
+                        vecsSet<Velocity>( w, e, value );
+                    }
+                    break;
+                case 4:
+                    if ( !alive.empty() )
+                    {
+                        vecsEntity e = alive[stream.nextBounded( ( uint32_t )alive.size() )];
+                        if ( vecsHas<Velocity>( w, e ) )
+                        {
+                            vecsUnset<Velocity>( w, e );
+                        }
+                    }
+                    break;
+                case 5:
+                    if ( !alive.empty() )
+                    {
+                        vecsEntity e = alive[stream.nextBounded( ( uint32_t )alive.size() )];
+                        Health value = { ( int )( stream.next() & 0x7FFFu ) };
+                        vecsEmplace<Health>( w, e, value.hp );
+                    }
+                    break;
+                case 6:
+                    if ( !alive.empty() )
+                    {
+                        vecsEntity e = alive[stream.nextBounded( ( uint32_t )alive.size() )];
+                        if ( vecsHas<Health>( w, e ) )
+                        {
+                            vecsUnset<Health>( w, e );
+                        }
+                    }
+                    break;
+                case 7:
+                    if ( !alive.empty() )
+                    {
+                        vecsEntity e = alive[stream.nextBounded( ( uint32_t )alive.size() )];
+                        if ( vecsHas<Dead>( w, e ) )
+                        {
+                            vecsUnset<Dead>( w, e );
+                        }
+                        else
+                        {
+                            vecsAddTag<Dead>( w, e );
+                        }
+                    }
+                    break;
+                case 8:
+                    if ( !alive.empty() )
+                    {
+                        vecsEntity doomed = alive[stream.nextBounded( ( uint32_t )alive.size() )];
+                        vecsDestroy( w, doomed );
+                    }
+                    break;
+                case 9:
+                    if ( !alive.empty() && vecsCount( w ) < w->maxEntities )
+                    {
+                        vecsEntity src = alive[stream.nextBounded( ( uint32_t )alive.size() )];
+                        ( void )vecsClone( w, src );
+                    }
+                    break;
+                case 10:
+                    if ( stream.oneIn( 7u ) )
+                    {
+                        vecsClearWorld( w );
+                    }
+                    else if ( stream.oneIn( 2u ) && !alive.empty() )
+                    {
+                        const uint32_t counts[] = { 1u, 4u, 17u };
+                        const uint32_t requested = counts[stream.nextBounded( 3u )];
+                        const uint32_t room = w->maxEntities - vecsCount( w );
+                        const uint32_t batchCount = requested < room ? requested : room;
+                        if ( batchCount > 0u )
+                        {
+                            vecsEntity prefab = alive[stream.nextBounded( ( uint32_t )alive.size() )];
+                            std::vector<vecsEntity> spawned( batchCount, VECS_INVALID_ENTITY );
+                            vecsInstantiateBatch( w, prefab, spawned.data(), batchCount );
+                        }
+                    }
+                    else
+                    {
+                        const int singletonValue = ( int )( stream.next() & 0xFFFFu );
+                        vecsSetSingleton<ShadowSingletonValue>( w, { singletonValue } );
+                    }
+                    break;
+                default:
+                    break;
+            }
+
+            if ( ( step % 32u ) == 0u )
+            {
+                compareQueries();
+            }
+        }
+
+        compareQueries();
+        vecsDestroyQuery( qPos );
+        vecsDestroyQuery( qPosVel );
+        vecsDestroyQuery( qHealth );
+        vecsDestroyWorld( w );
+    }
+}
+
+UTEST( observer, reentrancy_and_ordering_matrix )
+{
+    EventLedger ledger;
+    g_eventLedger = &ledger;
+
+    {
+        vecsWorld* w = vecsCreateWorld( 32u );
+        vecsOnAdd<Position>( w, onLedgerPositionAddSelfUnset );
+        vecsOnRemove<Position>( w, onLedgerPositionRemove );
+
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { 1.0f, 2.0f } );
+
+        ASSERT_EQ( ledger.events.size(), 2u );
+        ASSERT_EQ( std::string( ledger.events[0].label ), "position.add" );
+        ASSERT_EQ( std::string( ledger.events[1].label ), "position.remove" );
+        ASSERT_FALSE( vecsHas<Position>( w, e ) );
+        ASSERT_TRUE( vecsValidate( w ) );
+        vecsDestroyWorld( w );
+    }
+
+    ledger.clear();
+    {
+        vecsWorld* w = vecsCreateWorld( 32u );
+        vecsOnAdd<Health>( w, onLedgerHealthAddOverwrite );
+
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Health>( w, e, { 100 } );
+        vecsSet<Health>( w, e, { 300 } );
+
+        ASSERT_EQ( ledger.events.size(), 1u );
+        ASSERT_EQ( vecsGet<Health>( w, e )->hp, 300 );
+        ASSERT_TRUE( vecsValidate( w ) );
+        vecsDestroyWorld( w );
+    }
+
+    ledger.clear();
+    {
+        vecsWorld* w = vecsCreateWorld( 32u );
+        vecsOnRemove<Position>( w, onLedgerPositionRemoveAddVelocity );
+        vecsOnAdd<Velocity>( w, onLedgerVelocityAdd );
+
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { 3.0f, 3.0f } );
+        vecsUnset<Position>( w, e );
+
+        ASSERT_EQ( ledger.events.size(), 2u );
+        ASSERT_EQ( std::string( ledger.events[0].label ), "position.remove" );
+        ASSERT_EQ( std::string( ledger.events[1].label ), "velocity.add" );
+        ASSERT_TRUE( vecsHas<Velocity>( w, e ) );
+        ASSERT_TRUE( vecsValidate( w ) );
+        vecsDestroyWorld( w );
+    }
+
+    ledger.clear();
+    {
+        vecsWorld* w = vecsCreateWorld( 32u );
+        vecsOnRemove<Health>( w, onLedgerHealthRemoveDestroySibling );
+
+        vecsEntity victim = vecsCreate( w );
+        g_eventSibling = vecsCreate( w );
+        vecsSet<Health>( w, victim, { 12 } );
+        vecsUnset<Health>( w, victim );
+
+        ASSERT_EQ( ledger.events.size(), 1u );
+        ASSERT_FALSE( vecsAlive( w, g_eventSibling ) );
+        ASSERT_TRUE( vecsValidate( w ) );
+        vecsDestroyWorld( w );
+        g_eventSibling = VECS_INVALID_ENTITY;
+    }
+
+    ledger.clear();
+    {
+        vecsWorld* w = vecsCreateWorld( 32u );
+        vecsCommandBuffer* cb = vecsCreateCommandBuffer( w );
+        g_eventCommandBuffer = cb;
+        vecsOnAdd<Position>( w, onLedgerPositionAddQueueDeferred );
+
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { 9.0f, 9.0f } );
+        vecsFlush( cb );
+
+        ASSERT_EQ( ledger.events.size(), 1u );
+        ASSERT_TRUE( vecsHas<Dead>( w, e ) );
+        ASSERT_TRUE( vecsValidate( w ) );
+
+        g_eventCommandBuffer = nullptr;
+        vecsDestroyCommandBuffer( cb );
+        vecsDestroyWorld( w );
+    }
+
+    g_eventLedger = nullptr;
+}
+
+UTEST( cmdbuf, reuse_lifetime_and_payload_growth )
+{
+    LifetimeTracker::reset();
+
+    vecsWorld* w = vecsCreateWorld( 256u );
+    vecsEntity trackerEntity = vecsCreate( w );
+    vecsCommandBuffer* cb = vecsCreateCommandBuffer( w );
+    std::vector<vecsEntity> createdHandles;
+    createdHandles.reserve( 100u );
+
+    for ( uint32_t cycle = 0; cycle < 100u; cycle++ )
+    {
+        uint32_t createdIndex = vecsCmdCreate( cb );
+        ASSERT_EQ( createdIndex, cycle );
+
+        switch ( cycle % 9u )
+        {
+            case 0: vecsCmdSetCreated<CmdPayload<63, 1>>( cb, createdIndex, vecsMakeCmdPayload<63, 1>( cycle ) ); break;
+            case 1: vecsCmdSetCreated<CmdPayload<64, 8>>( cb, createdIndex, vecsMakeCmdPayload<64, 8>( cycle ) ); break;
+            case 2: vecsCmdSetCreated<CmdPayload<65, 64>>( cb, createdIndex, vecsMakeCmdPayload<65, 64>( cycle ) ); break;
+            case 3: vecsCmdSetCreated<CmdPayload<255, 1>>( cb, createdIndex, vecsMakeCmdPayload<255, 1>( cycle ) ); break;
+            case 4: vecsCmdSetCreated<CmdPayload<256, 8>>( cb, createdIndex, vecsMakeCmdPayload<256, 8>( cycle ) ); break;
+            case 5: vecsCmdSetCreated<CmdPayload<257, 64>>( cb, createdIndex, vecsMakeCmdPayload<257, 64>( cycle ) ); break;
+            case 6: vecsCmdSetCreated<CmdPayload<511, 1>>( cb, createdIndex, vecsMakeCmdPayload<511, 1>( cycle ) ); break;
+            case 7: vecsCmdSetCreated<CmdPayload<512, 8>>( cb, createdIndex, vecsMakeCmdPayload<512, 8>( cycle ) ); break;
+            case 8: vecsCmdSetCreated<CmdPayload<513, 64>>( cb, createdIndex, vecsMakeCmdPayload<513, 64>( cycle ) ); break;
+            default: break;
+        }
+
+        vecsCmdSet<LifetimeTracker>( cb, trackerEntity, LifetimeTracker( ( int )cycle ) );
+        if ( ( cycle % 3u ) == 2u )
+        {
+            vecsCmdUnset<LifetimeTracker>( cb, trackerEntity );
+        }
+
+        vecsFlush( cb );
+        vecsEntity created = vecsCmdGetCreated( cb, createdIndex );
+        ASSERT_TRUE( vecsAlive( w, created ) );
+        createdHandles.push_back( created );
+
+        for ( uint32_t i = 0; i <= cycle; i++ )
+        {
+            ASSERT_EQ( vecsCmdGetCreated( cb, i ), createdHandles[i] );
+        }
+
+        switch ( cycle % 9u )
+        {
+            case 0: { const bool payloadOk = vecsAssertCmdPayload<63, 1>( w, created, cycle ); ASSERT_TRUE( payloadOk ); } break;
+            case 1: { const bool payloadOk = vecsAssertCmdPayload<64, 8>( w, created, cycle ); ASSERT_TRUE( payloadOk ); } break;
+            case 2: { const bool payloadOk = vecsAssertCmdPayload<65, 64>( w, created, cycle ); ASSERT_TRUE( payloadOk ); } break;
+            case 3: { const bool payloadOk = vecsAssertCmdPayload<255, 1>( w, created, cycle ); ASSERT_TRUE( payloadOk ); } break;
+            case 4: { const bool payloadOk = vecsAssertCmdPayload<256, 8>( w, created, cycle ); ASSERT_TRUE( payloadOk ); } break;
+            case 5: { const bool payloadOk = vecsAssertCmdPayload<257, 64>( w, created, cycle ); ASSERT_TRUE( payloadOk ); } break;
+            case 6: { const bool payloadOk = vecsAssertCmdPayload<511, 1>( w, created, cycle ); ASSERT_TRUE( payloadOk ); } break;
+            case 7: { const bool payloadOk = vecsAssertCmdPayload<512, 8>( w, created, cycle ); ASSERT_TRUE( payloadOk ); } break;
+            case 8: { const bool payloadOk = vecsAssertCmdPayload<513, 64>( w, created, cycle ); ASSERT_TRUE( payloadOk ); } break;
+            default: break;
+        }
+    }
+
+    ASSERT_EQ( cb->createdCount, 100u );
+    ASSERT_TRUE( cb->dataCapacity >= 1024u );
+    if ( vecsHas<LifetimeTracker>( w, trackerEntity ) )
+    {
+        vecsUnset<LifetimeTracker>( w, trackerEntity );
+    }
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyCommandBuffer( cb );
+    vecsDestroyWorld( w );
+    ASSERT_EQ( LifetimeTracker::liveCount.load( std::memory_order_relaxed ), 0 );
+}
+
+UTEST( threading, exact_once_chunk_partitioning_matrix )
+{
+    const uint32_t worldCapacity = ( VECS_MAX_ENTITIES > 12288u ) ? 12288u : ( uint32_t )VECS_MAX_ENTITIES;
+    vecsWorld* w = vecsCreateWorld( worldCapacity );
+
+    for ( uint32_t i = 0; i < worldCapacity; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        const bool hot = i < 64u || ( i >= worldCapacity / 2u && i < ( worldCapacity / 2u ) + 64u ) || i >= ( worldCapacity > 128u ? worldCapacity - 64u : 0u );
+        if ( hot || ( i % 5u ) == 0u )
+        {
+            vecsSet<Position>( w, e, { ( float )i, 1.0f } );
+        }
+    }
+
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    const std::vector<vecsEntity> expected = vecsCollectQueryEntities<Position>( w, q );
+    const uint32_t workerCounts[] = { 1u, 2u, 3u, 4u, 5u, 7u, 8u, 16u, 31u };
+
+    for ( uint32_t workers : workerCounts )
+    {
+        std::vector<vecsQueryChunk> chunks( workers );
+        uint32_t chunkCount = vecsQueryGetChunks( w, q, chunks.data(), workers );
+        ChunkCoverageBitmap seen( w->maxEntities );
+        std::atomic<uint32_t> touched = 0u;
+        std::vector<std::thread> threads;
+        threads.reserve( chunkCount );
+
+        for ( uint32_t i = 0; i < chunkCount; i++ )
+        {
+            threads.emplace_back( [&, i]()
+            {
+                vecsQuery* localQuery = vecsBuildQuery<Position>( w );
+                vecsQueryExecuteChunk<Position>( w, localQuery, &chunks[i], [&]( vecsEntity e, Position& )
+                {
+                    seen.mark( e );
+                    touched.fetch_add( 1u, std::memory_order_relaxed );
+                } );
+                vecsDestroyQuery( localQuery );
+            } );
+        }
+
+        for ( std::thread& thread : threads )
+        {
+            thread.join();
+        }
+
+        ASSERT_EQ( touched.load( std::memory_order_relaxed ), ( uint32_t )expected.size() );
+        for ( vecsEntity e : expected )
+        {
+            ASSERT_EQ( seen.count( vecsEntityIndex( e ) ), 1u );
+        }
+        for ( uint32_t index = 0; index < w->maxEntities; index++ )
+        {
+            if ( w->entities->allocated[index] == 0u || !vecsPoolHas( w->pools[vecsTypeId<Position>()], index ) )
+            {
+                ASSERT_EQ( seen.count( index ), 0u );
+            }
+        }
+    }
+
+    ASSERT_TRUE( vecsValidate( w ) );
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( world, clear_world_regeneration_preserves_caches )
+{
+    EventLedger ledger;
+    g_eventLedger = &ledger;
+
+    vecsWorld* w = vecsCreateWorld( 128u );
+    ShadowWorld shadow;
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    vecsQueryAddWithout( q, vecsTypeId<Dead>() );
+    vecsOnAdd<Position>( w, onLedgerPositionRemove );
+
+    vecsEntity parent = vecsCreate( w );
+    vecsEntity child = vecsCreate( w );
+    shadow.create( parent );
+    shadow.create( child );
+    vecsSet<Position>( w, parent, { 1.0f, 0.0f } );
+    vecsSet<Position>( w, child, { 2.0f, 0.0f } );
+    vecsSetChildOf( w, child, parent );
+    vecsSetSingleton<ShadowSingletonValue>( w, { 77 } );
+    shadow.setPosition( parent, { 1.0f, 0.0f } );
+    shadow.setPosition( child, { 2.0f, 0.0f } );
+    shadow.setParent( child, parent );
+    shadow.setSingleton( 77 );
+
+    vecsCommandBuffer* cb = vecsCreateCommandBuffer( w );
+    vecsCmdSet<Dead>( cb, child, {} );
+    vecsFlush( cb );
+    shadow.setDead( child, true );
+
+    ASSERT_TRUE( vecsAssertEntitySetsEqual( shadow.collect( []( const ShadowWorld::EntityState& state ) { return state.hasPosition && !state.hasDead; } ), vecsCollectQueryEntities<Position>( w, q ) ) );
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    const vecsEntity oldParent = parent;
+    vecsClearWorld( w );
+    shadow.clear();
+    ASSERT_TRUE( vecsAssertEntitySetsEqual( std::vector<vecsEntity>{}, vecsCollectQueryEntities<Position>( w, q ) ) );
+    ASSERT_FALSE( vecsAlive( w, oldParent ) );
+    ASSERT_TRUE( vecsGetSingleton<ShadowSingletonValue>( w ) == nullptr );
+
+    parent = vecsCreate( w );
+    child = vecsCreate( w );
+    shadow.create( parent );
+    shadow.create( child );
+    vecsSet<Position>( w, parent, { 10.0f, 1.0f } );
+    vecsSet<Position>( w, child, { 11.0f, 1.0f } );
+    vecsSetChildOf( w, child, parent );
+    shadow.setPosition( parent, { 10.0f, 1.0f } );
+    shadow.setPosition( child, { 11.0f, 1.0f } );
+    shadow.setParent( child, parent );
+
+    vecsCmdUnset<Dead>( cb, child );
+    vecsCmdSet<Velocity>( cb, child, { 5.0f, 6.0f } );
+    vecsFlush( cb );
+    shadow.setVelocity( child, { 5.0f, 6.0f } );
+
+    ASSERT_TRUE( shadow.matchesWorld( w ) );
+    ASSERT_TRUE( vecsEntityIndex( parent ) == vecsEntityIndex( oldParent ) ? vecsEntityGeneration( parent ) > vecsEntityGeneration( oldParent ) : true );
+    ASSERT_TRUE( vecsAssertEntitySetsEqual( shadow.collect( []( const ShadowWorld::EntityState& state ) { return state.hasPosition && !state.hasDead; } ), vecsCollectQueryEntities<Position>( w, q ) ) );
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyCommandBuffer( cb );
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+    g_eventLedger = nullptr;
+}
 
 // 1. Tags
 struct SoupTagA {};
@@ -3483,6 +4912,7 @@ struct SoupExpectedFlags {
     bool cString, cVector, cMap;
 };
 
+#if defined( VECS_ENABLE_STRESS_TESTS )
 UTEST( vecs, big_soup_stress_test )
 {
     vecsWorld* w = vecsCreateWorld( 60000 );
@@ -3700,6 +5130,7 @@ UTEST( vecs, big_soup_stress_test )
     vecsDestroyCommandBuffer( cb );
     vecsDestroyWorld( w );
 }
+#endif
 
 UTEST( edge_case, leaked_tags_on_entity_reuse )
 {
@@ -3780,6 +5211,7 @@ UTEST( validation, captures_corruption )
     vecsDestroyWorld( w );
 }
 
+#if defined( VECS_ENABLE_STRESS_TESTS )
 UTEST( chaos, deferred_interdependent_commands )
 {
     vecsWorld* w = vecsCreateWorld( 1024u );
@@ -4618,6 +6050,311 @@ UTEST( chaos, destruction_reparenting_recursion_hell )
 
     g_reparentTarget = VECS_INVALID_ENTITY;
     vecsDestroyWorld( w );
+}
+#endif
+
+UTEST( world, capacity_normalization_release_safe )
+{
+#if !defined( NDEBUG )
+    return;
+#else
+    vecsWorld* zero = vecsCreateWorld( 0u );
+    ASSERT_TRUE( zero != nullptr );
+    ASSERT_EQ( zero->maxEntities, 1u );
+    vecsEntity only = vecsCreate( zero );
+    ASSERT_TRUE( vecsAlive( zero, only ) );
+    ASSERT_EQ( vecsEntityIndex( only ), 0u );
+    ASSERT_EQ( vecsCreate( zero ), VECS_INVALID_ENTITY );
+    vecsDestroy( zero, only );
+    ASSERT_TRUE( vecsValidate( zero ) );
+    vecsDestroyWorld( zero );
+
+    vecsWorld* clamped = vecsCreateWorld( VECS_MAX_ENTITIES + 17u );
+    ASSERT_TRUE( clamped != nullptr );
+    ASSERT_EQ( clamped->maxEntities, ( uint32_t )VECS_MAX_ENTITIES );
+    vecsEntity last = VECS_INVALID_ENTITY;
+    for ( uint32_t i = 0; i < clamped->maxEntities; i++ )
+    {
+        last = vecsCreate( clamped );
+    }
+    ASSERT_TRUE( vecsAlive( clamped, last ) );
+    ASSERT_EQ( vecsEntityIndex( last ), clamped->maxEntities - 1u );
+    ASSERT_EQ( vecsCreate( clamped ), VECS_INVALID_ENTITY );
+    ASSERT_TRUE( vecsSet<Position>( clamped, last, { 9.0f, 3.0f } ) != nullptr );
+    vecsDestroy( clamped, last );
+    ASSERT_FALSE( vecsAlive( clamped, last ) );
+    ASSERT_TRUE( vecsValidate( clamped ) );
+    vecsDestroyWorld( clamped );
+#endif
+}
+
+UTEST( entity, component_id_overflow_fail_safe_release )
+{
+#if !defined( NDEBUG )
+    return;
+#else
+    const uint32_t savedCounter = vecsGetTypeIdCounter();
+    vecsSetTypeIdCounter( VECS_MAX_COMPONENTS );
+
+    const uint32_t overflowPodId = vecsTypeId<OverflowPod>();
+    const uint32_t overflowTagId = vecsTypeId<OverflowTag>();
+    ASSERT_GE( overflowPodId, ( uint32_t )VECS_MAX_COMPONENTS );
+    ASSERT_GE( overflowTagId, ( uint32_t )VECS_MAX_COMPONENTS );
+
+    vecsWorld* w = vecsCreateWorld( 8u );
+    vecsEntity e = vecsCreate( w );
+    ASSERT_TRUE( vecsSet<Position>( w, e, { 1.0f, 2.0f } ) != nullptr );
+
+    const uint32_t observerCount = w->observers->count;
+    g_overflowOnAddCount = 0;
+    g_overflowOnRemoveCount = 0;
+
+    ASSERT_TRUE( vecsEnsurePool<OverflowPod>( w ) == nullptr );
+    ASSERT_TRUE( vecsSet<OverflowPod>( w, e, { 7 } ) == nullptr );
+    ASSERT_TRUE( vecsGet<OverflowPod>( w, e ) == nullptr );
+    ASSERT_FALSE( vecsHas<OverflowPod>( w, e ) );
+    ASSERT_TRUE( vecsEmplace<OverflowPod>( w, e ) == nullptr );
+    vecsAddTag<OverflowTag>( w, e );
+    ASSERT_FALSE( vecsHas<OverflowTag>( w, e ) );
+    ASSERT_TRUE( vecsSetSingleton<OverflowPod>( w, { 11 } ) == nullptr );
+    ASSERT_TRUE( vecsGetSingleton<OverflowPod>( w ) == nullptr );
+
+    vecsOnAdd<OverflowPod>( w, onOverflowPodAdd );
+    vecsOnRemove<OverflowPod>( w, onOverflowPodRemove );
+    ASSERT_EQ( w->observers->count, observerCount );
+
+    vecsUnset<OverflowPod>( w, e );
+    vecsRemoveAll<OverflowPod, OverflowTag>( w, e );
+
+    ASSERT_EQ( g_overflowOnAddCount, 0 );
+    ASSERT_EQ( g_overflowOnRemoveCount, 0 );
+    ASSERT_TRUE( vecsHas<Position>( w, e ) );
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyWorld( w );
+    vecsSetTypeIdCounter( savedCounter );
+#endif
+}
+
+UTEST( query, component_id_overflow_semantics_release )
+{
+#if !defined( NDEBUG )
+    return;
+#else
+    const uint32_t savedCounter = vecsGetTypeIdCounter();
+    vecsSetTypeIdCounter( VECS_MAX_COMPONENTS );
+
+    const uint32_t overflowPodId = vecsTypeId<OverflowPod>();
+    const uint32_t overflowAltId = vecsTypeId<OverflowPodAlt>();
+    ASSERT_GE( overflowPodId, ( uint32_t )VECS_MAX_COMPONENTS );
+    ASSERT_GE( overflowAltId, ( uint32_t )VECS_MAX_COMPONENTS );
+
+    vecsWorld* w = vecsCreateWorld( 32u );
+    vecsEntity e1 = vecsCreate( w );
+    vecsEntity e2 = vecsCreate( w );
+    vecsSet<Position>( w, e1, { 1.0f, 0.0f } );
+    vecsSet<Position>( w, e2, { 2.0f, 0.0f } );
+
+    vecsQuery* impossible = vecsBuildQuery<Position, OverflowPod>( w );
+    uint32_t impossibleCount = 0u;
+    vecsQueryEach<Position>( w, impossible, [&]( vecsEntity, Position& )
+    {
+        impossibleCount++;
+    } );
+    ASSERT_EQ( impossibleCount, 0u );
+    ASSERT_EQ( vecsQueryFirstMatch<Position>( w, impossible ), VECS_INVALID_ENTITY );
+    ASSERT_EQ( vecsFirstMatch<Position, OverflowPod>( w ), VECS_INVALID_ENTITY );
+
+    vecsQueryChunk chunks[2] = {};
+    ASSERT_EQ( vecsQueryGetChunks( w, impossible, chunks, 2u ), 0u );
+    chunks[0].count = 1u;
+    chunks[0].activeTi[0] = 0u;
+    vecsQueryExecuteChunk<Position>( w, impossible, &chunks[0], [&]( vecsEntity, Position& )
+    {
+        impossibleCount++;
+    } );
+    ASSERT_EQ( impossibleCount, 0u );
+    vecsDestroyQuery( impossible );
+
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    const std::vector<vecsEntity> baseline = vecsCollectQueryEntities<Position>( w, q );
+    vecsQueryAddWithout( q, overflowAltId );
+    vecsQueryAddOptional( q, overflowAltId );
+    vecsQueryMarkRead( q, overflowAltId );
+    vecsQueryMarkWrite( q, overflowAltId );
+    ASSERT_FALSE( vecsQueryReads( q, overflowAltId ) );
+    ASSERT_FALSE( vecsQueryWrites( q, overflowAltId ) );
+    ASSERT_TRUE( vecsAssertEntitySetsEqual( baseline, vecsCollectQueryEntities<Position>( w, q ) ) );
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+    vecsSetTypeIdCounter( savedCounter );
+#endif
+}
+
+UTEST( cmdbuf, component_id_overflow_skips_invalid_ops_release )
+{
+#if !defined( NDEBUG )
+    return;
+#else
+    const uint32_t savedCounter = vecsGetTypeIdCounter();
+    vecsSetTypeIdCounter( VECS_MAX_COMPONENTS );
+
+    const uint32_t overflowPodId = vecsTypeId<OverflowPod>();
+    const uint32_t overflowTagId = vecsTypeId<OverflowTagAlt>();
+    ASSERT_GE( overflowPodId, ( uint32_t )VECS_MAX_COMPONENTS );
+    ASSERT_GE( overflowTagId, ( uint32_t )VECS_MAX_COMPONENTS );
+
+    vecsWorld* w = vecsCreateWorld( 16u );
+    vecsEntity e = vecsCreate( w );
+    vecsCommandBuffer* cb = vecsCreateCommandBuffer( w );
+
+    vecsCmdSet<Position>( cb, e, { 4.0f, 5.0f } );
+    const uint32_t afterValidSet = cb->commandCount;
+    vecsCmdSet<OverflowPod>( cb, e, { 77 } );
+    vecsCmdSet<OverflowTagAlt>( cb, e, {} );
+    vecsCmdUnset<OverflowPod>( cb, e );
+    ASSERT_EQ( cb->commandCount, afterValidSet );
+
+    const uint32_t createdIndex = vecsCmdCreate( cb );
+    const uint32_t afterCreate = cb->commandCount;
+    vecsCmdSetCreated<OverflowPod>( cb, createdIndex, { 88 } );
+    ASSERT_EQ( cb->commandCount, afterCreate );
+    vecsCmdSetCreated<Velocity>( cb, createdIndex, { 6.0f, 7.0f } );
+
+    vecsFlush( cb );
+
+    ASSERT_TRUE( vecsHas<Position>( w, e ) );
+    ASSERT_FALSE( vecsHas<OverflowPod>( w, e ) );
+    ASSERT_FALSE( vecsHas<OverflowTagAlt>( w, e ) );
+
+    vecsEntity created = vecsCmdGetCreated( cb, createdIndex );
+    ASSERT_TRUE( vecsAlive( w, created ) );
+    ASSERT_TRUE( vecsHas<Velocity>( w, created ) );
+    ASSERT_FALSE( vecsHas<OverflowPod>( w, created ) );
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsDestroyCommandBuffer( cb );
+    vecsDestroyWorld( w );
+    vecsSetTypeIdCounter( savedCounter );
+#endif
+}
+
+UTEST( entity, component_id_word_boundary_sweep )
+{
+    ASSERT_EQ( vecsTypeId<Position>(), 0u );
+
+    const uint32_t savedCounter = vecsGetTypeIdCounter();
+    vecsWorld* w = vecsCreateWorld( 32u );
+    vecsEntity e = vecsCreate( w );
+    g_boundaryObserverCount = 0;
+
+    if ( VECS_MAX_COMPONENTS > 65u )
+    {
+        vecsSetTypeIdCounter( 63u );
+        const uint32_t tag63Id = vecsTypeId<BoundaryTag<63>>();
+        const uint32_t pod64Id = vecsTypeId<BoundaryPod<64>>();
+        const uint32_t complex65Id = vecsTypeId<BoundaryComplex<65>>();
+        ASSERT_EQ( tag63Id, 63u );
+        ASSERT_EQ( pod64Id, 64u );
+        ASSERT_EQ( complex65Id, 65u );
+
+        vecsOnAdd<BoundaryPod<64>>( w, onBoundaryPodAdd64 );
+        vecsAddTag<BoundaryTag<63>>( w, e );
+        vecsSet<BoundaryPod<64>>( w, e, { 64u } );
+        vecsSet<BoundaryComplex<65>>( w, e, { "sixty-five" } );
+
+        ASSERT_EQ( g_boundaryObserverCount, 1 );
+        ASSERT_TRUE( vecsHas<BoundaryTag<63>>( w, e ) );
+        ASSERT_TRUE( vecsHas<BoundaryPod<64>>( w, e ) );
+        ASSERT_TRUE( vecsHas<BoundaryComplex<65>>( w, e ) );
+
+        vecsUnset<BoundaryTag<63>>( w, e );
+        vecsUnset<BoundaryPod<64>>( w, e );
+        vecsUnset<BoundaryComplex<65>>( w, e );
+        ASSERT_FALSE( vecsHas<BoundaryTag<63>>( w, e ) );
+        ASSERT_FALSE( vecsHas<BoundaryPod<64>>( w, e ) );
+        ASSERT_FALSE( vecsHas<BoundaryComplex<65>>( w, e ) );
+    }
+
+    if ( VECS_MAX_COMPONENTS > 129u )
+    {
+        vecsSetTypeIdCounter( 127u );
+        const uint32_t tag127Id = vecsTypeId<BoundaryTag<127>>();
+        const uint32_t pod128Id = vecsTypeId<BoundaryPod<128>>();
+        const uint32_t complex129Id = vecsTypeId<BoundaryComplex<129>>();
+        ASSERT_EQ( tag127Id, 127u );
+        ASSERT_EQ( pod128Id, 128u );
+        ASSERT_EQ( complex129Id, 129u );
+
+        vecsAddTag<BoundaryTag<127>>( w, e );
+        vecsSet<BoundaryPod<128>>( w, e, { 128u } );
+        vecsSetSingleton<BoundaryPod<128>>( w, { 128u } );
+        ASSERT_TRUE( vecsGetSingleton<BoundaryPod<128>>( w ) != nullptr );
+        vecsClearWorld( w );
+        ASSERT_TRUE( vecsGetSingleton<BoundaryPod<128>>( w ) == nullptr );
+        e = vecsCreate( w );
+    }
+
+    if ( VECS_MAX_COMPONENTS > 193u )
+    {
+        vecsSetTypeIdCounter( 191u );
+        const uint32_t tag191Id = vecsTypeId<BoundaryTag<191>>();
+        const uint32_t pod192Id = vecsTypeId<BoundaryPod<192>>();
+        const uint32_t complex193Id = vecsTypeId<BoundaryComplex<193>>();
+        ASSERT_EQ( tag191Id, 191u );
+        ASSERT_EQ( pod192Id, 192u );
+        ASSERT_EQ( complex193Id, 193u );
+
+        vecsAddTag<BoundaryTag<191>>( w, e );
+        vecsSet<BoundaryPod<192>>( w, e, { 192u } );
+        vecsSet<BoundaryComplex<193>>( w, e, { "one-ninety-three" } );
+
+        vecsEntity old = e;
+        vecsDestroy( w, old );
+        e = vecsCreate( w );
+        ASSERT_EQ( vecsEntityIndex( e ), vecsEntityIndex( old ) );
+        ASSERT_FALSE( vecsHas<BoundaryTag<191>>( w, e ) );
+        ASSERT_FALSE( vecsHas<BoundaryPod<192>>( w, e ) );
+        ASSERT_FALSE( vecsHas<BoundaryComplex<193>>( w, e ) );
+    }
+
+    if ( VECS_MAX_COMPONENTS > 255u )
+    {
+        vecsSetTypeIdCounter( 255u );
+        const uint32_t tag255Id = vecsTypeId<BoundaryTag<255>>();
+        ASSERT_EQ( tag255Id, 255u );
+    }
+
+    ASSERT_TRUE( vecsValidate( w ) );
+    vecsDestroyWorld( w );
+    vecsSetTypeIdCounter( savedCounter );
+}
+
+UTEST( entity, component_id_exhaustion_boundary )
+{
+    uint32_t savedCounter = vecsGetTypeIdCounter();
+    vecsSetTypeIdCounter( VECS_MAX_COMPONENTS - 10 );
+
+    constexpr size_t kTypeCount = 10;
+    std::vector<uint32_t> ids( kTypeCount );
+    vecsCollectExhaustIds( ids.data(), std::make_index_sequence<kTypeCount>() );
+    for ( size_t i = 1; i < kTypeCount; i++ )
+    {
+        ASSERT_TRUE( ids[i] > ids[i - 1u] );
+    }
+
+    uint32_t overflowId = vecsTypeId<ExhaustComp<kTypeCount>>();
+    ASSERT_GE( overflowId, ( uint32_t )VECS_MAX_COMPONENTS );
+
+    vecsWorld* w = vecsCreateWorld( 16u );
+    vecsEntity e = vecsCreate( w );
+    uint32_t setCount = vecsTrySetExhaustComponents( w, e, std::make_index_sequence<kTypeCount>() );
+    ASSERT_TRUE( setCount <= 10u );
+    vecsDestroyWorld( w );
+
+    vecsSetTypeIdCounter( savedCounter );
 }
 
 UTEST_MAIN();

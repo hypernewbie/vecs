@@ -62,8 +62,23 @@
 #define VECS_L2_COUNT  ( VECS_MAX_ENTITIES / 64u )
 #define VECS_TOP_COUNT ( VECS_L2_COUNT / 64u )
 
+constexpr uint32_t VECS_SIGNATURE_WORDS = ( VECS_MAX_COMPONENTS + 63u ) / 64u;
 constexpr uint64_t VECS_INVALID_ENTITY = UINT64_MAX;
 constexpr uint32_t VECS_INVALID_INDEX  = UINT32_MAX;
+
+inline uint32_t vecsNormalizeWorldCapacity( uint32_t maxEntities )
+{
+    if ( maxEntities == 0u )
+    {
+        return 1u;
+    }
+    return maxEntities > VECS_MAX_ENTITIES ? ( uint32_t )VECS_MAX_ENTITIES : maxEntities;
+}
+
+inline bool vecsComponentIdValid( uint32_t componentId )
+{
+    return componentId < VECS_MAX_COMPONENTS;
+}
 
 // --------------------------------------------------------------------------
 // Bit Intrinsics
@@ -171,8 +186,8 @@ struct vecsEntityPool
     uint32_t* generations;
     uint8_t* allocated;
     uint32_t* freeList;
-    // 256-bit bitmask per entity. Makes destruction O(active_components) instead of O(total_types).
-    uint64_t* signatures[4];
+    // VECS_SIGNATURE_WORDS * 64-bit mask per entity. Makes destruction O(active_components) instead of O(total_types).
+    uint64_t* signatures[VECS_SIGNATURE_WORDS];
     uint32_t freeCount;
     uint32_t maxEntities;
     uint32_t alive;
@@ -189,7 +204,7 @@ inline vecsEntityPool* vecsCreateEntityPool( uint32_t maxEntities )
     assert( pool->allocated );
     assert( pool->freeList );
 
-    for ( uint32_t i = 0; i < 4; i++ )
+    for ( uint32_t i = 0; i < VECS_SIGNATURE_WORDS; i++ )
     {
         pool->signatures[i] = ( uint64_t* )std::calloc( maxEntities, sizeof( uint64_t ) );
         assert( pool->signatures[i] );
@@ -214,7 +229,7 @@ inline void vecsDestroyEntityPool( vecsEntityPool* pool )
     std::free( pool->allocated );
     std::free( pool->generations );
     std::free( pool->freeList );
-    for ( uint32_t i = 0; i < 4; i++ )
+    for ( uint32_t i = 0; i < VECS_SIGNATURE_WORDS; i++ )
     {
         std::free( pool->signatures[i] );
     }
@@ -659,6 +674,10 @@ inline void vecsAddObserver( vecsObserverList* list, uint32_t componentId, void 
     assert( list );
     assert( callback );
     assert( componentId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( componentId ) )
+    {
+        return;
+    }
     if ( list->count == list->capacity )
     {
         vecsObserverListGrow( list );
@@ -908,14 +927,17 @@ inline uint32_t vecsTypeId()
     return vecsTypeIdRaw<Raw>();
 }
 
+// Invalid capacities are normalized in Release builds: 0 becomes 1 and
+// oversized requests clamp to VECS_MAX_ENTITIES. Debug builds still assert.
 inline vecsWorld* vecsCreateWorld( uint32_t maxEntities = VECS_MAX_ENTITIES )
 {
     assert( maxEntities > 0u );
     assert( maxEntities <= VECS_MAX_ENTITIES );
+    const uint32_t normalizedMaxEntities = vecsNormalizeWorldCapacity( maxEntities );
     vecsWorld* world = ( vecsWorld* )std::malloc( sizeof( vecsWorld ) );
     assert( world );
-    world->entities = vecsCreateEntityPool( maxEntities );
-    world->maxEntities = maxEntities;
+    world->entities = vecsCreateEntityPool( normalizedMaxEntities );
+    world->maxEntities = normalizedMaxEntities;
     std::memset( world->pools, 0, sizeof( world->pools ) );
     std::memset( world->singletons, 0, sizeof( world->singletons ) );
     world->observers = ( vecsObserverList* )std::malloc( sizeof( vecsObserverList ) );
@@ -923,7 +945,7 @@ inline vecsWorld* vecsCreateWorld( uint32_t maxEntities = VECS_MAX_ENTITIES )
     world->observers->observers = nullptr;
     world->observers->count = 0;
     world->observers->capacity = 0;
-    world->relationships = vecsCreateRelationships( maxEntities );
+    world->relationships = vecsCreateRelationships( normalizedMaxEntities );
     return world;
 }
 
@@ -932,6 +954,10 @@ inline void vecsSetSignatureBit( vecsWorld* w, uint32_t entityIndex, uint32_t co
     assert( w );
     assert( entityIndex < w->maxEntities );
     assert( componentId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( componentId ) )
+    {
+        return;
+    }
     w->entities->signatures[componentId >> 6][entityIndex] |= ( 1ULL << ( componentId & 63u ) );
 }
 
@@ -940,6 +966,10 @@ inline void vecsClearSignatureBit( vecsWorld* w, uint32_t entityIndex, uint32_t 
     assert( w );
     assert( entityIndex < w->maxEntities );
     assert( componentId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( componentId ) )
+    {
+        return;
+    }
     w->entities->signatures[componentId >> 6][entityIndex] &= ~( 1ULL << ( componentId & 63u ) );
 }
 
@@ -947,6 +977,10 @@ inline void vecsNotifyObservers( vecsWorld* w, vecsEntity e, uint32_t componentI
 {
     assert( w );
     assert( componentId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( componentId ) )
+    {
+        return;
+    }
     if ( !w->observers )
     {
         return;
@@ -966,6 +1000,10 @@ inline void vecsUnsetById( vecsWorld* w, vecsEntity e, uint32_t componentId )
     assert( w );
     assert( vecsEntityPoolAlive( w->entities, e ) );
     assert( componentId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( componentId ) )
+    {
+        return;
+    }
     uint32_t idx = vecsEntityIndex( e );
     vecsPool* pool = w->pools[componentId];
     vecsClearSignatureBit( w, idx, componentId );
@@ -1029,8 +1067,16 @@ inline bool vecsValidate( vecsWorld* w )
     {
         if ( !ep->allocated[e] )
         {
-            if ( ep->signatures[0][e] != 0 || ep->signatures[1][e] != 0 ||
-                 ep->signatures[2][e] != 0 || ep->signatures[3][e] != 0 )
+            bool hasSignature = false;
+            for ( uint32_t word = 0; word < VECS_SIGNATURE_WORDS; word++ )
+            {
+                if ( ep->signatures[word][e] != 0 )
+                {
+                    hasSignature = true;
+                    break;
+                }
+            }
+            if ( hasSignature )
             {
                 printf("Validation failed: dead entity %u has non-zero signature\n", e);
                 return false;
@@ -1197,7 +1243,7 @@ inline void vecsClearWorld( vecsWorld* world )
         ep->freeList[i] = world->maxEntities - i - 1;
     }
     std::memset( ep->allocated, 0, world->maxEntities * sizeof( uint8_t ) );
-    for ( uint32_t i = 0; i < 4; i++ )
+    for ( uint32_t i = 0; i < VECS_SIGNATURE_WORDS; i++ )
     {
         std::memset( ep->signatures[i], 0, world->maxEntities * sizeof( uint64_t ) );
     }
@@ -1265,7 +1311,7 @@ inline void vecsDestroyRecursive( vecsWorld* w, vecsEntity e )
     for ( ;; )
     {
         uint32_t componentId = VECS_INVALID_INDEX;
-        for ( uint32_t k = 0; k < 4; k++ )
+        for ( uint32_t k = 0; k < VECS_SIGNATURE_WORDS; k++ )
         {
             uint64_t mask = w->entities->signatures[k][entityIndex];
             if ( mask )
@@ -1309,6 +1355,10 @@ inline vecsPool* vecsEnsurePool( vecsWorld* w )
     assert( w );
     uint32_t id = vecsTypeId<T>();
     assert( id < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( id ) )
+    {
+        return nullptr;
+    }
     if ( !w->pools[id] )
     {
         constexpr bool kTag = std::is_empty<T>::value;
@@ -1334,10 +1384,18 @@ inline T* vecsSet( vecsWorld* w, vecsEntity e, const T& val = {} )
 {
     assert( w );
     assert( vecsAlive( w, e ) );
-    vecsPool* pool = vecsEnsurePool<T>( w );
-    uint32_t idx = vecsEntityIndex( e );
     uint32_t componentId = vecsTypeId<T>();
     assert( componentId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( componentId ) )
+    {
+        return nullptr;
+    }
+    vecsPool* pool = vecsEnsurePool<T>( w );
+    if ( !pool )
+    {
+        return nullptr;
+    }
+    uint32_t idx = vecsEntityIndex( e );
     if ( vecsPoolHas( pool, idx ) )
     {
         if constexpr ( std::is_empty<T>::value )
@@ -1374,11 +1432,19 @@ inline void vecsUnset( vecsWorld* w, vecsEntity e )
 {
     assert( w );
     assert( vecsAlive( w, e ) );
-    vecsPool* pool = vecsEnsurePool<T>( w );
-    uint32_t idx = vecsEntityIndex( e );
-    assert( vecsPoolHas( pool, idx ) );
     uint32_t componentId = vecsTypeId<T>();
     assert( componentId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( componentId ) )
+    {
+        return;
+    }
+    vecsPool* pool = vecsEnsurePool<T>( w );
+    if ( !pool )
+    {
+        return;
+    }
+    uint32_t idx = vecsEntityIndex( e );
+    assert( vecsPoolHas( pool, idx ) );
     ( void )pool;
     vecsUnsetById( w, e, componentId );
 }
@@ -1556,8 +1622,8 @@ struct vecsQuery
 {
     vecsBitfield withMask;
     vecsBitfield withoutMask;
-    uint64_t readAccess[VECS_MAX_COMPONENTS / 64u];
-    uint64_t writeAccess[VECS_MAX_COMPONENTS / 64u];
+    uint64_t readAccess[VECS_SIGNATURE_WORDS];
+    uint64_t writeAccess[VECS_SIGNATURE_WORDS];
     uint32_t* withIds;
     uint32_t* withoutIds;
     uint32_t* optionalIds;
@@ -1567,6 +1633,7 @@ struct vecsQuery
     uint32_t withCapacity;
     uint32_t withoutCapacity;
     uint32_t optionalCapacity;
+    bool impossible;
 };
 
 inline vecsQuery* vecsCreateQuery()
@@ -1586,6 +1653,7 @@ inline vecsQuery* vecsCreateQuery()
     q->withCapacity = 0;
     q->withoutCapacity = 0;
     q->optionalCapacity = 0;
+    q->impossible = false;
     return q;
 }
 
@@ -1601,10 +1669,21 @@ inline void vecsDestroyQuery( vecsQuery* q )
     std::free( q );
 }
 
+inline void vecsQuerySetImpossible( vecsQuery* q )
+{
+    assert( q );
+    q->impossible = true;
+    vecsBitfieldClearAll( &q->withMask );
+}
+
 inline void vecsQueryMarkRead( vecsQuery* q, uint32_t typeId )
 {
     assert( q );
     assert( typeId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( typeId ) )
+    {
+        return;
+    }
     q->readAccess[typeId >> 6] |= ( 1ULL << ( typeId & 63u ) );
 }
 
@@ -1612,6 +1691,10 @@ inline void vecsQueryMarkWrite( vecsQuery* q, uint32_t typeId )
 {
     assert( q );
     assert( typeId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( typeId ) )
+    {
+        return;
+    }
     q->writeAccess[typeId >> 6] |= ( 1ULL << ( typeId & 63u ) );
 }
 
@@ -1619,6 +1702,10 @@ inline bool vecsQueryReads( const vecsQuery* q, uint32_t typeId )
 {
     assert( q );
     assert( typeId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( typeId ) )
+    {
+        return false;
+    }
     return ( q->readAccess[typeId >> 6] & ( 1ULL << ( typeId & 63u ) ) ) != 0;
 }
 
@@ -1626,6 +1713,10 @@ inline bool vecsQueryWrites( const vecsQuery* q, uint32_t typeId )
 {
     assert( q );
     assert( typeId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( typeId ) )
+    {
+        return false;
+    }
     return ( q->writeAccess[typeId >> 6] & ( 1ULL << ( typeId & 63u ) ) ) != 0;
 }
 
@@ -1634,7 +1725,7 @@ inline void vecsQueryRefreshWithMask( vecsWorld* w, vecsQuery* q )
     assert( w );
     assert( q );
     vecsBitfieldClearAll( &q->withMask );
-    if ( q->withCount == 0 )
+    if ( q->impossible || q->withCount == 0 )
     {
         return;
     }
@@ -1671,6 +1762,11 @@ inline void vecsQueryAddWith( vecsQuery* q, uint32_t typeId, vecsPool* pool )
 {
     assert( q );
     assert( typeId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( typeId ) )
+    {
+        vecsQuerySetImpossible( q );
+        return;
+    }
     if ( q->withCount == q->withCapacity )
     {
         uint32_t cap = q->withCapacity ? q->withCapacity * 2u : 8u;
@@ -1700,6 +1796,10 @@ inline void vecsQueryAddWithout( vecsQuery* q, uint32_t typeId )
 {
     assert( q );
     assert( typeId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( typeId ) )
+    {
+        return;
+    }
     if ( q->withoutCount == q->withoutCapacity )
     {
         uint32_t cap = q->withoutCapacity ? q->withoutCapacity * 2u : 8u;
@@ -1717,6 +1817,10 @@ inline void vecsQueryAddOptional( vecsQuery* q, uint32_t typeId )
 {
     assert( q );
     assert( typeId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( typeId ) )
+    {
+        return;
+    }
     if ( q->optionalCount == q->optionalCapacity )
     {
         uint32_t cap = q->optionalCapacity ? q->optionalCapacity * 2u : 8u;
@@ -1741,6 +1845,11 @@ inline void buildQueryWithType( vecsWorld* w, vecsQuery* q )
     using Raw = std::remove_cv_t<T>;
     uint32_t id = vecsTypeId<Raw>();
     assert( id < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( id ) )
+    {
+        vecsQuerySetImpossible( q );
+        return;
+    }
     vecsPool* pool = ( id < VECS_MAX_COMPONENTS ) ? w->pools[id] : nullptr;
     vecsQueryAddWith( q, id, pool );
     if constexpr ( std::is_const<T>::value )
@@ -1812,6 +1921,9 @@ inline void buildQueryOptional( vecsWorld* w, vecsQuery* q )
 // Passing a narrower set at build time and a wider set at execution time will
 // make getData<> dereference VECS_INVALID_INDEX from an unowned sparse slot,
 // causing memory corruption or an access violation.
+//
+// Invalid With types make the query impossible and all later execution returns
+// empty results. Invalid Without/Optional ids are ignored.
 //
 // Destroy the returned query with vecsDestroyQuery().
 template< typename... With >
@@ -2292,7 +2404,7 @@ inline vecsEntity vecsQueryFirstMatch( vecsWorld* w, vecsQuery* q )
     assert( q );
     vecsQueryRefreshWithMask( w, q );
 
-    if ( q->withCount == 0 )
+    if ( q->impossible || q->withCount == 0 )
     {
         return VECS_INVALID_ENTITY;
     }
@@ -2459,7 +2571,7 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
     }( q, vecsTypeId<std::remove_cv_t<With>>() ) ) && ... ) && "Query execution requested a component not present in the query's With list!" );
 #endif
     
-    if ( q->withCount == 0 )
+    if ( q->impossible || q->withCount == 0 )
     {
         return;
     }
@@ -2711,7 +2823,7 @@ inline uint32_t vecsQueryGetChunks( vecsWorld* w, vecsQuery* q, vecsQueryChunk* 
     assert( maxChunks > 0 );
     vecsQueryRefreshWithMask( w, q );
 
-    if ( q->withCount == 0 )
+    if ( q->impossible || q->withCount == 0 )
     {
         return 0;
     }
@@ -2775,7 +2887,7 @@ inline void vecsQueryExecuteChunk( vecsWorld* w, vecsQuery* q, const vecsQueryCh
     }( q, vecsTypeId<std::remove_cv_t<With>>() ) ) && ... ) && "Query execution requested a component not present in the query's With list!" );
 #endif
 
-    if ( q->withCount == 0 || chunk->count == 0 )
+    if ( q->impossible || q->withCount == 0 || chunk->count == 0 )
     {
         return;
     }
@@ -3004,10 +3116,19 @@ template< typename T, typename... Args >
 inline T* vecsEmplace( vecsWorld* w, vecsEntity e, Args&&... args )
 {
     assert( vecsAlive( w, e ) );
-    vecsPool* pool = vecsEnsurePool<T>( w );
-    uint32_t idx = vecsEntityIndex( e );
     uint32_t componentId = vecsTypeId<T>();
-    
+    assert( componentId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( componentId ) )
+    {
+        return nullptr;
+    }
+    vecsPool* pool = vecsEnsurePool<T>( w );
+    if ( !pool )
+    {
+        return nullptr;
+    }
+    uint32_t idx = vecsEntityIndex( e );
+
     if ( vecsPoolHas( pool, idx ) )
     {
         T* ptr = ( T* )vecsPoolGet( pool, idx );
@@ -3041,17 +3162,10 @@ inline T* vecsEmplace( vecsWorld* w, vecsEntity e, Args&&... args )
         result = ( T* )( pool->denseData + ( size_t )denseIdx * pool->stride );
         new ( result ) T( std::forward<Args>( args )... );
         vecsBitfieldSet( &pool->bitfield, idx );
-        }
-
-        w->entities->signatures[componentId >> 6][idx] |= ( 1ULL << ( componentId & 63u ) );
-
-        for ( uint32_t i = 0; i < w->observers->count; i++ )    {
-        vecsObserver& obs = w->observers->observers[i];
-        if ( obs.onAdd && obs.componentId == componentId )
-        {
-            obs.callback( w, e, result );
-        }
     }
+ 
+    vecsSetSignatureBit( w, idx, componentId );
+    vecsNotifyObservers( w, e, componentId, true, result );
     return result;
 }
 
@@ -3060,10 +3174,19 @@ inline void vecsAddTag( vecsWorld* w, vecsEntity e )
 {
     static_assert( std::is_empty<T>::value, "vecsAddTag can only be used on empty structs (tags)" );
     assert( vecsAlive( w, e ) );
-    vecsPool* pool = vecsEnsurePool<T>( w );
-    uint32_t idx = vecsEntityIndex( e );
     uint32_t componentId = vecsTypeId<T>();
-    
+    assert( componentId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( componentId ) )
+    {
+        return;
+    }
+    vecsPool* pool = vecsEnsurePool<T>( w );
+    if ( !pool )
+    {
+        return;
+    }
+    uint32_t idx = vecsEntityIndex( e );
+
     if ( vecsPoolHas( pool, idx ) )
     {
         return;
@@ -3071,17 +3194,9 @@ inline void vecsAddTag( vecsWorld* w, vecsEntity e )
     
     vecsPoolSet( pool, idx, nullptr );
     static T tagValue = {};
-    
-    w->entities->signatures[componentId >> 6][idx] |= ( 1ULL << ( componentId & 63u ) );
 
-    for ( uint32_t i = 0; i < w->observers->count; i++ )
-    {
-        vecsObserver& obs = w->observers->observers[i];
-        if ( obs.onAdd && obs.componentId == componentId )
-        {
-            obs.callback( w, e, &tagValue );
-        }
-    }
+    vecsSetSignatureBit( w, idx, componentId );
+    vecsNotifyObservers( w, e, componentId, true, &tagValue );
 }
 
 // --------------------------------------------------------------------------
@@ -3208,6 +3323,10 @@ inline T* vecsSetSingleton( vecsWorld* w, const T& val = {} )
     assert( w );
     uint32_t id = vecsTypeId<T>();
     assert( id < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( id ) )
+    {
+        return nullptr;
+    }
     auto& slot = w->singletons[id];
     if ( !slot.data )
     {
@@ -3252,6 +3371,10 @@ inline void vecsOnAdd( vecsWorld* w, void ( *callback )( vecsWorld*, vecsEntity,
     assert( callback );
     uint32_t id = vecsTypeId<T>();
     assert( id < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( id ) )
+    {
+        return;
+    }
     vecsAddObserver( w->observers, id, reinterpret_cast< void ( * )( vecsWorld*, vecsEntity, void* ) >( callback ), true );
 }
 
@@ -3262,6 +3385,10 @@ inline void vecsOnRemove( vecsWorld* w, void ( *callback )( vecsWorld*, vecsEnti
     assert( callback );
     uint32_t id = vecsTypeId<T>();
     assert( id < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( id ) )
+    {
+        return;
+    }
     vecsAddObserver( w->observers, id, reinterpret_cast< void ( * )( vecsWorld*, vecsEntity, void* ) >( callback ), false );
 }
 
@@ -3641,7 +3768,17 @@ inline void vecsCmdSet( vecsCommandBuffer* cb, vecsEntity e, const T& val )
     assert( cb );
     assert( cb->world );
     assert( vecsAlive( cb->world, e ) );
+    uint32_t componentId = vecsTypeId<T>();
+    assert( componentId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( componentId ) )
+    {
+        return;
+    }
     vecsPool* pool = vecsEnsurePool<T>( cb->world );
+    if ( !pool )
+    {
+        return;
+    }
     if ( cb->commandCount == cb->commandCapacity )
     {
         vecsCmdGrowCommands( cb );
@@ -3649,7 +3786,7 @@ inline void vecsCmdSet( vecsCommandBuffer* cb, vecsEntity e, const T& val )
     vecsCommand& cmd = cb->commands[cb->commandCount++];
     cmd.type = vecsCommand::SET_COMPONENT;
     cmd.entity = e;
-    cmd.componentId = vecsTypeId<T>();
+    cmd.componentId = componentId;
     cmd.dataOffset = 0;
     cmd.dataSize = 0;
     cmd.createdIndex = VECS_INVALID_INDEX;
@@ -3693,7 +3830,17 @@ inline void vecsCmdSetCreated( vecsCommandBuffer* cb, uint32_t createdIndex, con
     assert( cb );
     assert( cb->world );
     assert( createdIndex < cb->createdCount );
+    uint32_t componentId = vecsTypeId<T>();
+    assert( componentId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( componentId ) )
+    {
+        return;
+    }
     vecsPool* pool = vecsEnsurePool<T>( cb->world );
+    if ( !pool )
+    {
+        return;
+    }
     if ( cb->commandCount == cb->commandCapacity )
     {
         vecsCmdGrowCommands( cb );
@@ -3701,7 +3848,7 @@ inline void vecsCmdSetCreated( vecsCommandBuffer* cb, uint32_t createdIndex, con
     vecsCommand& cmd = cb->commands[cb->commandCount++];
     cmd.type = vecsCommand::SET_COMPONENT;
     cmd.entity = VECS_INVALID_ENTITY;
-    cmd.componentId = vecsTypeId<T>();
+    cmd.componentId = componentId;
     cmd.dataOffset = 0;
     cmd.dataSize = 0;
     cmd.createdIndex = createdIndex;
@@ -3745,6 +3892,12 @@ inline void vecsCmdUnset( vecsCommandBuffer* cb, vecsEntity e )
     assert( cb );
     assert( cb->world );
     assert( vecsAlive( cb->world, e ) );
+    uint32_t componentId = vecsTypeId<T>();
+    assert( componentId < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( componentId ) )
+    {
+        return;
+    }
     if ( cb->commandCount == cb->commandCapacity )
     {
         vecsCmdGrowCommands( cb );
@@ -3752,7 +3905,7 @@ inline void vecsCmdUnset( vecsCommandBuffer* cb, vecsEntity e )
     vecsCommand& cmd = cb->commands[cb->commandCount++];
     cmd.type = vecsCommand::UNSET_COMPONENT;
     cmd.entity = e;
-    cmd.componentId = vecsTypeId<T>();
+    cmd.componentId = componentId;
     cmd.dataOffset = 0;
     cmd.dataSize = 0;
     cmd.createdIndex = VECS_INVALID_INDEX;
