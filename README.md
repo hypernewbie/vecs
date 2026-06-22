@@ -178,6 +178,32 @@ vecsQueryEach<Position, Velocity>( w, q, []( vecsEntity, Position& p, Velocity& 
 vecsDestroyQuery( q );
 ```
 
+### Thread-Safe Iteration (`vecsQueryCollect`)
+
+`vecsQueryEach` rewrites the query's internal mask on every call, so it cannot be driven
+concurrently against the same query. `vecsQueryCollect` materializes the match set into
+caller-owned storage on a single thread, after which worker threads can iterate the flat
+list without touching any shared query state.
+
+```cpp
+std::vector<vecsQueryHit<Position, Velocity>> hits;
+
+hits.clear();                                          // caller owns clear()/reserve()
+vecsQueryCollect<Position, Velocity>( w, q, hits );    // single thread
+
+// fan out: each hit carries the entity + live component pointers
+for ( auto& hit : hits )
+{
+    hit.get<Position>().x += hit.get<Velocity>().vx;
+}
+```
+
+The list holds **pointers** into the live pools. Any structural edit (adding/removing a
+component or entity) can relocate pool data and invalidate those pointers — re-collect
+after such edits. Reading/writing existing component values is fine. The sink is any type
+with `push_back( vecsQueryHit<...> )`, and `vecsQueryCollect` appends (it does not clear),
+so multiple queries can accumulate into one buffer.
+
 ## Performance
 
 Benchmarks performed on **Windows (AMD Ryzen 9 5950X)** comparing **Vecs (Auto SIMD)** vs **EnTT (v3.13.0)**.

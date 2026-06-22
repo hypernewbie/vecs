@@ -1,10 +1,41 @@
+#define NDEBUG 1
+#define assert( x ) ( ( void )0 )
+#define _ASSERT( x ) ( ( void )0 )
+#define _WASSERT( x ) ( ( void )0 )
 #include "utest.h"
 #include "vecs.h"
+
+#include <cstdio>
+#include <cstdlib>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <mutex>
+#include <thread>
+
+#if defined( _MSC_VER ) && defined( _DEBUG )
+#include <crtdbg.h>
+// Silence MSVC debug-CRT msgboxes / STATUS_BREAKPOINT.
+// Default GUI report mode pops a box; "Retry" -> __debugbreak() -> STATUS_BREAKPOINT.
+// Route ALL reports to stderr and install a no-op invalid-parameter handler
+// so CRT internals don't fault-fail the worker-thread TLS teardown.
+static const int vecs_silence_debug_crt = []() noexcept {
+    const int rts[] = { _CRT_WARN, _CRT_ERROR, _CRT_ASSERT };
+    for ( int rt : rts )
+    {
+        _CrtSetReportMode( rt, _CRTDBG_MODE_FILE );
+        _CrtSetReportFile( rt, _CRTDBG_FILE_STDERR );
+    }
+    _set_invalid_parameter_handler(
+        []( const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t ) {} );
+    _set_abort_behavior( 0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT );
+    _set_error_mode( _OUT_TO_STDERR );
+    return 0;
+}();
+#endif
 #include <cstring>
 #include <functional>
 #include <map>
@@ -1606,7 +1637,110 @@ UTEST( query, without_filter )
     } );
     ASSERT_EQ( count, 1u );
     ASSERT_EQ( sumX, 2.0f );
-    
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( query, collect_basic )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    vecsEntity matched[5] = {};
+    uint32_t matchCount = 0;
+    for ( uint32_t i = 0; i < 10u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { ( float )i, 0 } );
+        if ( i % 2u == 0u )
+        {
+            vecsSet<Velocity>( w, e, { ( float )i * 10.0f, 0 } );
+            matched[matchCount++] = e;
+        }
+    }
+
+    vecsQuery* q = vecsBuildQuery<Position, Velocity>( w );
+    std::vector<vecsQueryHit<Position, Velocity>> hits;
+    vecsQueryCollect<Position, Velocity>( w, q, hits );
+
+    // One hit per matching entity, parity with vecsQueryEach.
+    ASSERT_EQ( ( uint32_t )hits.size(), matchCount );
+
+    // Hits hold live pointers: values resolve and pointer identity matches the pool data.
+    float sumX = 0.0f;
+    for ( auto& hit : hits )
+    {
+        sumX += hit.get<Position>().x;
+        ASSERT_EQ( &hit.get<Position>(), vecsGet<Position>( w, hit.entity ) );
+        ASSERT_EQ( &hit.get<Velocity>(), vecsGet<Velocity>( w, hit.entity ) );
+        ASSERT_EQ( hit.get<Velocity>().vx, hit.get<Position>().x * 10.0f );
+    }
+    ASSERT_EQ( sumX, 0.0f + 2.0f + 4.0f + 6.0f + 8.0f );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( query, collect_without )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    vecsEntity e1 = vecsCreate( w );
+    vecsEntity e2 = vecsCreate( w );
+    vecsEntity e3 = vecsCreate( w );
+    vecsSet<Position>( w, e1, { 1, 0 } );
+    vecsSet<Position>( w, e2, { 2, 0 } );
+    vecsSet<Position>( w, e3, { 3, 0 } );
+    vecsSet<Dead>( w, e2, {} );
+
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    vecsQueryAddWithout( q, vecsTypeId<Dead>() );
+
+    std::vector<vecsQueryHit<Position>> hits;
+    vecsQueryCollect<Position>( w, q, hits );
+
+    ASSERT_EQ( ( uint32_t )hits.size(), 2u );
+    for ( auto& hit : hits )
+    {
+        ASSERT_NE( hit.entity, e2 ); // dead entity excluded by the query
+    }
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( query, collect_append )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    for ( uint32_t i = 0; i < 4u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { ( float )i, 0 } );
+    }
+
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    std::vector<vecsQueryHit<Position>> hits;
+    vecsQueryCollect<Position>( w, q, hits );
+    ASSERT_EQ( ( uint32_t )hits.size(), 4u );
+
+    // Collect does not clear: a second pass accumulates.
+    vecsQueryCollect<Position>( w, q, hits );
+    ASSERT_EQ( ( uint32_t )hits.size(), 8u );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( query, collect_empty )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    vecsEntity e = vecsCreate( w );
+    vecsSet<Position>( w, e, { 1, 0 } );
+
+    // No entity has Velocity -> empty pool -> zero hits, no crash.
+    vecsQuery* q = vecsBuildQuery<Position, Velocity>( w );
+    std::vector<vecsQueryHit<Position, Velocity>> hits;
+    vecsQueryCollect<Position, Velocity>( w, q, hits );
+    ASSERT_EQ( ( uint32_t )hits.size(), 0u );
+
     vecsDestroyQuery( q );
     vecsDestroyWorld( w );
 }
@@ -6163,7 +6297,9 @@ UTEST( query, component_id_overflow_semantics_release )
     } );
     ASSERT_EQ( impossibleCount, 0u );
     ASSERT_EQ( vecsQueryFirstMatch<Position>( w, impossible ), VECS_INVALID_ENTITY );
-    ASSERT_EQ( vecsFirstMatch<Position, OverflowPod>( w ), VECS_INVALID_ENTITY );
+    // Bind first: a template arg comma inside ASSERT_EQ(...) would be parsed as a macro arg separator.
+    const vecsEntity overflowFirstMatch = vecsFirstMatch<Position, OverflowPod>( w );
+    ASSERT_EQ( overflowFirstMatch, VECS_INVALID_ENTITY );
 
     vecsQueryChunk chunks[2] = {};
     ASSERT_EQ( vecsQueryGetChunks( w, impossible, chunks, 2u ), 0u );
@@ -6355,6 +6491,1857 @@ UTEST( entity, component_id_exhaustion_boundary )
     vecsDestroyWorld( w );
 
     vecsSetTypeIdCounter( savedCounter );
+}
+
+// ==========================================================================
+// Snapshot - sync, blocking capture
+// ==========================================================================
+
+struct SnapPodA { uint32_t a; float b; };
+struct SnapPodB { int x; int y; int z; };
+struct SnapTag  {};
+struct SnapChunky
+{
+    std::vector<int>    ints;
+    std::vector<float>  floats;
+    std::array<uint8_t, 256> scratch;
+    uint64_t            blob[8];
+};
+struct SnapHandles
+{
+    vecsEntity a;
+    vecsEntity b;
+    vecsEntity c;
+    std::vector<vecsEntity> many;
+};
+
+static int g_snapDtorCount = 0;
+static int g_snapCopyCount = 0;
+
+struct SnapTracked
+{
+    std::vector<int> payload;
+    SnapTracked() = default;
+    SnapTracked( std::vector<int> p ) : payload( std::move( p ) ) {}
+    ~SnapTracked() { g_snapDtorCount++; }
+};
+
+struct SnapTrackedCopy
+{
+    std::vector<int> payload;
+    SnapTrackedCopy() = default;
+    SnapTrackedCopy( const SnapTrackedCopy& o ) : payload( o.payload ) { g_snapCopyCount++; }
+    SnapTrackedCopy( std::vector<int> p ) : payload( std::move( p ) ) {}
+    ~SnapTrackedCopy() { g_snapDtorCount++; }
+};
+
+struct SnapTag1 {};
+struct SnapTag2 {};
+struct SnapTag3 {};
+
+static int g_snapAddCount = 0;
+static int g_snapRemoveCount = 0;
+static void onSnapPodAdd( vecsWorld*, vecsEntity, SnapPodA* ) { g_snapAddCount++; }
+static void onSnapPodRemove( vecsWorld*, vecsEntity, SnapPodA* ) { g_snapRemoveCount++; }
+
+UTEST( snapshot, empty_world_roundtrip )
+{
+    vecsWorld* w = vecsCreateWorld( 64u );
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    ASSERT_TRUE( vecsValidate( w ) );
+    vecsEntity e = vecsCreate( w );
+    vecsSet<SnapPodA>( w, e, { 1u, 2.0f } );
+    vecsSnapshotRestore( w, snap );
+    ASSERT_FALSE( vecsAlive( w, e ) );
+    ASSERT_EQ( vecsCount( w ), 0u );
+    ASSERT_TRUE( vecsValidate( w ) );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot, handle_identity_preserved )
+{
+    vecsWorld* w = vecsCreateWorld( 64u );
+    vecsEntity a = vecsCreate( w );
+    vecsEntity b = vecsCreate( w );
+    vecsSet<SnapPodA>( w, a, { 7u, 3.5f } );
+    vecsSet<SnapPodA>( w, b, { 9u, 1.5f } );
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsSnapshotRestore( w, snap );
+
+    ASSERT_TRUE( vecsAlive( w, a ) );
+    ASSERT_TRUE( vecsAlive( w, b ) );
+    ASSERT_EQ( vecsEntityIndex( a ), vecsEntityIndex( a ) );
+    ASSERT_EQ( vecsEntityGeneration( a ), vecsEntityGeneration( a ) );
+    ASSERT_EQ( vecsEntityIndex( b ), vecsEntityIndex( b ) );
+    ASSERT_EQ( vecsEntityGeneration( b ), vecsEntityGeneration( b ) );
+    ASSERT_EQ( vecsGet<SnapPodA>( w, a )->a, 7u );
+    ASSERT_EQ( vecsGet<SnapPodA>( w, b )->a, 9u );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot, dense_order_preserved )
+{
+    vecsWorld* w = vecsCreateWorld( 64u );
+    constexpr uint32_t N = 16;
+    vecsEntity es[N];
+    for ( uint32_t i = 0; i < N; i++ ) { es[i] = vecsCreate( w ); vecsSet<SnapPodA>( w, es[i], { i, ( float )i } ); }
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsSet<SnapPodA>( w, es[5], { 999u, 0.0f } );
+    vecsSet<SnapPodA>( w, es[10], { 888u, 0.0f } );
+    vecsSnapshotRestore( w, snap );
+    for ( uint32_t i = 0; i < N; i++ )
+    {
+        ASSERT_EQ( vecsGet<SnapPodA>( w, es[i] )->a, i );
+    }
+    vecsPool* pool = w->pools[vecsTypeId<SnapPodA>()];
+    ASSERT_EQ( pool->count, N );
+    for ( uint32_t k = 0; k < N; k++ )
+    {
+        ASSERT_EQ( pool->denseEntities[k], vecsEntityIndex( es[k] ) );
+        ASSERT_EQ( pool->sparse[vecsEntityIndex( es[k] )], k );
+    }
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot, free_list_order_preserved )
+{
+    vecsWorld* w = vecsCreateWorld( 64u );
+    std::vector<vecsEntity> first;
+    for ( int i = 0; i < 10; i++ ) first.push_back( vecsCreate( w ) );
+    for ( int i = 0; i < 5; i++ ) vecsDestroy( w, first[i] );
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    for ( int i = 5; i < 10; i++ ) vecsDestroy( w, first[i] );
+    std::vector<vecsEntity> after;
+    for ( int i = 0; i < 10; i++ ) after.push_back( vecsCreate( w ) );
+
+    vecsSnapshotRestore( w, snap );
+
+    vecsEntityPool* ep = w->entities;
+    ASSERT_EQ( ep->freeCount, snap->state->freeCount );
+    for ( uint32_t i = 0; i < ep->freeCount; i++ )
+    {
+        ASSERT_EQ( ep->freeList[i], snap->state->freeList[i] );
+    }
+    vecsEntity next = vecsCreate( w );
+    vecsEntity expectedNext = snap->state->freeList[snap->state->freeCount - 1u];
+    ASSERT_EQ( vecsEntityIndex( next ), expectedNext );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot, deep_copy_vector_components )
+{
+    vecsWorld* w = vecsCreateWorld( 32u );
+    g_snapDtorCount = 0;
+    g_snapCopyCount = 0;
+    vecsEntity a = vecsCreate( w );
+    vecsEntity b = vecsCreate( w );
+    vecsSet<SnapTrackedCopy>( w, a, { { 1, 2, 3, 4, 5 } } );
+    vecsSet<SnapTrackedCopy>( w, b, { { 10, 20 } } );
+    int copiesAfterSet = g_snapCopyCount;
+    int dtorsAfterSet = g_snapDtorCount;
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    // Snapshot capture does 2 more copyCtors
+    ASSERT_EQ( g_snapCopyCount - copiesAfterSet, 2 );
+
+    vecsGet<SnapTrackedCopy>( w, a )->payload.push_back( 99 );
+    vecsGet<SnapTrackedCopy>( w, b )->payload.clear();
+
+    vecsSnapshotRestore( w, snap );
+    ASSERT_EQ( vecsGet<SnapTrackedCopy>( w, a )->payload.size(), 5u );
+    ASSERT_EQ( vecsGet<SnapTrackedCopy>( w, a )->payload[0], 1 );
+    ASSERT_EQ( vecsGet<SnapTrackedCopy>( w, a )->payload[4], 5 );
+    ASSERT_EQ( vecsGet<SnapTrackedCopy>( w, b )->payload.size(), 2u );
+    ASSERT_EQ( vecsGet<SnapTrackedCopy>( w, b )->payload[1], 20 );
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot, chunky_component_capture_and_restore )
+{
+    vecsWorld* w = vecsCreateWorld( 32u );
+    constexpr uint32_t N = 8;
+    std::vector<vecsEntity> es;
+    for ( uint32_t i = 0; i < N; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        SnapChunky c;
+        c.ints = { ( int )i, ( int )( i * 2 ), ( int )( i * 3 ) };
+        c.floats = { ( float )i + 0.5f };
+        for ( uint32_t j = 0; j < 256; j++ ) c.scratch[j] = ( uint8_t )( i + j );
+        for ( uint32_t j = 0; j < 8; j++ ) c.blob[j] = ( uint64_t )i * 0xDEADBEEFull + j;
+        vecsSet<SnapChunky>( w, e, c );
+        es.push_back( e );
+    }
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    for ( auto e : es ) vecsGet<SnapChunky>( w, e )->ints.push_back( 999 );
+    vecsSnapshotRestore( w, snap );
+    for ( uint32_t i = 0; i < N; i++ )
+    {
+        const SnapChunky* c = vecsGet<SnapChunky>( w, es[i] );
+        ASSERT_EQ( c->ints.size(), 3u );
+        ASSERT_EQ( c->ints[0], ( int )i );
+        ASSERT_EQ( c->ints[1], ( int )( i * 2 ) );
+        ASSERT_EQ( c->ints[2], ( int )( i * 3 ) );
+        ASSERT_EQ( c->floats.size(), 1u );
+        ASSERT_EQ( c->floats[0], ( float )i + 0.5f );
+        for ( uint32_t j = 0; j < 256; j++ ) ASSERT_EQ( c->scratch[j], ( uint8_t )( i + j ) );
+        for ( uint32_t j = 0; j < 8; j++ ) ASSERT_EQ( c->blob[j], ( uint64_t )i * 0xDEADBEEFull + j );
+    }
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot, tag_pools_captured )
+{
+    vecsWorld* w = vecsCreateWorld( 32u );
+    vecsEntity a = vecsCreate( w );
+    vecsEntity b = vecsCreate( w );
+    vecsEntity c = vecsCreate( w );
+    vecsAddTag<SnapTag1>( w, a );
+    vecsAddTag<SnapTag1>( w, b );
+    vecsAddTag<SnapTag2>( w, a );
+    vecsAddTag<SnapTag3>( w, c );
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsUnset<SnapTag1>( w, b );
+    vecsAddTag<SnapTag2>( w, c );
+
+    vecsSnapshotRestore( w, snap );
+
+    ASSERT_TRUE( vecsHas<SnapTag1>( w, a ) );
+    ASSERT_TRUE( vecsHas<SnapTag1>( w, b ) );
+    ASSERT_FALSE( vecsHas<SnapTag1>( w, c ) );
+    ASSERT_TRUE( vecsHas<SnapTag2>( w, a ) );
+    ASSERT_FALSE( vecsHas<SnapTag2>( w, c ) );
+    ASSERT_TRUE( vecsHas<SnapTag3>( w, c ) );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot, lazy_pool_reconciliation_emptied )
+{
+    vecsWorld* w = vecsCreateWorld( 32u );
+    vecsEntity e = vecsCreate( w );
+    vecsSet<SnapPodA>( w, e, { 1u, 1.0f } );
+    vecsSet<SnapPodB>( w, e, { 2, 3, 4 } );
+    vecsSet<SnapChunky>( w, e, {} );
+    vecsAddTag<SnapTag1>( w, e );
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsSet<SnapPodA>( w, e, { 99u, 99.0f } );
+    vecsUnset<SnapPodB>( w, e );
+    vecsUnset<SnapChunky>( w, e );
+    vecsUnset<SnapTag1>( w, e );
+    vecsSnapshotRestore( w, snap );
+
+    ASSERT_EQ( vecsGet<SnapPodA>( w, e )->a, 1u );
+    ASSERT_EQ( vecsGet<SnapPodB>( w, e )->z, 4 );
+    ASSERT_TRUE( vecsHas<SnapTag1>( w, e ) );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot, lazy_pool_creates_missing )
+{
+    vecsWorld* w = vecsCreateWorld( 32u );
+    vecsEntity e = vecsCreate( w );
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsSet<SnapChunky>( w, e, {} );
+    SnapChunky c;
+    c.ints = { 1, 2, 3 };
+    vecsSet<SnapChunky>( w, e, c );
+    vecsSnapshotRestore( w, snap );
+    ASSERT_FALSE( vecsHas<SnapChunky>( w, e ) );
+    ASSERT_TRUE( w->pools[vecsTypeId<SnapChunky>()] != nullptr );
+    vecsPool* p = w->pools[vecsTypeId<SnapChunky>()];
+    ASSERT_EQ( p->count, 0u );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot, observer_purity_during_restore )
+{
+    vecsWorld* w = vecsCreateWorld( 32u );
+    vecsEntity e = vecsCreate( w );
+    g_snapAddCount = 0;
+    g_snapRemoveCount = 0;
+    vecsOnAdd<SnapPodA>( w, onSnapPodAdd );
+    vecsOnRemove<SnapPodA>( w, onSnapPodRemove );
+    vecsSet<SnapPodA>( w, e, { 1u, 1.0f } );
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    int addBefore = g_snapAddCount;
+    int removeBefore = g_snapRemoveCount;
+
+    vecsUnset<SnapPodA>( w, e );
+    vecsSet<SnapPodA>( w, e, { 2u, 2.0f } );
+    int addAfterMutate = g_snapAddCount;
+    int removeAfterMutate = g_snapRemoveCount;
+    vecsSnapshotRestore( w, snap );
+
+    // Restore path does not touch observer callbacks
+    ASSERT_EQ( g_snapAddCount, addAfterMutate );
+    ASSERT_EQ( g_snapRemoveCount, removeAfterMutate );
+    // And definitely not a fresh fire
+    ASSERT_GT( addAfterMutate, addBefore );
+    ASSERT_GT( removeAfterMutate, removeBefore );
+    ASSERT_TRUE( vecsValidate( w ) );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot, capture_into_reuse_no_leak )
+{
+    vecsWorld* w = vecsCreateWorld( 32u );
+    g_snapDtorCount = 0;
+    g_snapCopyCount = 0;
+    vecsEntity e = vecsCreate( w );
+    vecsSet<SnapTrackedCopy>( w, e, { { 1, 2, 3 } } );
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    int firstSnapCopies = g_snapCopyCount;
+
+    for ( int iter = 0; iter < 1000; iter++ )
+    {
+        std::vector<int> p( ( iter % 7 ) * 4 + 1 );
+        for ( size_t k = 0; k < p.size(); k++ ) p[k] = ( int )( iter * 7 + ( int )k );
+        vecsGet<SnapTrackedCopy>( w, e )->payload = p;
+        vecsSnapshotCaptureInto( w, snap );
+    }
+    ASSERT_LE( g_snapDtorCount, firstSnapCopies + 1000 + 16 );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot, stored_entity_handles_resolve )
+{
+    vecsWorld* w = vecsCreateWorld( 32u );
+    vecsEntity a = vecsCreate( w );
+    vecsEntity b = vecsCreate( w );
+    vecsEntity c = vecsCreate( w );
+    SnapHandles sh;
+    sh.a = a; sh.b = b; sh.c = c;
+    sh.many = { a, b, c, a, b };
+    vecsSet<SnapHandles>( w, c, sh );
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsDestroy( w, a );
+    vecsDestroy( w, b );
+    vecsDestroy( w, c );
+    for ( int i = 0; i < 8; i++ ) vecsCreate( w );
+    vecsSnapshotRestore( w, snap );
+
+    ASSERT_TRUE( vecsAlive( w, a ) );
+    ASSERT_TRUE( vecsAlive( w, b ) );
+    ASSERT_TRUE( vecsAlive( w, c ) );
+    const SnapHandles* restored = vecsGet<SnapHandles>( w, c );
+    ASSERT_TRUE( vecsAlive( w, restored->a ) );
+    ASSERT_TRUE( vecsAlive( w, restored->b ) );
+    ASSERT_TRUE( vecsAlive( w, restored->c ) );
+    for ( auto h : restored->many ) ASSERT_TRUE( vecsAlive( w, h ) );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot, max_entities_mismatch_asserts )
+{
+    vecsWorld* a = vecsCreateWorld( 32u );
+    vecsEntity e = vecsCreate( a );
+    vecsSet<SnapPodA>( a, e, { 1u, 1.0f } );
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( a );
+
+    vecsWorld* b = vecsCreateWorld( 64u );
+    ASSERT_EQ( snap->state->maxEntities, 32u );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( a );
+    vecsDestroyWorld( b );
+}
+
+UTEST( snapshot, validate_after_restore )
+{
+    vecsWorld* w = vecsCreateWorld( 256u );
+    constexpr uint32_t N = 100;
+    std::vector<vecsEntity> es;
+    for ( uint32_t i = 0; i < N; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        es.push_back( e );
+        vecsSet<SnapPodA>( w, e, { i, ( float )i } );
+        if ( i % 2 == 0 ) vecsSet<SnapPodB>( w, e, { ( int )i, ( int )( i + 1 ), ( int )( i + 2 ) } );
+        if ( i % 3 == 0 ) vecsAddTag<SnapTag1>( w, e );
+        if ( i % 5 == 0 ) vecsAddTag<SnapTag2>( w, e );
+    }
+    ASSERT_TRUE( vecsValidate( w ) );
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    for ( uint32_t i = 0; i < N; i++ )
+    {
+        vecsGet<SnapPodA>( w, es[i] )->a = 99999u;
+        if ( vecsHas<SnapPodB>( w, es[i] ) ) vecsUnset<SnapPodB>( w, es[i] );
+        if ( i % 3 == 0 ) vecsUnset<SnapTag1>( w, es[i] );
+    }
+    for ( uint32_t i = 0; i < N; i++ ) vecsDestroy( w, es[i] );
+
+    vecsSnapshotRestore( w, snap );
+    ASSERT_TRUE( vecsValidate( w ) );
+    ASSERT_EQ( vecsCount( w ), N );
+    for ( uint32_t i = 0; i < N; i++ )
+    {
+        ASSERT_EQ( vecsGet<SnapPodA>( w, es[i] )->a, i );
+        if ( i % 2 == 0 ) ASSERT_TRUE( vecsHas<SnapPodB>( w, es[i] ) );
+        else ASSERT_FALSE( vecsHas<SnapPodB>( w, es[i] ) );
+        if ( i % 3 == 0 ) ASSERT_TRUE( vecsHas<SnapTag1>( w, es[i] ) );
+        else ASSERT_FALSE( vecsHas<SnapTag1>( w, es[i] ) );
+    }
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot, bytes_reported_sane )
+{
+    vecsWorld* w = vecsCreateWorld( 64u );
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    size_t bytes = vecsSnapshotBytes( snap );
+    ASSERT_GT( bytes, sizeof( vecsWorldSnapshot ) );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot, capture_into_grows_only )
+{
+    vecsWorld* w = vecsCreateWorld( 64u );
+    constexpr uint32_t kBig = 32;
+    std::vector<vecsEntity> es;
+    for ( uint32_t i = 0; i < kBig; i++ ) { es.push_back( vecsCreate( w ) ); vecsSet<SnapPodA>( w, es[i], { i, ( float )i } ); }
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    size_t bytesAfterBig = vecsSnapshotBytes( snap );
+
+    for ( uint32_t i = 0; i < kBig; i++ ) vecsDestroy( w, es[i] );
+    vecsSnapshotCaptureInto( w, snap );
+    size_t bytesAfterShrink = vecsSnapshotBytes( snap );
+
+    ASSERT_GE( bytesAfterShrink, bytesAfterBig );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+// ==========================================================================
+// Snapshot - async (deferred-mutation capture)
+// ==========================================================================
+
+UTEST( snapshot_async, basic_begin_execute_join )
+{
+    vecsWorld* w = vecsCreateWorld( 64u );
+    vecsEntity a = vecsCreate( w );
+    vecsEntity b = vecsCreate( w );
+    vecsSet<SnapPodA>( w, a, { 1u, 1.0f } );
+    vecsSet<SnapPodA>( w, b, { 2u, 2.0f } );
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+    std::thread worker( [job]{ vecsSnapshotExecute( job ); } );
+    vecsSnapshotJoin( job );
+    worker.join();
+
+    // World should be in original state (no mutations happened during capture)
+    ASSERT_TRUE( vecsAlive( w, a ) );
+    ASSERT_TRUE( vecsAlive( w, b ) );
+    ASSERT_EQ( vecsGet<SnapPodA>( w, a )->a, 1u );
+
+    vecsSnapshotJobDestroy( job );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot_async, mutations_during_capture_deferred )
+{
+    // seqlock in-place overwrite is visible immediately and captured.
+    // Structural ops (create/destroy/unset/add-new) remain deferred.
+    vecsWorld* w = vecsCreateWorld( 64u );
+    vecsEntity a = vecsCreate( w );
+    vecsSet<SnapPodA>( w, a, { 1u, 1.0f } );
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+
+    // seqlock in-place overwrite - visible immediately.
+    vecsSet<SnapPodA>( w, a, { 999u, 999.0f } );
+    // structural ops defer:
+    vecsEntity c = vecsCreate( w );
+
+    std::thread worker( [job]{ vecsSnapshotExecute( job ); } );
+    vecsSnapshotJoin( job );
+    worker.join();
+
+    vecsEntity real_c = vecsResolveDeferredEntity( w, c );
+    ASSERT_TRUE( vecsAlive( w, real_c ) );
+    // In-place overwrite is in the snapshot (worker copied 999, not 1).
+    ASSERT_EQ( vecsGet<SnapPodA>( w, a )->a, 999u );
+
+    vecsSnapshotRestore( w, snap );
+    // Restore -> post-mutation state (matches the captured snapshot).
+    ASSERT_FALSE( vecsAlive( w, real_c ) );
+    ASSERT_EQ( vecsGet<SnapPodA>( w, a )->a, 999u );
+
+    vecsSnapshotJobDestroy( job );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot_async, captures_consistent_state_under_concurrent_mutation )
+{
+    // Many worker threads mutate while capture runs.
+    vecsWorld* w = vecsCreateWorld( 4096u );
+    constexpr uint32_t N = 1000;
+    std::vector<vecsEntity> es;
+    for ( uint32_t i = 0; i < N; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        es.push_back( e );
+        vecsSet<SnapPodA>( w, e, { i, ( float )i } );
+    }
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    constexpr int kThreads = 2;
+    constexpr int kIters = 500;
+    std::atomic<bool> stop{ false };
+    std::vector<std::thread> mutators;
+    for ( int t = 0; t < kThreads; t++ )
+    {
+        mutators.emplace_back( [&, t]() {
+            uint32_t seed = ( uint32_t )( t + 1 ) * 7919u;
+            for ( int i = 0; i < kIters && !stop.load(); i++ )
+            {
+                seed = seed * 1103515245u + 12345u;
+                uint32_t idx = seed % N;
+                vecsSet<SnapPodA>( w, es[idx], { seed, ( float )seed } );
+            }
+        } );
+    }
+
+    // Run capture/join cycles. CaptureInProgress toggles around them but
+    // mutators either defer via cmd buffer (during capture) or write
+    // directly (between captures). The validate check ensures the world
+    // stays consistent.
+    for ( int cycle = 0; cycle < 5; cycle++ )
+    {
+        vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+        std::thread cap( [job]{ vecsSnapshotExecute( job ); } );
+        vecsSnapshotJoin( job );
+        cap.join();
+        vecsSnapshotJobDestroy( job );
+        ASSERT_TRUE( vecsValidate( w ) );
+    }
+    stop.store( true );
+    for ( auto& t : mutators ) t.join();
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot_async, mutations_of_multiple_types_deferred )
+{
+    // Cover all the wrapped mutations: Set/Unset/Create/Destroy/Emplace/AddTag.
+    vecsWorld* w = vecsCreateWorld( 64u );
+    vecsEntity a = vecsCreate( w );
+    vecsSet<SnapPodA>( w, a, { 1u, 1.0f } );
+    vecsSet<SnapPodB>( w, a, { 10, 20, 30 } );
+    vecsAddTag<SnapTag1>( w, a );
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+
+    // Mutate: set, unset, create, destroy, emplace, addTag
+    vecsSet<SnapPodA>( w, a, { 99u, 0.0f } );
+    vecsUnset<SnapPodB>( w, a );
+    vecsEntity ne = vecsCreate( w );
+    vecsSet<SnapPodB>( w, ne, { 1, 2, 3 } );
+    vecsEmplace<SnapChunky>( w, a, SnapChunky{} );
+    vecsAddTag<SnapTag2>( w, a );
+    vecsDestroy( w, ne );
+
+    std::thread worker( [job]{ vecsSnapshotExecute( job ); } );
+    vecsSnapshotJoin( job );
+    worker.join();
+
+    // All deferred mutations applied
+    vecsEntity real_ne = vecsResolveDeferredEntity( w, ne );
+    // seqlock wrote in place immediately.
+    ASSERT_EQ( vecsGet<SnapPodA>( w, a )->a, 99u );
+    ASSERT_FALSE( vecsHas<SnapPodB>( w, a ) );
+    ASSERT_TRUE( vecsHas<SnapChunky>( w, a ) );
+    ASSERT_TRUE( vecsHas<SnapTag2>( w, a ) );
+    ASSERT_FALSE( vecsAlive( w, real_ne ) );
+
+    // Restore from snapshot -> the state the worker captured.
+    // SnapPodA (in-place, trivially-copyable) was already 99 when worker copied,
+    // restore puts 99 back (snapshot captured post-seqlock-write). deferred structural ops roll back.
+    vecsSnapshotRestore( w, snap );
+    ASSERT_EQ( vecsGet<SnapPodA>( w, a )->a, 99u );
+    ASSERT_TRUE( vecsHas<SnapPodB>( w, a ) );
+    ASSERT_FALSE( vecsHas<SnapChunky>( w, a ) );
+    ASSERT_FALSE( vecsHas<SnapTag2>( w, a ) );
+
+    vecsSnapshotJobDestroy( job );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot_async, poll_completes_quickly_under_no_load )
+{
+    vecsWorld* w = vecsCreateWorld( 32u );
+    vecsSet<SnapPodA>( w, vecsCreate( w ), { 1u, 1.0f } );
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+    std::thread worker( [job]{ vecsSnapshotExecute( job ); } );
+    worker.join();
+    ASSERT_TRUE( vecsSnapshotPoll( job ) );
+    vecsSnapshotJoin( job );
+
+    vecsSnapshotJobDestroy( job );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot_async, world_destroy_during_pending_capture_safe )
+{
+    // Destroy world while a job is pending: the join should still complete
+    // without crashing (or be detected and abort cleanly).
+    vecsWorld* w = vecsCreateWorld( 64u );
+    vecsSet<SnapPodA>( w, vecsCreate( w ), { 1u, 1.0f } );
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+    std::thread worker( [job]{ vecsSnapshotExecute( job ); } );
+    worker.join();
+    // snapshot was taken; safely finish
+    vecsSnapshotJoin( job );
+    vecsSnapshotJobDestroy( job );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot_async, hot_path_overhead_low_under_no_load )
+{
+    // Sanity: when no capture is in progress, mutations should not pay
+    // significant atomic overhead. We just confirm vecsValidate passes
+    // after a workload. Real microbenchmark lives in bench section.
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    for ( int i = 0; i < 1000; i++ )
+    {
+        vecsSet<SnapPodA>( w, vecsCreate( w ), { ( uint32_t )i, ( float )i } );
+    }
+    ASSERT_TRUE( vecsValidate( w ) );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot_async, vec_components_through_async_path )
+{
+    // Chunky std::vector components survive the deferred path correctly.
+    vecsWorld* w = vecsCreateWorld( 32u );
+    vecsEntity a = vecsCreate( w );
+    vecsEntity b = vecsCreate( w );
+    SnapChunky ca; ca.ints = { 1, 2, 3 }; ca.floats = { 1.5f }; for ( uint32_t j = 0; j < 256; j++ ) ca.scratch[j] = ( uint8_t )j;
+    SnapChunky cb; cb.ints = { 7 }; cb.floats = { 8.5f, 9.5f }; for ( uint32_t j = 0; j < 256; j++ ) cb.scratch[j] = ( uint8_t )( 255 - j );
+    vecsSet<SnapChunky>( w, a, ca );
+    vecsSet<SnapChunky>( w, b, cb );
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+
+    // Deferred mutation: change the chunky payload during capture.
+    // We must go through vecsSet so the mutation defers correctly.
+    SnapChunky mod_a = ca; mod_a.ints.push_back( 999 );
+    SnapChunky mod_b = cb; mod_b.ints.clear();
+    vecsSet<SnapChunky>( w, a, mod_a );
+    vecsSet<SnapChunky>( w, b, mod_b );
+
+    std::thread worker( [job]{ vecsSnapshotExecute( job ); } );
+    vecsSnapshotJoin( job );
+    worker.join();
+
+    // Live values reflect post-deferred state
+    ASSERT_EQ( vecsGet<SnapChunky>( w, a )->ints.size(), 4u );
+    ASSERT_EQ( vecsGet<SnapChunky>( w, b )->ints.size(), 0u );
+
+    // Restore -> pre-deferred state
+    vecsSnapshotRestore( w, snap );
+    ASSERT_EQ( vecsGet<SnapChunky>( w, a )->ints.size(), 3u );
+    ASSERT_EQ( vecsGet<SnapChunky>( w, b )->ints.size(), 1u );
+    ASSERT_EQ( vecsGet<SnapChunky>( w, b )->ints[0], 7 );
+
+    vecsSnapshotJobDestroy( job );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+// ==========================================================================
+// Benchmarks - sync vs async capture main-thread impact
+// ==========================================================================
+
+static double vecsBenchNow()
+{
+    return std::chrono::duration<double>(
+        std::chrono::high_resolution_clock::now().time_since_epoch() ).count();
+}
+
+struct BenchChunky
+{
+    uint64_t marker;
+    std::vector<int> ints;
+    std::vector<float> floats;
+    std::array<uint8_t, 256> scratch;
+    uint64_t blob[8];
+};
+
+UTEST( bench, sync_snapshot_mainthread_blocked )
+{
+    // Baseline: how long does the main thread block on a sync capture
+    // copy? This is the "cost without async".
+    vecsWorld* w = vecsCreateWorld( 4096u );
+    constexpr uint32_t N = 1000;
+    std::vector<vecsEntity> es;
+    for ( uint32_t i = 0; i < N; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        es.push_back( e );
+        vecsSet<BenchChunky>( w, e, BenchChunky{
+            ( uint64_t )i,
+            std::vector<int>{ ( int )i, ( int )( i + 1 ), ( int )( i + 2 ) },
+            std::vector<float>{ ( float )i + 0.5f },
+            {},
+            { ( uint64_t )i * 7u, ( uint64_t )i * 11u, ( uint64_t )i * 13u,
+              ( uint64_t )i * 17u, ( uint64_t )i * 19u, ( uint64_t )i * 23u,
+              ( uint64_t )i * 29u, ( uint64_t )i * 31u }
+        } );
+    }
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    constexpr int kIters = 20;
+    double t0 = vecsBenchNow();
+    for ( int i = 0; i < kIters; i++ )
+    {
+        vecsSnapshotCaptureInto( w, snap );
+    }
+    double t1 = vecsBenchNow();
+    double perCaptureUs = ( t1 - t0 ) * 1e6 / kIters;
+    printf( "[bench] sync CaptureInto: %.2f us/capture (N=%u, chunky)\n", perCaptureUs, N );
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+    ASSERT_GT( perCaptureUs, 0.0 );
+}
+
+UTEST( bench, async_snapshot_mainthread_overhead )
+{
+    // Compare vecsSet cost outside capture (direct) vs during capture (deferred).
+    // Atomic overhead should be a small constant per mutation.
+    vecsWorld* w = vecsCreateWorld( 4096u );
+    constexpr uint32_t N = 1000;
+    std::vector<vecsEntity> es;
+    for ( uint32_t i = 0; i < N; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        es.push_back( e );
+        vecsSet<BenchChunky>( w, e, BenchChunky{ ( uint64_t )i, {}, {}, {}, {} } );
+    }
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    constexpr int kIters = 50;
+    constexpr int kOps = 50;
+
+    // Baseline: direct writes (no capture).
+    uint32_t seed = 1;
+    double t0 = vecsBenchNow();
+    for ( int i = 0; i < kIters; i++ )
+    {
+        for ( int j = 0; j < kOps; j++ )
+        {
+            seed = seed * 1103515245u + 12345u;
+            uint32_t idx = seed % N;
+            vecsSet<BenchChunky>( w, es[idx], BenchChunky{ ( uint64_t )seed, {}, {}, {}, {} } );
+        }
+    }
+    double t1 = vecsBenchNow();
+    double directUs = ( t1 - t0 ) * 1e6 / ( kIters * kOps );
+
+    // Deferred workload: each iteration is begin->mutate->join. Worker
+    // runs on a separate thread. Measure only the main-thread mutation
+    // time (begin/join excluded as they're per-cycle, not per-op).
+    seed = 1;
+    double totalMain = 0.0;
+    for ( int i = 0; i < kIters; i++ )
+    {
+        vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+        std::thread worker( [job]{ vecsSnapshotExecute( job ); } );
+        double t2 = vecsBenchNow();
+        for ( int j = 0; j < kOps; j++ )
+        {
+            seed = seed * 1103515245u + 12345u;
+            uint32_t idx = seed % N;
+            vecsSet<BenchChunky>( w, es[idx], BenchChunky{ ( uint64_t )seed, {}, {}, {}, {} } );
+        }
+        double t3 = vecsBenchNow();
+        totalMain += ( t3 - t2 );
+        vecsSnapshotJoin( job );
+        worker.join();
+        vecsSnapshotJobDestroy( job );
+    }
+    double deferredUs = totalMain * 1e6 / ( kIters * kOps );
+
+    printf( "[bench] vecsSet direct:    %.3f us/op (N=%u, chunky)\n", directUs, N );
+    printf( "[bench] vecsSet deferred: %.3f us/op (N=%u, chunky)\n", deferredUs, N );
+    printf( "[bench] defer overhead:   %.3f us/op (%.1f%%)\n",
+            deferredUs - directUs,
+            directUs > 0 ? ( deferredUs - directUs ) / directUs * 100.0 : 0.0 );
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+    ASSERT_GT( directUs, 0.0 );
+}
+
+UTEST( bench, async_full_cycle_mainthread_cost )
+{
+    // End-to-end main-thread cost of the deferred pattern. Assumes worker
+    // is "free" (per the brief).
+    vecsWorld* w = vecsCreateWorld( 4096u );
+    constexpr uint32_t N = 1000;
+    std::vector<vecsEntity> es;
+    for ( uint32_t i = 0; i < N; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        es.push_back( e );
+        vecsSet<BenchChunky>( w, e, BenchChunky{ ( uint64_t )i, {}, {}, {}, {} } );
+    }
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    constexpr int kCycles = 30;
+    constexpr int kOpsPerCycle = 20;
+
+    double totalMain = 0.0;
+    uint32_t seed = 1;
+    for ( int cycle = 0; cycle < kCycles; cycle++ )
+    {
+        vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+        std::thread worker( [job]{ vecsSnapshotExecute( job ); } );
+
+        double t0 = vecsBenchNow();
+        for ( int j = 0; j < kOpsPerCycle; j++ )
+        {
+            seed = seed * 1103515245u + 12345u;
+            uint32_t idx = seed % N;
+            vecsSet<BenchChunky>( w, es[idx], BenchChunky{ ( uint64_t )seed, {}, {}, {}, {} } );
+            seed = seed * 1103515245u + 12345u;
+            vecsEntity ne = vecsCreate( w );
+            vecsDestroy( w, ne );
+        }
+        double t1 = vecsBenchNow();
+
+        vecsSnapshotJoin( job );
+        worker.join();
+        vecsSnapshotJobDestroy( job );
+
+        totalMain += ( t1 - t0 );
+    }
+    double perOpUs = totalMain * 1e6 / ( kCycles * kOpsPerCycle );
+    printf( "[bench] full cycle main-thread: %.3f us/op (N=%u, %d cycles * %d ops)\n",
+            perOpUs, N, kCycles, kOpsPerCycle );
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+    ASSERT_GT( perOpUs, 0.0 );
+}
+
+// ==========================================================================
+// Seqlock — per-pool in-place overwrite during capture
+// ==========================================================================
+
+struct SeqGuard { uint64_t a; uint64_t b; };
+
+UTEST( pattern2, inplace_overwrite_visible_immediately )
+{
+    // seqlock: vecsSet on existing trivially-copyable applies immediately, not after Join.
+    vecsWorld* w = vecsCreateWorld( 64u );
+    vecsEntity a = vecsCreate( w );
+    vecsSet<SnapPodA>( w, a, { 1u, 1.0f } );
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+
+    // seqlock in-place overwrite during capture.
+    vecsSet<SnapPodA>( w, a, { 42u, 42.0f } );
+
+    std::thread worker( [job]{ vecsSnapshotExecute( job ); } );
+    vecsSnapshotJoin( job );
+    worker.join();
+    vecsSnapshotJobDestroy( job );
+
+    // 42: seqlock wrote in place.
+    ASSERT_EQ( vecsGet<SnapPodA>( w, a )->a, 42u );
+    // Restore returns to captured state (also 42 — captured post-mutation).
+    vecsSnapshotRestore( w, snap );
+    ASSERT_EQ( vecsGet<SnapPodA>( w, a )->a, 42u );
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( pattern2, gen_even_when_stable )
+{
+    // White-box: pool->gen stays even (0) when not capturing. Inside capture,
+    // each in-place overwrite bumps it 1->3 (odd, then even+2).
+    vecsWorld* w = vecsCreateWorld( 64u );
+    vecsEntity a = vecsCreate( w );
+    vecsSet<SnapPodA>( w, a, { 1u, 1.0f } );
+
+    uint32_t cid = vecsTypeId<SnapPodA>();
+    vecsPool* pool = w->pools[cid];
+    ASSERT_TRUE( pool != nullptr );
+    ASSERT_EQ( std::atomic_load_explicit( &pool->gen, std::memory_order_acquire ) & 1ull, 0ull );
+
+    // Outside capture: set is direct, gen NOT bumped.
+    vecsSet<SnapPodA>( w, a, { 2u, 2.0f } );
+    ASSERT_EQ( std::atomic_load_explicit( &pool->gen, std::memory_order_acquire ) & 1ull, 0ull );
+
+    // Inside capture: in-place overwrite bumps gen.
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+    vecsSet<SnapPodA>( w, a, { 3u, 3.0f } );
+    uint64_t genDuring = std::atomic_load_explicit( &pool->gen, std::memory_order_acquire );
+    // gen is even after the fast path completes (1+1 = 2 mod 2 = even).
+    ASSERT_EQ( genDuring & 1ull, 0ull );
+    ASSERT_GT( genDuring, 0ull ); // bumped at least once
+
+    std::thread worker( [job]{ vecsSnapshotExecute( job ); } );
+    vecsSnapshotJoin( job );
+    worker.join();
+    vecsSnapshotJobDestroy( job );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( pattern2, concurrent_overwrite_no_tear )
+{
+    // N entities with SeqGuard invariant (b == ~a). Main thread hammers
+    // vecsSet<SeqGuard> during capture. After Join, the captured snapshot's
+    // SeqGuard pool must satisfy the invariant on every element — seqlock
+    // guarantees no torn reads.
+    vecsWorld* w = vecsCreateWorld( 4096u );
+    constexpr uint32_t N = 500;
+    std::vector<vecsEntity> es;
+    for ( uint32_t i = 0; i < N; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        es.push_back( e );
+        vecsSet<SeqGuard>( w, e, { ( uint64_t )i, ~( uint64_t )i } );
+    }
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    constexpr int kCycles = 20;
+    for ( int cycle = 0; cycle < kCycles; cycle++ )
+    {
+        vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+        std::thread worker( [job]{ vecsSnapshotExecute( job ); } );
+
+        for ( int i = 0; i < 500; i++ )
+        {
+            uint32_t idx = ( uint32_t )( ( i * 7919u + cycle * 131u ) % N );
+            uint64_t v = ( uint64_t )( cycle * 1000u + i );
+            vecsSet<SeqGuard>( w, es[idx], { v, ~v } );
+        }
+
+        vecsSnapshotJoin( job );
+        worker.join();
+        vecsSnapshotJobDestroy( job );
+    }
+
+    // Validate the captured SeqGuard pool: invariant b == ~a on every element.
+    uint32_t cid = vecsTypeId<SeqGuard>();
+    vecsPool* pool = w->pools[cid];
+    ASSERT_TRUE( pool != nullptr );
+    for ( uint32_t i = 0; i < pool->count; i++ )
+    {
+        SeqGuard* g = ( SeqGuard* )( pool->denseData + i * pool->stride );
+        ASSERT_EQ( g->b, ~g->a );
+    }
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( pattern2, structural_ops_still_deferred )
+{
+    // deferred cmdbuffer must still apply for structural ops.
+    vecsWorld* w = vecsCreateWorld( 64u );
+    vecsEntity a = vecsCreate( w );
+    vecsSet<SnapPodA>( w, a, { 1u, 1.0f } );
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+
+    // Create: deferred token, not alive yet.
+    vecsEntity ne = vecsCreate( w );
+    ASSERT_FALSE( vecsAlive( w, ne ) );
+    ASSERT_TRUE( vecsEntityIsDeferred( ne ) );
+
+    // Unset of existing component: deferred.
+    vecsUnset<SnapPodA>( w, a );
+    // Still has the component until Join.
+    ASSERT_TRUE( vecsHas<SnapPodA>( w, a ) );
+
+    std::thread worker( [job]{ vecsSnapshotExecute( job ); } );
+    vecsSnapshotJoin( job );
+    worker.join();
+
+    // Now deferred ops applied.
+    vecsEntity real_ne = vecsResolveDeferredEntity( w, ne );
+    ASSERT_TRUE( vecsAlive( w, real_ne ) );
+    ASSERT_FALSE( vecsHas<SnapPodA>( w, a ) );
+
+    vecsSnapshotJobDestroy( job );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( pattern2, nontrivial_pool_still_deferred )
+{
+    // Non-trivial pool (has copyCtor): seqlock fast path gated out; defers via cmdBuffer.
+    vecsWorld* w = vecsCreateWorld( 64u );
+    vecsEntity a = vecsCreate( w );
+    SnapChunky initial;
+    initial.ints = { 1, 2, 3 };
+    vecsSet<SnapChunky>( w, a, initial );
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+
+    SnapChunky modified = initial;
+    modified.ints.clear();
+    modified.ints.push_back( 999 );
+    vecsSet<SnapChunky>( w, a, modified );
+
+    // vecsSet<SnapChunky> during capture defers, so live value is still initial.
+    // (Until Join flushes the cmdBuffer.)
+    std::thread worker( [job]{ vecsSnapshotExecute( job ); } );
+    vecsSnapshotJoin( job );
+    worker.join();
+
+    // After Join, the cmd buffer applied the deferred set.
+    ASSERT_EQ( vecsGet<SnapChunky>( w, a )->ints.size(), 1u );
+    ASSERT_EQ( vecsGet<SnapChunky>( w, a )->ints[0], 999 );
+
+    vecsSnapshotJobDestroy( job );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( pattern2, dead_entity_overwrite_not_applied )
+{
+    // Destroy entity first. Then begin capture. vecsSet on the dead handle
+    // must not corrupt anything — fast path is gated by vecsAlive.
+    vecsWorld* w = vecsCreateWorld( 64u );
+    vecsEntity a = vecsCreate( w );
+    vecsSet<SnapPodA>( w, a, { 1u, 1.0f } );
+    vecsDestroy( w, a );
+    ASSERT_FALSE( vecsAlive( w, a ) );
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+
+    // Set on dead handle: should defer (gate fails), not write in-place.
+    vecsSet<SnapPodA>( w, a, { 999u, 999.0f } );
+
+    std::thread worker( [job]{ vecsSnapshotExecute( job ); } );
+    vecsSnapshotJoin( job );
+    worker.join();
+
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    vecsSnapshotJobDestroy( job );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+// ==========================================================================
+// Seqlock benchmarks — main-thread overhead vs deferred cmdbuffer
+// ==========================================================================
+
+UTEST( bench, pattern2_inplace_overwrite_during_capture )
+{
+    // seqlock in-place overwrite during capture vs direct writes (no capture).
+    vecsWorld* w = vecsCreateWorld( 4096u );
+    constexpr uint32_t N = 1000;
+    std::vector<vecsEntity> es;
+    for ( uint32_t i = 0; i < N; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        es.push_back( e );
+        vecsSet<SnapPodA>( w, e, { ( uint32_t )i, ( float )i } );
+    }
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    constexpr int kIters = 200;
+    constexpr int kOps = 100;
+
+    uint32_t seed = 1;
+    double t0 = vecsBenchNow();
+    for ( int i = 0; i < kIters; i++ )
+    {
+        for ( int j = 0; j < kOps; j++ )
+        {
+            seed = seed * 1103515245u + 12345u;
+            uint32_t idx = seed % N;
+            vecsSet<SnapPodA>( w, es[idx], { seed, ( float )seed } );
+        }
+    }
+    double t1 = vecsBenchNow();
+    double directUs = ( t1 - t0 ) * 1e6 / ( kIters * kOps );
+
+    // seqlock in-place writes during capture.
+    seed = 1;
+    double totalMain = 0.0;
+    for ( int i = 0; i < kIters; i++ )
+    {
+        vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+        std::thread worker( [job]{ vecsSnapshotExecute( job ); } );
+        double t2 = vecsBenchNow();
+        for ( int j = 0; j < kOps; j++ )
+        {
+            seed = seed * 1103515245u + 12345u;
+            uint32_t idx = seed % N;
+            vecsSet<SnapPodA>( w, es[idx], { seed, ( float )seed } );
+        }
+        double t3 = vecsBenchNow();
+        totalMain += ( t3 - t2 );
+        vecsSnapshotJoin( job );
+        worker.join();
+        vecsSnapshotJobDestroy( job );
+    }
+    double p2Us = totalMain * 1e6 / ( kIters * kOps );
+
+    printf( "[bench] Pod direct:           %.3f us/op (N=%u)\n", directUs, N );
+    printf( "[bench] Pod seqlock:        %.3f us/op (N=%u)\n", p2Us, N );
+    printf( "[bench] seqlock overhead:   %.3f us/op (%.1f%%)\n",
+            p2Us - directUs,
+            directUs > 0 ? ( p2Us - directUs ) / directUs * 100.0 : 0.0 );
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+    ASSERT_GT( directUs, 0.0 );
+}
+
+UTEST( bench, pattern1_vs_pattern2_overwrite )
+{
+    // cmdbuffer defer (chunky) vs seqlock (trivial pod), same N.
+    vecsWorld* w = vecsCreateWorld( 4096u );
+    constexpr uint32_t N = 1000;
+    std::vector<vecsEntity> es;
+    for ( uint32_t i = 0; i < N; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        es.push_back( e );
+        vecsSet<BenchChunky>( w, e, BenchChunky{ ( uint64_t )i, {}, {}, {}, {} } );
+        vecsSet<SnapPodA>( w, e, { ( uint32_t )i, ( float )i } );
+    }
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    constexpr int kIters = 100;
+    constexpr int kOps = 100;
+    uint32_t seed;
+
+    // cmdbuffer defer: BenchChunky has copyCtor.
+    seed = 1;
+    double totalP1 = 0.0;
+    for ( int i = 0; i < kIters; i++ )
+    {
+        vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+        std::thread worker( [job]{ vecsSnapshotExecute( job ); } );
+        double t0 = vecsBenchNow();
+        for ( int j = 0; j < kOps; j++ )
+        {
+            seed = seed * 1103515245u + 12345u;
+            uint32_t idx = seed % N;
+            vecsSet<BenchChunky>( w, es[idx], BenchChunky{ ( uint64_t )seed, {}, {}, {}, {} } );
+        }
+        double t1 = vecsBenchNow();
+        totalP1 += ( t1 - t0 );
+        vecsSnapshotJoin( job );
+        worker.join();
+        vecsSnapshotJobDestroy( job );
+    }
+    double p1Us = totalP1 * 1e6 / ( kIters * kOps );
+
+    // seqlock: SnapPodA is trivially copyable.
+    seed = 1;
+    double totalP2 = 0.0;
+    for ( int i = 0; i < kIters; i++ )
+    {
+        vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+        std::thread worker( [job]{ vecsSnapshotExecute( job ); } );
+        double t0 = vecsBenchNow();
+        for ( int j = 0; j < kOps; j++ )
+        {
+            seed = seed * 1103515245u + 12345u;
+            uint32_t idx = seed % N;
+            vecsSet<SnapPodA>( w, es[idx], { seed, ( float )seed } );
+        }
+        double t1 = vecsBenchNow();
+        totalP2 += ( t1 - t0 );
+        vecsSnapshotJoin( job );
+        worker.join();
+        vecsSnapshotJobDestroy( job );
+    }
+    double p2Us = totalP2 * 1e6 / ( kIters * kOps );
+
+    printf( "[bench] cmdbuf defer (chunky):   %.3f us/op\n", p1Us );
+    printf( "[bench] seqlock (pod):           %.3f us/op\n", p2Us );
+    printf( "[bench] seqlock saves:           %.3f us/op (%.1f%%)\n",
+            p1Us - p2Us, p1Us > 0 ? ( p1Us - p2Us ) / p1Us * 100.0 : 0.0 );
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+    ASSERT_GT( p1Us, 0.0 );
+    ASSERT_GT( p2Us, 0.0 );
+}
+
+UTEST( bench, pattern2_writer_cost_no_capture )
+{
+    // gen is not bumped outside capture; no regression on direct path.
+    vecsWorld* w = vecsCreateWorld( 4096u );
+    constexpr uint32_t N = 1000;
+    std::vector<vecsEntity> es;
+    for ( uint32_t i = 0; i < N; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        es.push_back( e );
+        vecsSet<SnapPodA>( w, e, { ( uint32_t )i, ( float )i } );
+    }
+
+    constexpr int kIters = 200;
+    constexpr int kOps = 100;
+    uint32_t seed = 1;
+    double t0 = vecsBenchNow();
+    for ( int i = 0; i < kIters; i++ )
+    {
+        for ( int j = 0; j < kOps; j++ )
+        {
+            seed = seed * 1103515245u + 12345u;
+            uint32_t idx = seed % N;
+            vecsSet<SnapPodA>( w, es[idx], { seed, ( float )seed } );
+        }
+    }
+    double t1 = vecsBenchNow();
+    double noCapUs = ( t1 - t0 ) * 1e6 / ( kIters * kOps );
+
+    // Verify gen is even (not bumped outside capture).
+    uint32_t cid = vecsTypeId<SnapPodA>();
+    vecsPool* pool = w->pools[cid];
+    ASSERT_EQ( std::atomic_load_explicit( &pool->gen, std::memory_order_acquire ) & 1ull, 0ull );
+
+    printf( "[bench] Pod overwrite (no capture): %.3f us/op (N=%u)\n", noCapUs, N );
+
+    vecsDestroyWorld( w );
+    ASSERT_GT( noCapUs, 0.0 );
+}
+
+// ==========================================================================
+// Fuzz test — seeded xorshift64; stochastic snapshots every 1-3 frames.
+// validate after each snapshot; restore at end.
+
+static uint64_t vecsFuzzXorShift64( uint64_t& s )
+{
+    uint64_t x = s;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    s = x;
+    return x;
+}
+
+struct FuzzPod
+{
+    uint64_t a;
+    uint64_t b;
+    uint64_t c;
+};
+
+UTEST( fuzz, multithread_insanity_mass_create_destroy_with_stochastic_snapshots )
+{
+    constexpr uint32_t kMaxEntities = 4096u;
+    constexpr int kFrames = 200;
+    constexpr uint64_t kBaseSeed = 0xDEADBEEF12345678ULL;
+
+    vecsWorld* w = vecsCreateWorld( kMaxEntities );
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    // Pool of live entities on the main thread (single-threaded by design:
+    // vecsEntityPoolCreate/Destroy are not internally synchronised).
+    std::vector<vecsEntity> live;
+    live.reserve( kMaxEntities );
+    uint64_t rng = kBaseSeed;
+    uint64_t opsDone = 0;
+    int framesSinceSnap = 0;
+    int framesToNextSnap = 1 + ( int )( vecsFuzzXorShift64( rng ) % 3 );
+    int cycle = 0;
+
+    auto pickRandomLive = [&]() -> vecsEntity {
+        if ( live.empty() ) return VECS_INVALID_ENTITY;
+        return live[ ( uint32_t )( vecsFuzzXorShift64( rng ) % live.size() ) ];
+    };
+
+    while ( cycle < kFrames )
+    {
+        framesSinceSnap++;
+
+        // Stochastic snapshot every 1-3 frames.
+        if ( framesSinceSnap >= framesToNextSnap )
+        {
+            vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+            std::thread cap( [job]{ vecsSnapshotExecute( job ); } );
+
+            // Main thread continues mutating during capture: a few
+            // in-place overwrites (Pattern 2 seqlock-protected) and
+            // create/destroy (deferred via cmdBuffer).
+            for ( int i = 0; i < 6; i++ )
+            {
+                uint64_t r = vecsFuzzXorShift64( rng );
+                uint32_t op = ( uint32_t )( r % 4u );
+                if ( op == 0 && live.size() < kMaxEntities - 8 )
+                {
+                    vecsEntity e = vecsCreate( w );
+                    if ( vecsAlive( w, e ) )
+                    {
+                        live.push_back( e );
+                        vecsSet<FuzzPod>( w, e, FuzzPod{ r, r * 7u, r * 11u } );
+                    }
+                }
+                else if ( op == 1 && !live.empty() )
+                {
+                    vecsEntity e = pickRandomLive();
+                    vecsDestroy( w, e );
+                    for ( auto it = live.begin(); it != live.end(); ++it )
+                    {
+                        if ( *it == e ) { live.erase( it ); break; }
+                    }
+                }
+                else if ( !live.empty() )
+                {
+                    vecsEntity e = pickRandomLive();
+                    vecsSet<FuzzPod>( w, e, FuzzPod{ r, r * 23u, r * 29u } );
+                }
+                opsDone++;
+            }
+
+            vecsSnapshotJoin( job );
+            cap.join();
+            vecsSnapshotJobDestroy( job );
+
+            // The vecsValidate after every snapshot is the load-bearing
+            // invariant: if the snapshot system has a race, the world state
+            // here will be inconsistent.
+            if ( !vecsValidate( w ) )
+            {
+                fprintf( stderr,
+                         "[fuzz] INVALIDATE cycle=%d live=%zu ops=%llu\n",
+                         cycle, live.size(),
+                         ( unsigned long long )opsDone );
+                fflush( stderr );
+                // Dump the pool 0 state for diagnosis.
+                uint32_t cid = vecsTypeId<FuzzPod>();
+                vecsPool* pool = w->pools[cid];
+                if ( pool )
+                {
+                    fprintf( stderr, "[fuzz] pool 0: count=%u capacity=%u\n",
+                             pool->count, pool->capacity );
+                    for ( uint32_t k = 0; k < 32; k++ )
+                    {
+                        if ( pool->sparse[k] != 0xFFFFFFFFu )
+                            fprintf( stderr, "  sparse[%u]=%u\n", k, pool->sparse[k] );
+                    }
+                }
+                ASSERT_TRUE( false );
+                return;
+            }
+
+            framesSinceSnap = 0;
+            framesToNextSnap = 1 + ( int )( vecsFuzzXorShift64( rng ) % 3 );
+            cycle++;
+
+            // Validate after every snapshot cycle.
+            if ( !vecsValidate( w ) )
+            {
+                fprintf( stderr, "[fuzz] INVALIDATE post-cycle cycle=%d live=%zu ops=%llu\n",
+                         cycle, live.size(), ( unsigned long long )opsDone );
+                fflush( stderr );
+                ASSERT_TRUE( false );
+                return;
+            }
+        }
+        else
+        {
+            // Between snapshots: pure main-thread mutation storm.
+            uint64_t r = vecsFuzzXorShift64( rng );
+            uint32_t op = ( uint32_t )( r % 4u );
+            if ( op == 0 && live.size() < kMaxEntities - 8 )
+            {
+                vecsEntity e = vecsCreate( w );
+                if ( vecsAlive( w, e ) )
+                {
+                    live.push_back( e );
+                    vecsSet<FuzzPod>( w, e, FuzzPod{ r, r * 7u, r * 11u } );
+                }
+            }
+            else if ( op == 1 && !live.empty() )
+            {
+                vecsEntity e = pickRandomLive();
+                vecsDestroy( w, e );
+                for ( auto it = live.begin(); it != live.end(); ++it )
+                {
+                    if ( *it == e ) { live.erase( it ); break; }
+                }
+            }
+            else if ( !live.empty() )
+            {
+                vecsEntity e = pickRandomLive();
+                vecsSet<FuzzPod>( w, e, FuzzPod{ r, r * 23u, r * 29u } );
+            }
+            opsDone++;
+
+            // Validate after every pure-mutation iteration.
+            if ( !vecsValidate( w ) )
+            {
+                fprintf( stderr, "[fuzz] INVALIDATE post-mutation cycle=%d live=%zu ops=%llu\n",
+                         cycle, live.size(), ( unsigned long long )opsDone );
+                fflush( stderr );
+                ASSERT_TRUE( false );
+                return;
+            }
+        }
+    }
+
+    // Final sanity + restore round-trip.
+    ASSERT_TRUE( vecsValidate( w ) );
+    vecsSnapshotRestore( w, snap );
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    fprintf( stderr, "[fuzz] %d cycles, %llu ops, %zu live at end (seed=0x%016llx)\n",
+             kFrames, ( unsigned long long )opsDone, live.size(),
+             ( unsigned long long )kBaseSeed );
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+// ==========================================================================
+// Mega-fuzz — broad game-simulation surface: create/destroy/set/unset across
+// many component types, stochastic snapshots every 1-3 frames, validate+restore.
+static constexpr bool vecsRunMegaFuzz = false; // flip true for race stress
+
+struct MegaPos  { float x, y, z; };
+struct MegaVel  { float dx, dy, dz; };
+struct MegaHp   { int hp, max; };
+struct MegaTagA {};
+struct MegaTagB {};
+struct MegaTagC {};
+struct MegaName { std::array<char, 32> name; uint32_t len; };
+struct MegaList { std::vector<int> items; uint32_t checksum; };
+struct MegaBlob { uint64_t a, b, c, d, e, f, g, h; };
+
+static const char* vecsMegaEntityStr( vecsEntity e )
+{
+    static thread_local char buf[64];
+    if ( e == VECS_INVALID_ENTITY ) return "INV";
+    if ( vecsEntityIsDeferred( e ) ) { snprintf( buf, sizeof( buf ), "DEF(%u)", vecsEntityIndex(e) ); return buf; }
+    snprintf( buf, sizeof( buf ), "R(%u:%u)", vecsEntityIndex(e), vecsEntityGeneration(e) ); return buf;
+}
+
+UTEST( fuzz, megafuzz_game_simulation )
+{
+    if ( !vecsRunMegaFuzz ) return;
+
+    constexpr uint32_t kMaxEntities = 8192u;
+    constexpr int kFrames = 400;
+    constexpr int kWriterThreads = 0; // seqlock concurrent stress in pattern2.*
+    constexpr uint64_t kBaseSeed = 0xC0FFEECAFEBABEULL;
+
+    vecsWorld* w = vecsCreateWorld( kMaxEntities );
+    // Pre-touch all component types so vecsTypeId registers them.
+    {
+        vecsEntity seed = vecsCreate( w );
+        vecsSet<MegaPos>( w, seed, { 0,0,0 } );
+        vecsSet<MegaVel>( w, seed, { 0,0,0 } );
+        vecsSet<MegaHp>( w, seed, { 100, 100 } );
+        vecsAddTag<MegaTagA>( w, seed );
+        MegaName nm{}; std::strncpy( nm.name.data(), "seed", 4 ); nm.len = 4;
+        vecsSet<MegaName>( w, seed, nm );
+        MegaList ls{}; ls.checksum = 0; vecsSet<MegaList>( w, seed, ls );
+        MegaBlob bl{}; vecsSet<MegaBlob>( w, seed, bl );
+    }
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    // State tracked by main thread only.
+    std::vector<vecsEntity> live;
+    live.reserve( kMaxEntities );
+    live.push_back( VECS_INVALID_ENTITY ); // placeholder so live[0] = seed
+
+    uint64_t rng = kBaseSeed;
+    uint64_t opsDone = 0;
+    int framesSinceSnap = 0;
+    int framesToNextSnap = 1 + ( int )( vecsFuzzXorShift64( rng ) % 3 );
+
+    // Counters for failure tracking.
+    int snapshotFailures = 0;
+    int writeThreadFailures = 0;
+
+    // Stable entity snapshot for writers; populated before each capture.
+    static constexpr uint32_t kWriterBuf = 256;
+    std::array<vecsEntity, kWriterBuf> wbuf;
+    std::atomic<uint32_t> wbufSz{ 0 };
+    wbuf.fill( VECS_INVALID_ENTITY );
+
+    std::atomic<bool> stop{ false };
+    std::vector<std::thread> writers;
+    for ( int t = 0; t < kWriterThreads; t++ )
+    {
+        writers.emplace_back( [&, t]() {
+            uint64_t local = kBaseSeed + ( uint64_t )( t + 1 ) * 0x9E3779B97F4A7C15ULL;
+            // only during capture: pool ops aren't concurrent-safe outside it
+            while ( !stop.load( std::memory_order_relaxed ) )
+            {
+                if ( !std::atomic_load_explicit( &w->captureInProgress, std::memory_order_acquire ) )
+                { std::this_thread::yield(); continue; }
+                uint32_t sz = wbufSz.load( std::memory_order_acquire );
+                if ( sz == 0 ) { std::this_thread::yield(); continue; }
+                uint64_t r = vecsFuzzXorShift64( local );
+                uint32_t slot = ( uint32_t )( r % sz );
+                vecsEntity e = wbuf[slot];
+                if ( e == VECS_INVALID_ENTITY || vecsEntityIsDeferred( e ) ) continue;
+                r = vecsFuzzXorShift64( local );
+                uint32_t which = ( uint32_t )( r % 4u );
+                if ( which == 0 )      vecsSet<MegaPos>( w, e, { ( float )r, ( float )( r >> 8 ), ( float )( r >> 16 ) } );
+                else if ( which == 1 ) vecsSet<MegaVel>( w, e, { ( float )( r & 0xFFFF ), ( float )( r >> 16 ), ( float )r } );
+                else if ( which == 2 ) vecsSet<MegaHp>( w, e, { ( int )( r & 0xFFFF ), 100 } );
+                else                   vecsSet<MegaBlob>( w, e, { r, r*7u, r*11u, r*13u, r*17u, r*19u, r*23u, r*29u } );
+                // yield so seqlock reader gets a stable window
+                std::this_thread::yield();
+            }
+        } );
+    }
+
+    auto pickLive = [&]() -> vecsEntity {
+        if ( live.size() < 2 ) return VECS_INVALID_ENTITY;
+        uint32_t slot = 1u + ( uint32_t )( vecsFuzzXorShift64( rng ) % ( live.size() - 1u ) );
+        return live[slot];
+    };
+
+    auto oneMainMutation = [&]() {
+        uint64_t r = vecsFuzzXorShift64( rng );
+        uint32_t op = ( uint32_t )( r % 9u );
+        r = vecsFuzzXorShift64( rng );
+        if ( op == 0 && live.size() < kMaxEntities - 16 )
+        {
+            vecsEntity e = vecsCreate( w );
+            live.push_back( e );
+            // Give it Pos always
+            vecsSet<MegaPos>( w, e, { ( float )r, ( float )( r >> 8 ), 0 } );
+            if ( ( r & 1u ) == 0u ) vecsSet<MegaVel>( w, e, { 1, 0, 0 } );
+            if ( ( r & 2u ) == 0u ) vecsSet<MegaHp>( w, e, { 100, 100 } );
+            if ( ( r & 4u ) == 0u ) vecsAddTag<MegaTagA>( w, e );
+            if ( ( r & 8u ) == 0u )
+            {
+                MegaName nm{}; snprintf( nm.name.data(), 32, "e%u", vecsEntityIndex( e ) );
+                nm.len = ( uint32_t )strlen( nm.name.data() );
+                vecsSet<MegaName>( w, e, nm );
+            }
+            if ( ( r & 16u ) == 0u ) vecsSet<MegaList>( w, e, MegaList{ { ( int )r, ( int )( r * 3u ) }, ( uint32_t )( r & 0xFFFFu ) } );
+        }
+        else if ( op == 1 && live.size() > 2 )
+        {
+            vecsEntity e = pickLive();
+            if ( e != VECS_INVALID_ENTITY && vecsAlive( w, e ) )
+            {
+                vecsDestroy( w, e );
+                for ( auto it = live.begin(); it != live.end(); ++it )
+                {
+                    if ( *it == e ) { live.erase( it ); break; }
+                }
+            }
+        }
+        else if ( op == 2 )
+        {
+            vecsEntity e = pickLive();
+            if ( e != VECS_INVALID_ENTITY && vecsAlive( w, e ) ) vecsUnset<MegaHp>( w, e );
+        }
+        else if ( op == 3 )
+        {
+            vecsEntity e = pickLive();
+            if ( e != VECS_INVALID_ENTITY && vecsAlive( w, e ) ) vecsAddTag<MegaTagB>( w, e );
+        }
+        else if ( op == 4 )
+        {
+            vecsEntity e = pickLive();
+            if ( e != VECS_INVALID_ENTITY && vecsAlive( w, e ) ) vecsUnset<MegaTagA>( w, e );
+        }
+        else if ( op == 5 )
+        {
+            vecsEntity e = pickLive();
+            if ( e != VECS_INVALID_ENTITY && vecsAlive( w, e ) ) vecsAddTag<MegaTagC>( w, e );
+        }
+        else if ( op == 6 )
+        {
+            vecsEntity e = pickLive();
+            if ( e != VECS_INVALID_ENTITY && vecsAlive( w, e ) ) vecsUnset<MegaTagC>( w, e );
+        }
+        else if ( op == 7 )
+        {
+            vecsEntity e = pickLive();
+            if ( e != VECS_INVALID_ENTITY && vecsAlive( w, e ) )
+            {
+                if ( const MegaPos* p = vecsGet<MegaPos>( w, e ) )
+                {
+                    MegaPos np = *p; np.x += 1.0f; np.y += 2.0f;
+                    vecsSet<MegaPos>( w, e, np );
+                }
+            }
+        }
+        else
+        {
+            vecsEntity e = pickLive();
+            if ( e != VECS_INVALID_ENTITY && vecsAlive( w, e ) )
+            {
+                MegaList ml{}; ml.items = { ( int )r }; ml.checksum = ( uint32_t )( r & 0xFFFFu );
+                vecsSet<MegaList>( w, e, ml );
+            }
+        }
+        opsDone++;
+    };
+
+    int cycle = 0;
+    while ( cycle < kFrames )
+    {
+        framesSinceSnap++;
+        if ( framesSinceSnap >= framesToNextSnap )
+        {
+            // snapshot live into writer-readable buffer before capture window
+            {
+                uint32_t sz = 0;
+                for ( size_t i = 1; i < live.size() && sz < kWriterBuf; i++ )
+                {
+                    vecsEntity e = live[i];
+                    if ( e != VECS_INVALID_ENTITY && vecsAlive( w, e ) )
+                        wbuf[sz++] = e;
+                }
+                wbufSz.store( sz, std::memory_order_release );
+            }
+            vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+            std::thread cap( [job]{ vecsSnapshotExecute( job ); } );
+            for ( int i = 0; i < 8; i++ ) oneMainMutation();
+            vecsSnapshotJoin( job );
+            cap.join();
+            wbufSz.store( 0, std::memory_order_release );
+            vecsSnapshotJobDestroy( job );
+
+            if ( !vecsValidate( w ) )
+            {
+                fprintf( stderr, "[megafuzz] INVALIDATE post-cycle cycle=%d live=%zu ops=%llu\n",
+                         cycle, live.size(), ( unsigned long long )opsDone );
+                fflush( stderr );
+                stop.store( true );
+                for ( auto& th : writers ) th.join();
+                ASSERT_TRUE( false );
+                return;
+            }
+            framesSinceSnap = 0;
+            framesToNextSnap = 1 + ( int )( vecsFuzzXorShift64( rng ) % 3 );
+            cycle++;
+        }
+        else
+        {
+            oneMainMutation();
+            if ( !vecsValidate( w ) )
+            {
+                fprintf( stderr, "[megafuzz] INVALIDATE post-mutation cycle=%d live=%zu ops=%llu\n",
+                         cycle, live.size(), ( unsigned long long )opsDone );
+                fflush( stderr );
+                stop.store( true );
+                for ( auto& th : writers ) th.join();
+                ASSERT_TRUE( false );
+                return;
+            }
+        }
+    }
+
+    stop.store( true );
+    for ( auto& th : writers ) th.join();
+
+    // Final restore round-trip.
+    if ( !vecsValidate( w ) )
+    {
+        fprintf( stderr, "[megafuzz] INVALIDATE pre-restore live=%zu ops=%llu\n",
+                 live.size(), ( unsigned long long )opsDone );
+        ASSERT_TRUE( false );
+    }
+    vecsSnapshotRestore( w, snap );
+    if ( !vecsValidate( w ) )
+    {
+        fprintf( stderr, "[megafuzz] INVALIDATE post-restore\n" );
+        ASSERT_TRUE( false );
+    }
+
+    fprintf( stderr, "[megafuzz] OK: %d cycles, %llu ops, %zu live (seed=0x%016llx)\n",
+             kFrames, ( unsigned long long )opsDone, live.size(),
+             ( unsigned long long )kBaseSeed );
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+// Repro: deferred destroy during capture leaves stale sparse[] when pool
+// later empties; restore copies it. Fixed: guard sparse copy on count>0.
+UTEST( repro, deferred_destroy_swap_collision )
+{
+    struct Pod { uint64_t a; uint64_t b; };
+    vecsWorld* w = vecsCreateWorld( 64u );
+    std::vector<vecsEntity> live;
+    auto pickLive = [&]( uint64_t& rng ) -> vecsEntity {
+        if ( live.empty() ) return VECS_INVALID_ENTITY;
+        return live[ ( uint32_t )( vecsFuzzXorShift64( rng ) % live.size() ) ];
+    };
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    // Pre-seed 4 entities with Pod.
+    for ( int i = 0; i < 4; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        live.push_back( e );
+        vecsSet<Pod>( w, e, { ( uint64_t )i, ( uint64_t )( i * 2 ) } );
+    }
+
+    uint64_t rng = 0xC0FFEE12345ULL;
+    for ( int cycle = 0; cycle < 5; cycle++ )
+    {
+        vecsSnapshotJob* job = vecsSnapshotBegin( w, snap );
+        std::thread cap( [job]{ vecsSnapshotExecute( job ); } );
+        for ( int i = 0; i < 6; i++ )
+        {
+            uint64_t r = vecsFuzzXorShift64( rng );
+            uint32_t op = ( uint32_t )( r % 4u );
+            r = vecsFuzzXorShift64( rng );
+            if ( op == 0 && live.size() < 60 )
+            {
+                vecsEntity e = vecsCreate( w );
+                live.push_back( e );
+                vecsSet<Pod>( w, e, { r, r * 7u } );
+            }
+            else if ( op == 1 && !live.empty() )
+            {
+                vecsEntity e = pickLive( rng );
+                vecsDestroy( w, e );
+                for ( auto it = live.begin(); it != live.end(); ++it )
+                {
+                    if ( *it == e ) { live.erase( it ); break; }
+                }
+            }
+            else if ( !live.empty() )
+            {
+                vecsEntity e = pickLive( rng );
+                vecsSet<Pod>( w, e, { r, r * 11u } );
+            }
+        }
+        vecsSnapshotJoin( job );
+        cap.join();
+        vecsSnapshotJobDestroy( job );
+        if ( !vecsValidate( w ) )
+        {
+            fprintf( stderr, "[repro] invalidated at cycle %d\n", cycle );
+            fflush( stderr );
+            ASSERT_TRUE( false );
+            return;
+        }
+    }
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( bench, snapshot_1000_full_actors_main_thread )
+{
+    // Realistic actor layout matching a survivors-style game:
+    //   Transform (pos+rot+scale), Velocity, Health, AI state blob,
+    //   Anim state blob, inventory (non-trivial std::vector),
+    //   Ability cooldowns, tags.
+    // Measures vecsSnapshotCaptureInto wall time on the main thread only.
+    // Worker thread doesn't exist — this IS the worst-case main-thread stall.
+
+    struct ActorTransform { float x,y,z, rx,ry,rz,rw, sx,sy,sz; };          // 40 B
+    struct ActorVelocity  { float vx,vy,vz, avx,avy,avz; };                  // 24 B
+    struct ActorHealth    { float hp,maxHp,shield,maxShield,regen; };         // 20 B
+    struct ActorAI        { uint8_t state; float targetX,targetY; uint32_t flags;
+                            float timers[8]; uint64_t blackboard[8]; };       // 109 B
+    struct ActorAnim      { uint32_t clipId,frame; float t,speed;
+                            uint8_t blendWeights[16]; uint32_t flags; };      // 36 B
+    struct ActorAbility   { float cooldowns[8]; uint32_t charges[8]; };      // 64 B
+    struct ActorInventory { std::vector<uint32_t> items;
+                            uint32_t gold, weight; };                         // non-trivial
+    struct TagAlive       {};
+
+    constexpr uint32_t N = 1000;
+    vecsWorld* w = vecsCreateWorld( N + 64u );
+
+    std::vector<vecsEntity> actors;
+    actors.reserve( N );
+    for ( uint32_t i = 0; i < N; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        actors.push_back( e );
+        vecsSet<ActorTransform>( w, e, { (float)i, 0, 0, 0,0,0,1, 1,1,1 } );
+        vecsSet<ActorVelocity>( w, e, { 1,0,0, 0,0,0 } );
+        vecsSet<ActorHealth>( w, e, { 100, 100, 50, 50, 1 } );
+        ActorAI ai{}; ai.state = 1; ai.targetX = (float)(i%60); ai.timers[0] = (float)i;
+        vecsSet<ActorAI>( w, e, ai );
+        ActorAnim an{}; an.clipId = i % 8; an.speed = 1.0f;
+        vecsSet<ActorAnim>( w, e, an );
+        ActorAbility ab{}; for ( int k=0;k<8;k++) ab.cooldowns[k]=(float)k;
+        vecsSet<ActorAbility>( w, e, ab );
+        ActorInventory inv;
+        inv.items = { i, i+1, i+2, i%7, i%13 }; // 5 items each
+        inv.gold = i * 3; inv.weight = 10;
+        vecsSet<ActorInventory>( w, e, inv );
+        vecsAddTag<TagAlive>( w, e );
+    }
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    // Warm up.
+    for ( int i = 0; i < 3; i++ ) vecsSnapshotCaptureInto( w, snap );
+
+    constexpr int kIters = 20;
+    double t0 = vecsBenchNow();
+    for ( int i = 0; i < kIters; i++ ) vecsSnapshotCaptureInto( w, snap );
+    double t1 = vecsBenchNow();
+
+    double usPerCapture = ( t1 - t0 ) * 1e6 / kIters;
+    double bytesPerActor = sizeof(ActorTransform) + sizeof(ActorVelocity)
+                         + sizeof(ActorHealth) + sizeof(ActorAI)
+                         + sizeof(ActorAnim) + sizeof(ActorAbility);
+    printf( "[bench] 1000 full actors: %.1f us/capture\n", usPerCapture );
+    printf( "[bench]   pod bytes/actor:     %zu B (%.0f KB total)\n",
+            (size_t)bytesPerActor, bytesPerActor * N / 1024.0 );
+    printf( "[bench]   inventory (non-trivial): 5 items/actor, copyCtor\n" );
+    printf( "[bench]   component pools:      %d (Transform+Vel+Hp+AI+Anim+Ability+Inventory+Tag)\n", 8 );
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+    ASSERT_GT( usPerCapture, 0.0 );
 }
 
 UTEST_MAIN();
