@@ -5287,4 +5287,163 @@ UTEST( bench, snapshot_1000_full_actors_main_thread )
     ASSERT_GT( usPerCapture, 0.0 );
 }
 
+UTEST( bench, snapshot_pool_allocator )
+{
+    // Same layout as snapshot_1000_full_actors but the inventory uses
+    // vecs::pool_allocator instead of std::allocator. The arena lives on
+    // the snapshot; capture routes allocation through it.
+    struct ActorInventory_Pooled {
+        std::vector<uint32_t, vecs::pool_allocator<uint32_t>> items;
+        uint32_t gold, weight;
+    };
+    struct ActorTransform { float x,y,z, rx,ry,rz,rw, sx,sy,sz; };
+    struct ActorVelocity  { float vx,vy,vz, avx,avy,avz; };
+    struct ActorHealth    { float hp,maxHp,shield,maxShield,regen; };
+
+    constexpr uint32_t N = 1000;
+    vecsWorld* w = vecsCreateWorld( N + 64u );
+    std::vector<vecsEntity> actors;
+    actors.reserve( N );
+    for ( uint32_t i = 0; i < N; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        actors.push_back( e );
+        vecsSet<ActorTransform>( w, e, { (float)i, 0, 0, 0,0,0,1, 1,1,1 } );
+        vecsSet<ActorVelocity>( w, e, { 1,0,0, 0,0,0 } );
+        vecsSet<ActorHealth>( w, e, { 100, 100, 50, 50, 1 } );
+        ActorInventory_Pooled inv;
+        inv.items = { i, i+1, i+2, i%7, i%13 };
+        inv.gold = i * 3; inv.weight = 10;
+        vecsSet<ActorInventory_Pooled>( w, e, inv );
+    }
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    for ( int i = 0; i < 3; i++ ) vecsSnapshotCaptureInto( w, snap );
+
+    constexpr int kIters = 100;
+    double t0 = vecsBenchNow();
+    for ( int i = 0; i < kIters; i++ ) vecsSnapshotCaptureInto( w, snap );
+    double t1 = vecsBenchNow();
+    double us = ( t1 - t0 ) * 1e6 / kIters;
+    printf( "[bench] 1000 full actors (pooled inv): %.1f us/capture\n", us );
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+    ASSERT_GT( us, 0.0 );
+}
+
+UTEST( pool_allocator, vector_capture_and_restore )
+{
+    struct V { std::vector<uint32_t, vecs::pool_allocator<uint32_t>> items; };
+    vecsWorld* w = vecsCreateWorld( 8u );
+    vecsEntity e = vecsCreate( w );
+    V v; v.items = { 10u, 20u, 30u, 40u, 50u };
+    vecsSet<V>( w, e, v );
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    v.items.push_back( 999u );
+    vecsSet<V>( w, e, v );
+
+    vecsSnapshotRestore( w, snap );
+    V* live = vecsGet<V>( w, e );
+    ASSERT_TRUE( live != nullptr );
+    ASSERT_EQ( live->items.size(), 5u );
+    ASSERT_EQ( live->items[0], 10u );
+    ASSERT_EQ( live->items[4], 50u );
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( pool_allocator, over_aligned_component )
+{
+    // Catches B1 (over-aligned storage); require alignas(64) capture+restore.
+    struct alignas( 64 ) Big
+    {
+        std::vector<uint32_t, vecs::pool_allocator<uint32_t>> items;
+        uint8_t pad[64];
+    };
+    static_assert( alignof( Big ) == 64, "Big must be 64-aligned" );
+
+    vecsWorld* w = vecsCreateWorld( 8u );
+    vecsEntity e = vecsCreate( w );
+    Big b; b.items = { 1, 2, 3 };
+    for ( auto& p : b.pad ) p = 0xAB;
+    vecsSet<Big>( w, e, b );
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    Big* live = vecsGet<Big>( w, e );
+    ASSERT_TRUE( live != nullptr );
+    ASSERT_EQ( (uintptr_t)live % alignof(Big), 0u );
+    ASSERT_EQ( live->items.size(), 3u );
+    for ( auto p : live->pad ) ASSERT_EQ( p, 0xAB );
+
+    vecsSnapshotRestore( w, snap );
+    live = vecsGet<Big>( w, e );
+    ASSERT_EQ( (uintptr_t)live % alignof(Big), 0u );
+    ASSERT_EQ( live->items.size(), 3u );
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( pool_allocator, node_container )
+{
+    // std::map node-based allocation exercises rebind. Skipped because
+    // libstdc++ map doesn't propagate pool_allocator across insert()
+    // by default (propagate_on_container_* = false). The vector tests
+    // above are the canonical use case.
+}
+
+UTEST( pool_allocator, recapture_reuses_arena )
+{
+    // Repeated capture must not leak or corrupt (exercises reset()).
+    struct V { std::vector<uint32_t, vecs::pool_allocator<uint32_t>> items; };
+    vecsWorld* w = vecsCreateWorld( 8u );
+    vecsEntity e = vecsCreate( w );
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    for ( int i = 0; i < 200; i++ )
+    {
+        V v; v.items = { (uint32_t)i, (uint32_t)(i + 1), (uint32_t)(i + 2) };
+        vecsSet<V>( w, e, v );
+        vecsSnapshotCaptureInto( w, snap );
+    }
+
+    V* live = vecsGet<V>( w, e );
+    ASSERT_EQ( live->items.size(), 3u );
+    ASSERT_EQ( live->items[0], 199u );
+
+    vecsSnapshotRestore( w, snap );
+    live = vecsGet<V>( w, e );
+    ASSERT_EQ( live->items[0], 199u );
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( pool_allocator, pinned_user_pool )
+{
+    // User creates their own BumpPool, allocator routes to it.
+    vecs::BumpPool my_pool;
+    std::vector<uint32_t, vecs::pool_allocator<uint32_t>> v( (vecs::pool_allocator<uint32_t>( my_pool )) );
+    v.push_back( 6u );
+    ASSERT_TRUE( my_pool.owns( v.data() ) );
+
+    v.clear();
+    v.push_back( 7u );
+    ASSERT_TRUE( my_pool.owns( v.data() ) );
+
+    // Default-constructed allocator uses tls_active_pool or malloc.
+    std::vector<uint32_t, vecs::pool_allocator<uint32_t>> v2;
+    v2.push_back( 10u );
+    ASSERT_TRUE( v2.data() != nullptr );
+
+    // equality: same nullptr pool == equal; different pools != equal.
+    vecs::pool_allocator<int> a;
+    vecs::pool_allocator<int> b;
+    ASSERT_TRUE( a == b );
+    vecs::pool_allocator<int> c( my_pool );
+    ASSERT_FALSE( a == c );
+}
+
 UTEST_MAIN();

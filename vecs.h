@@ -26,6 +26,7 @@
 #include <cassert>
 #include <new>
 #include <cstdlib>
+#include <algorithm>
 #include <type_traits>
 #include <tuple>
 #include <utility>
@@ -3622,6 +3623,185 @@ inline vecsHandle vecsMakeHandle( vecsWorld* w, vecsEntity e )
 //
 // Sync: Create -> CaptureInto -> Restore -> Destroy.
 
+// Pool allocator — fast path for std::vector / std::string / similar containers
+// inside components. Opt-in: declare components with vecs::pool_allocator<T> instead
+// of std::allocator<T>. Allocations route to the active pool (set by detail::PoolScope);
+// falls back to malloc when no pool is active. Containers born under an active pool
+// must be destroyed under that same active pool; otherwise UB. Default containers
+// (pool=nullptr) are malloc-backed and safe to destroy anywhere.
+namespace vecs
+{
+    class BumpPool
+    {
+        struct Block
+        {
+            void* base;
+            size_t size;
+            Block* next;
+        };
+        Block* head = nullptr;
+        // Bytes consumed in head. New allocations land at base + used.
+        size_t used = 0;
+
+    public:
+        BumpPool() = default;
+        BumpPool( const BumpPool& ) = delete;
+        BumpPool& operator=( const BumpPool& ) = delete;
+
+        ~BumpPool()
+        {
+            Block* b = head;
+            while ( b )
+            {
+                Block* n = b->next;
+                std::free( b->base );
+                std::free( b );
+                b = n;
+            }
+        }
+
+        // Bump pointer never moves already-issued memory: new blocks are
+        // pushed onto head and the bump pointer resets to zero there.
+        // Allocates with the requested alignment; caller is responsible for
+        // not exceeding alignof(max_align_t) at the type level (the std
+        // allocator case below handles over-aligned types via posix_memalign).
+        void* alloc( size_t bytes, size_t alignment )
+        {
+            constexpr size_t kBlockBase = 4096;
+            size_t aligned = ( used + alignment - 1 ) & ~( alignment - 1 );
+            if ( !head || aligned + bytes > head->size )
+            {
+                size_t ns = std::max( kBlockBase, aligned + bytes + 4096 );
+                Block* nb = (Block*)std::malloc( sizeof( Block ) );
+                assert( nb );
+                nb->base = std::malloc( ns );
+                assert( nb->base );
+                nb->size = ns;
+                nb->next = head;
+                head = nb;
+                aligned = 0;
+                used = bytes;
+                return nb->base;
+            }
+            void* p = (uint8_t*)head->base + aligned;
+            used = aligned + bytes;
+            return p;
+        }
+
+        void reset()
+        {
+            Block* b = head ? head->next : nullptr;
+            while ( b )
+            {
+                Block* n = b->next;
+                std::free( b->base );
+                std::free( b );
+                b = n;
+            }
+            if ( head ) head->next = nullptr;
+            used = 0;
+        }
+
+        bool owns( void* p ) const
+        {
+            for ( Block* b = head; b; b = b->next )
+            {
+                uint8_t* lo = (uint8_t*)b->base;
+                if ( (uint8_t*)p >= lo && (uint8_t*)p < lo + b->size ) return true;
+            }
+            return false;
+        }
+    };
+
+    namespace detail
+    {
+        // Active pool for the current thread, set by PoolScope.
+        inline thread_local BumpPool* tls_active_pool = nullptr;
+
+        struct PoolScope
+        {
+            BumpPool* prev;
+            PoolScope( BumpPool* p ) : prev( tls_active_pool ) { tls_active_pool = p; }
+            ~PoolScope() { tls_active_pool = prev; }
+        };
+    }
+
+    template< typename T >
+    class pool_allocator
+    {
+    public:
+        using value_type = T;
+        // Two pool_allocator<T> instances are interchangeable iff they refer
+        // to the same BumpPool. is_always_equal=false lets containers with
+        // different instances know to re-allocate on copy/move. Don't
+        // change this to true: it would silently enable buffer-steal moves
+        // between containers backed by different pools (live-world leak).
+        using is_always_equal = std::false_type;
+        using propagate_on_container_copy_assignment = std::false_type;
+        using propagate_on_container_move_assignment = std::false_type;
+        using propagate_on_container_swap = std::false_type;
+
+        // Default: route to tls_active_pool during PoolScope, else malloc.
+        pool_allocator() noexcept = default;
+
+        // Pin to a specific pool (user-owned). All alloc/dealloc go to that pool.
+        explicit pool_allocator( BumpPool& p ) noexcept : pool( &p ) {}
+
+        // Rebind ctor: copy pool pointer across T types. Uses the public
+        // pool() accessor so no friend declaration is needed.
+        template< typename U >
+        pool_allocator( const pool_allocator<U>& o ) noexcept : pool( o.pool() ) {}
+
+        BumpPool* pool_get() const noexcept { return pool; }
+
+        T* allocate( size_t n )
+        {
+            BumpPool* p = pool ? pool : detail::tls_active_pool;
+            if ( p ) return static_cast<T*>( p->alloc( n * sizeof(T), alignof(T) ) );
+            // Fallback: over-aligned types need aligned_alloc; mirror the
+            // alignment > 8u branch used elsewhere in this header.
+            if constexpr ( alignof(T) > 8u )
+            {
+                return static_cast<T*>( vecsAlignedAlloc( n * sizeof(T), alignof(T) ) );
+            }
+            else
+            {
+                return static_cast<T*>( std::malloc( n * sizeof(T) ) );
+            }
+        }
+
+        void deallocate( T* p, size_t ) noexcept
+        {
+            if ( pool )
+            {
+                if ( pool->owns( p ) ) return;
+                if constexpr ( alignof(T) > 8u ) vecsAlignedFree( p );
+                else std::free( p );
+                return;
+            }
+            BumpPool* active = detail::tls_active_pool;
+            if ( active && active->owns( p ) ) return;
+            if constexpr ( alignof(T) > 8u ) vecsAlignedFree( p );
+            else std::free( p );
+        }
+
+    private:
+        BumpPool* pool = nullptr;
+    };
+
+    template< typename T, typename U >
+    bool operator==( const pool_allocator<T>& a, const pool_allocator<U>& b ) noexcept
+    {
+        return a.pool_get() == b.pool_get();
+    }
+
+    template< typename T, typename U >
+    bool operator!=( const pool_allocator<T>& a, const pool_allocator<U>& b ) noexcept
+    {
+        return a.pool_get() != b.pool_get();
+    }
+}
+
 namespace vecs_snapshot_detail
 {
     struct CapturedPool
@@ -3672,12 +3852,19 @@ namespace vecs_snapshot_detail
         CapturedSingletonSlot  singletons[VECS_MAX_COMPONENTS];
         bool                   relPresent;
         vecsEntity*            relParents; // [maxEntities]; INVALID_ENTITY means no parent
+
+        // Bump arena for pool_allocator users during capture. Reset each
+        // capture so reused buffers go through it. Freed when the snapshot
+        // is destroyed.
+        vecs::BumpPool         allocatorPool;
     };
 
     inline CapturedSnapshot* allocCaptured( uint32_t maxEntities )
     {
-        CapturedSnapshot* s = ( CapturedSnapshot* )std::calloc( 1, sizeof( CapturedSnapshot ) );
+        CapturedSnapshot* s = ( CapturedSnapshot* )std::malloc( sizeof( CapturedSnapshot ) );
         assert( s );
+        std::memset( s, 0, sizeof( CapturedSnapshot ) );
+        new ( &s->allocatorPool ) vecs::BumpPool();
         s->generations = ( uint32_t* )std::malloc( maxEntities * sizeof( uint32_t ) );
         s->allocated   = ( uint8_t*  )std::malloc( maxEntities * sizeof( uint8_t ) );
         s->freeList    = ( uint32_t* )std::malloc( maxEntities * sizeof( uint32_t ) );
@@ -3695,6 +3882,10 @@ namespace vecs_snapshot_detail
     inline void freeCaptured( CapturedSnapshot* s )
     {
         if ( !s ) return;
+        // Wrap the destructors in PoolScope so vecs::pool_allocator users
+        // correctly route dealloc back to the snap's arena (no-op), not
+        // to std::free on interior pointers.
+        vecs::detail::PoolScope scope( &s->allocatorPool );
         std::free( s->generations );
         std::free( s->allocated );
         std::free( s->freeList );
@@ -3743,6 +3934,7 @@ namespace vecs_snapshot_detail
             }
         }
         std::free( s->relParents );
+        s->allocatorPool.~BumpPool();
         std::free( s );
     }
 
@@ -3860,6 +4052,13 @@ inline void vecsSnapshotCaptureInto( vecsWorld* w, vecsWorldSnapshot* snap )
         std::memcpy( s->signatures[word], w->entities->signatures[word], w->maxEntities * sizeof( uint64_t ) );
     }
 
+    // Reset the arena; old captured buffers were owned by it. Components
+    // using vecs::pool_allocator route dealloc/alloc through this pool for
+    // the duration of the destruct + capture. After the scope exits, the
+    // arena can be reset again on the next capture.
+    {
+        vecs::detail::PoolScope scope( &s->allocatorPool );
+
     // Destruct any non-trivial contents previously captured (reused buffer).
     for ( uint32_t i = 0; i < s->poolCount; i++ )
     {
@@ -3868,6 +4067,7 @@ inline void vecsSnapshotCaptureInto( vecsWorld* w, vecsWorldSnapshot* snap )
             destructCapturedContents( s->poolSlots[i].pool );
         }
     }
+    s->allocatorPool.reset();
 
     // Walk live pools, capture each.
     for ( uint32_t cid = 0; cid < VECS_MAX_COMPONENTS; cid++ )
@@ -3924,6 +4124,7 @@ inline void vecsSnapshotCaptureInto( vecsWorld* w, vecsWorldSnapshot* snap )
             }
         }
     }
+    } // PoolScope
 
     // Singletons: deep-copy via memcpy.
     for ( uint32_t cid = 0; cid < VECS_MAX_COMPONENTS; cid++ )
