@@ -8487,6 +8487,55 @@ UTEST( gap, double_restore_not_idempotent_singleton )
     vecsDestroyWorld( w );
 }
 
+UTEST( gap, deferred_token_contract_during_capture )
+{
+    // Deferred tokens: not alive, vecsGet returns nullptr, pre-flush resolve returns VECS_INVALID_ENTITY.
+    vecsWorld* w = vecsCreateWorld( 64u );
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsSnapshotJob* job = vecsSnapshotBegin( w, snap ); // captureInProgress=1
+
+    vecsEntity deferred = vecsCreate( w );
+    ASSERT_TRUE( vecsEntityIsDeferred( deferred ) );
+    ASSERT_FALSE( vecsAlive( w, deferred ) );
+
+    struct POD { uint32_t x; };
+    ASSERT_TRUE( vecsGet<POD>( w, deferred ) == nullptr );
+
+    vecsEntity pre = vecsResolveDeferredEntity( w, deferred );
+    ASSERT_EQ( pre, VECS_INVALID_ENTITY );
+
+    vecsSnapshotJobDestroy( job );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( gap, deferred_token_resolves_after_join )
+{
+    // Post-Join: deferred CREATE+SET are applied, resolve returns real, vecsGet works.
+    vecsWorld* w = vecsCreateWorld( 64u );
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsSnapshotJob* job = vecsSnapshotBegin( w, snap ); // captureInProgress=1
+
+    vecsEntity deferred = vecsCreate( w );
+    struct POD { uint32_t x; };
+    vecsSet<POD>( w, deferred, { 42 } );
+
+    vecsSnapshotExecute( job );
+    vecsSnapshotJoin( job );
+
+    vecsEntity real = vecsResolveDeferredEntity( w, deferred );
+    ASSERT_FALSE( vecsEntityIsDeferred( real ) );
+    ASSERT_TRUE( vecsAlive( w, real ) );
+
+    POD* p = vecsGet<POD>( w, real );
+    ASSERT_TRUE( p != nullptr );
+    ASSERT_EQ( p->x, 42u );
+
+    vecsSnapshotJobDestroy( job );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
 UTEST( gap, singleton_roundtrip_pod )
 {
     struct RewindState { uint32_t tick; float dt; uint64_t seed; };

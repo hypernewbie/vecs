@@ -1352,9 +1352,9 @@ inline bool vecsAlive( vecsWorld* w, vecsEntity e )
     return vecsEntityPoolAlive( w->entities, e );
 }
 
-// Resolve a deferred-entity token to its real entity (post-flush) or
-// VECS_INVALID_ENTITY if the create was never queued / already failed.
-// Defined after vecsCommandBuffer so it can read created[].
+// Resolve a deferred-entity token to its real entity. Post-flush returns the
+// real handle; pre-flush returns VECS_INVALID_ENTITY (slot not yet populated).
+// Pass-through for non-deferred. Defined after vecsCommandBuffer.
 inline vecsEntity vecsResolveDeferredEntity( vecsWorld* w, vecsEntity e );
 
 // Cascading destruction. Nuke the entity and its entire child subtree.
@@ -1621,6 +1621,8 @@ inline bool vecsHas( vecsWorld* w, vecsEntity e )
 inline vecsEntity vecsClone( vecsWorld* w, vecsEntity src )
 {
     assert( w );
+    assert( std::atomic_load_explicit(&w->captureInProgress, std::memory_order_acquire) == 0u
+            && "Cannot clone during snapshot capture (drain cmdBuffer first)" );
     assert( vecsAlive( w, src ) );
     vecsEntity dst = vecsCreate( w );
     if ( dst == VECS_INVALID_ENTITY )
@@ -4317,6 +4319,9 @@ inline vecsEntity vecsCmdGetCreated( vecsCommandBuffer* cb, uint32_t index )
     return cb->created[index];
 }
 
+// Resolve a deferred-entity token. Post-flush returns the real handle;
+// pre-flush returns VECS_INVALID_ENTITY (cmdBuffer slot not yet populated).
+// Pass-through for non-deferred or out-of-bounds tokens.
 inline vecsEntity vecsResolveDeferredEntity( vecsWorld* w, vecsEntity e )
 {
     if ( vecsEntityIsDeferred( e ) && w->captureCmdBuffer )
@@ -5086,6 +5091,13 @@ size_t vecsSnapshotBytes( const vecsWorldSnapshot* snap );
 //   worker: vecsSnapshotExecute(job)
 //   main:   while (!vecsSnapshotPoll(job)) { do work; }
 //   main:   vecsSnapshotJoin(job)   // drains deferred mutations back into world
+//
+// Deferred-entity contract:
+//   During capture, mutators may return deferred-entity tokens (VECS_DEFERRED_GEN).
+//   Tokens are not alive and not readable until vecsSnapshotJoin flushes the
+//   cmdBuffer. Resolve post-join via vecsResolveDeferredEntity. Structural
+//   bulk-ops (vecsClone, vecsDestroyWorld, vecsClearWorld, vecsSetSingleton)
+//   assert captureInProgress==0.
 struct vecsSnapshotJob;
 
 // Defers mutations to captureCmdBuffer; assert no capture in progress.
@@ -5101,6 +5113,11 @@ bool vecsSnapshotPoll( const vecsSnapshotJob* job );
 void vecsSnapshotJoin( vecsSnapshotJob* job );
 
 void vecsSnapshotJobDestroy( vecsSnapshotJob* job );
+
+// Resolve a deferred-entity token. Post-flush returns the real handle;
+// pre-flush returns VECS_INVALID_ENTITY (cmdBuffer slot not yet populated).
+// Pass-through for non-deferred or out-of-bounds tokens.
+vecsEntity vecsResolveDeferredEntity( vecsWorld* w, vecsEntity e );
 
 // --------------------------------------------------------------------------
 // SIMD
