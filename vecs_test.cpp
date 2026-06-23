@@ -4577,6 +4577,194 @@ UTEST( query, component_id_overflow_semantics_release )
 #endif
 }
 
+UTEST( query, count_basic )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    for ( uint32_t i = 0; i < 10u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { ( float )i, 0 } );
+    }
+
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    uint32_t eachCount = 0;
+    vecsQueryEach<Position>( w, q, [&]( vecsEntity, Position& ) { eachCount++; } );
+
+    ASSERT_EQ( vecsQueryCount( w, q ), eachCount );
+    ASSERT_EQ( vecsQueryCount( w, q ), 10u );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( query, count_with_without )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    for ( uint32_t i = 0; i < 10u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { ( float )i, 0 } );
+        if ( i % 2u == 0u )
+        {
+            vecsSet<Velocity>( w, e, { 0, 0 } );
+        }
+    }
+
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    vecsQueryAddWithout( q, vecsTypeId<Velocity>() );
+    uint32_t eachCount = 0;
+    vecsQueryEach<Position>( w, q, [&]( vecsEntity, Position& ) { eachCount++; } );
+
+    ASSERT_EQ( vecsQueryCount( w, q ), eachCount );
+    ASSERT_EQ( vecsQueryCount( w, q ), 5u );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( query, count_empty )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    vecsEntity e = vecsCreate( w );
+    vecsSet<Position>( w, e, { 1, 0 } );
+
+    vecsQuery* q = vecsBuildQuery<Health>( w );
+    ASSERT_EQ( vecsQueryCount( w, q ), 0u );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( query, count_impossible )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    vecsEntity e = vecsCreate( w );
+    vecsSet<Position>( w, e, { 1, 0 } );
+
+    vecsQuery* q = vecsCreateQuery();
+    vecsQuerySetImpossible( q );
+    ASSERT_EQ( vecsQueryCount( w, q ), 0u );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( query, count_after_structural_change )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    for ( uint32_t i = 0; i < 5u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { ( float )i, 0 } );
+    }
+
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    ASSERT_EQ( vecsQueryCount( w, q ), 5u );
+
+    for ( uint32_t i = 0; i < 7u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { 100.0f + ( float )i, 0 } );
+    }
+    ASSERT_EQ( vecsQueryCount( w, q ), 12u );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( query, strided_basic )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    std::vector<vecsEntity> es;
+    for ( uint32_t i = 0; i < 32u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        es.push_back( e );
+        vecsSet<Position>( w, e, { ( float )i, 0 } );
+    }
+
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    std::vector<float> visited;
+    vecsQueryEachStrided<Position>( w, q, 4u, [&]( vecsEntity, Position& p )
+    {
+        visited.push_back( p.x );
+    } );
+
+    ASSERT_EQ( visited.size(), 8u );
+    ASSERT_EQ( visited[0], 0.0f );
+    ASSERT_EQ( visited[1], 4.0f );
+    ASSERT_EQ( visited[7], 28.0f );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( query, strided_stride_1_matches_each )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    for ( uint32_t i = 0; i < 16u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { ( float )i, 0 } );
+    }
+
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    std::vector<float> eachVisited, stridedVisited;
+    vecsQueryEach<Position>( w, q, [&]( vecsEntity, Position& p ) { eachVisited.push_back( p.x ); } );
+    vecsQueryEachStrided<Position>( w, q, 1u, [&]( vecsEntity, Position& p ) { stridedVisited.push_back( p.x ); } );
+
+    ASSERT_EQ( eachVisited.size(), stridedVisited.size() );
+    for ( size_t i = 0; i < eachVisited.size(); i++ )
+    {
+        ASSERT_EQ( eachVisited[i], stridedVisited[i] );
+    }
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( query, strided_stride_larger_than_count )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    for ( uint32_t i = 0; i < 3u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { ( float )i, 0 } );
+    }
+
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    uint32_t visits = 0;
+    vecsQueryEachStrided<Position>( w, q, 16u, [&]( vecsEntity, Position& ) { visits++; } );
+    ASSERT_EQ( visits, 1u );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
+UTEST( query, strided_determinism )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    for ( uint32_t i = 0; i < 100u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { ( float )i, 0 } );
+    }
+
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    std::vector<float> run1, run2;
+    vecsQueryEachStrided<Position>( w, q, 7u, [&]( vecsEntity, Position& p ) { run1.push_back( p.x ); } );
+    vecsQueryEachStrided<Position>( w, q, 7u, [&]( vecsEntity, Position& p ) { run2.push_back( p.x ); } );
+
+    ASSERT_EQ( run1.size(), run2.size() );
+    for ( size_t i = 0; i < run1.size(); i++ )
+    {
+        ASSERT_EQ( run1[i], run2[i] );
+    }
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+}
+
 UTEST( entity, component_id_word_boundary_sweep )
 {
     ASSERT_EQ( vecsTypeId<Position>(), 0u );
@@ -5285,6 +5473,93 @@ UTEST( bench, snapshot_1000_full_actors_main_thread )
     vecsSnapshotDestroy( snap );
     vecsDestroyWorld( w );
     ASSERT_GT( usPerCapture, 0.0 );
+}
+
+UTEST( bench, query_count_vs_each_callback )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    for ( uint32_t i = 0; i < 1000u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { ( float )i, 0 } );
+    }
+
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    constexpr int K = 500;
+    volatile float sink = 0;
+    for ( int i = 0; i < 5; i++ ) { uint32_t c = 0; vecsQueryEach<Position>( w, q, [&]( vecsEntity, Position& p ) { sink += p.x; c++; } ); ( void )c; }
+    for ( int i = 0; i < 5; i++ ) { uint32_t c = vecsQueryCount( w, q ); ( void )c; }
+
+    double t0 = vecsBenchNow();
+    for ( int i = 0; i < K; i++ )
+    {
+        uint32_t c = 0;
+        vecsQueryEach<Position>( w, q, [&]( vecsEntity, Position& p ) { sink += p.x; c++; } );
+        ( void )c;
+    }
+    double t1 = vecsBenchNow();
+    double eachUs = ( t1 - t0 ) * 1e6 / K;
+
+    double t2 = vecsBenchNow();
+    for ( int i = 0; i < K; i++ )
+    {
+        uint32_t c = vecsQueryCount( w, q );
+        ( void )c;
+    }
+    double t3 = vecsBenchNow();
+    double countUs = ( t3 - t2 ) * 1e6 / K;
+
+    printf( "[bench] query count: each=%.2f us, count=%.2f us (%.1fx faster)\n",
+            eachUs, countUs, eachUs / countUs );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+    ASSERT_GT( eachUs, 0.0 );
+    ( void )sink;
+}
+
+UTEST( bench, query_each_strided )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    for ( uint32_t i = 0; i < 1000u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Position>( w, e, { ( float )i, 0 } );
+    }
+
+    vecsQuery* q = vecsBuildQuery<Position>( w );
+    constexpr int K = 500;
+    volatile float sink = 0;
+    for ( int i = 0; i < 5; i++ ) { uint32_t c = 0; vecsQueryEach<Position>( w, q, [&]( vecsEntity, Position& p ) { sink += p.x; c++; } ); ( void )c; }
+    for ( int i = 0; i < 5; i++ ) { uint32_t c = 0; vecsQueryEachStrided<Position>( w, q, 16u, [&]( vecsEntity, Position& p ) { sink += p.x; c++; } ); ( void )c; }
+
+    double t0 = vecsBenchNow();
+    for ( int i = 0; i < K; i++ )
+    {
+        uint32_t c = 0;
+        vecsQueryEach<Position>( w, q, [&]( vecsEntity, Position& p ) { sink += p.x; c++; } );
+        ( void )c;
+    }
+    double t1 = vecsBenchNow();
+    double eachUs = ( t1 - t0 ) * 1e6 / K;
+
+    double t2 = vecsBenchNow();
+    for ( int i = 0; i < K; i++ )
+    {
+        uint32_t c = 0;
+        vecsQueryEachStrided<Position>( w, q, 16u, [&]( vecsEntity, Position& p ) { sink += p.x; c++; } );
+        ( void )c;
+    }
+    double t3 = vecsBenchNow();
+    double stridedUs = ( t3 - t2 ) * 1e6 / K;
+
+    printf( "[bench] query strided: each=%.2f us, strided(16)=%.2f us (%.1fx faster)\n",
+            eachUs, stridedUs, eachUs / stridedUs );
+
+    vecsDestroyQuery( q );
+    vecsDestroyWorld( w );
+    ASSERT_GT( eachUs, 0.0 );
+    ( void )sink;
 }
 
 UTEST( bench, snapshot_pool_allocator )

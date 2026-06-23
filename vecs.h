@@ -2047,6 +2047,22 @@ inline void invokeQueryCallback( vecsWorld* w, WithTuple& withPools, OptionalTup
     fn( entity, *getData<With>( std::get<I>( withPools ), entityIdx )... );
 }
 
+// Resolves the per-L2 mask for a query: q->withMask is already With-intersected
+// by vecsQueryRefreshWithMask, so this only applies the Without filter.
+inline uint64_t resolveQueryL2( vecsWorld* w, vecsQuery* q, uint32_t l2Idx )
+{
+    uint64_t l2 = q->withMask.l2Masks[l2Idx];
+    for ( uint32_t i = 0; i < q->withoutCount; i++ )
+    {
+        vecsPool* wp = w->pools[q->withoutIds[i]];
+        if ( wp )
+        {
+            l2 &= ~wp->bitfield.l2Masks[l2Idx];
+        }
+    }
+    return l2;
+}
+
 template< typename Tuple >
 inline vecsEntity findFirstScalar( vecsWorld* w, Tuple& pools )
 {
@@ -2852,6 +2868,101 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
                 
                 vecsEntity entity = vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
                 vecsDetail::invokeQueryCallback<With...>( w, withPools, optionalPools, entityIdx, entity, fn, std::make_index_sequence<sizeof...( With )>() );
+                l2 &= l2 - 1;
+            }
+            top &= top - 1;
+        }
+    }
+}
+
+// Returns the number of entities matching the query. No callback, no component deref.
+// O(VECS_L2_COUNT) popcount over active L2 masks. Caching the refresh is future work.
+inline uint32_t vecsQueryCount( vecsWorld* w, vecsQuery* q )
+{
+    assert( w );
+    assert( q );
+    vecsQueryRefreshWithMask( w, q );
+    if ( q->impossible || q->withCount == 0 )
+    {
+        return 0;
+    }
+
+    uint32_t total = 0;
+    for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti++ )
+    {
+        uint64_t top = q->withMask.topMasks[ti];
+        while ( top )
+        {
+            uint32_t tb = vecsTzcnt( top );
+            uint32_t l2Idx = ti * 64u + tb;
+            uint64_t l2 = vecsDetail::resolveQueryL2( w, q, l2Idx );
+            total += vecsPopcnt( l2 );
+            top &= top - 1;
+        }
+    }
+    return total;
+}
+
+// Visits every Nth matching entity (ascending entity index). stride >= 1; stride == 1
+// is equivalent to vecsQueryEach. Scalar walk so determinism is self-evident.
+template< typename... With, typename Fn >
+inline void vecsQueryEachStrided( vecsWorld* w, vecsQuery* q, uint32_t stride, Fn&& fn )
+{
+    assert( w );
+    assert( q );
+    assert( stride >= 1u );
+    static_assert( sizeof...( With ) >= 1, "vecsQueryEachStrided requires at least one With component" );
+
+#ifndef NDEBUG
+    assert( ( ( []( vecsQuery* query, uint32_t reqId ) {
+        for ( uint32_t i = 0; i < query->withCount; i++ )
+        {
+            if ( query->withIds[i] == reqId ) return true;
+        }
+        return false;
+    }( q, vecsTypeId<std::remove_cv_t<With>>() ) ) && ... ) && "Query execution requested a component not present in the query's With list!" );
+#endif
+
+    vecsQueryRefreshWithMask( w, q );
+    if ( q->impossible || q->withCount == 0 )
+    {
+        return;
+    }
+
+    auto withPools = std::make_tuple( vecsDetail::getPool<With>( w )... );
+    bool invalid = false;
+    vecsDetail::forEachPool( withPools, [&]( vecsPool* pool )
+    {
+        if ( !pool || pool->count == 0 )
+        {
+            invalid = true;
+        }
+    } );
+    if ( invalid )
+    {
+        return;
+    }
+
+    uint32_t seen = 0;
+    std::tuple<> emptyOptional;
+    for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti++ )
+    {
+        uint64_t top = q->withMask.topMasks[ti];
+        while ( top )
+        {
+            uint32_t tb = vecsTzcnt( top );
+            uint32_t l2Idx = ti * 64u + tb;
+            uint64_t l2 = vecsDetail::resolveQueryL2( w, q, l2Idx );
+            while ( l2 )
+            {
+                uint32_t lb = vecsTzcnt( l2 );
+                uint32_t entityIdx = l2Idx * 64u + lb;
+                if ( ( seen % stride ) == 0u )
+                {
+                    vecsEntity entity = vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+                    vecsDetail::invokeQueryCallback<With...>( w, withPools, emptyOptional, entityIdx, entity, fn, std::make_index_sequence<sizeof...( With )>() );
+                }
+                seen++;
                 l2 &= l2 - 1;
             }
             top &= top - 1;
