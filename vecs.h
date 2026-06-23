@@ -68,12 +68,6 @@ constexpr uint32_t VECS_SIGNATURE_WORDS = ( VECS_MAX_COMPONENTS + 63u ) / 64u;
 constexpr uint64_t VECS_INVALID_ENTITY = UINT64_MAX;
 constexpr uint32_t VECS_INVALID_INDEX  = UINT32_MAX;
 
-// Sentinel generation used to encode a deferred-created entity token:
-// { index = createdIndex (cmdBuffer slot), generation = VECS_DEFERRED_GEN }.
-// Caller-visible so vecsSet/vecsDestroy/etc. can detect the token and
-// store the createdIndex in their cmd for flush-time resolution.
-constexpr uint32_t VECS_DEFERRED_GEN = 0xFFFFFFFEu;
-
 inline uint32_t vecsNormalizeWorldCapacity( uint32_t maxEntities )
 {
     if ( maxEntities == 0u )
@@ -187,16 +181,6 @@ inline uint32_t vecsEntityIndex( vecsEntity e )
 inline uint32_t vecsEntityGeneration( vecsEntity e )
 {
     return ( uint32_t )( e >> 32 );
-}
-
-inline bool vecsEntityIsDeferred( vecsEntity e )
-{
-    return vecsEntityGeneration( e ) == VECS_DEFERRED_GEN;
-}
-
-inline uint32_t vecsEntityDeferredIndex( vecsEntity e )
-{
-    return vecsEntityIndex( e );
 }
 
 struct vecsEntityPool
@@ -893,17 +877,6 @@ inline vecsEntity vecsGetChild( vecsRelationshipData* rel, vecsEntity parent, ui
     return rel->children[idx][index];
 }
 
-// Forward declarations for vecsCommandBuffer (full definition lives
-// later in this header alongside the rest of the command buffer API).
-struct vecsCommandBuffer;
-inline vecsCommandBuffer* vecsCreateCommandBuffer( vecsWorld* w );
-inline void vecsDestroyCommandBuffer( vecsCommandBuffer* cb );
-inline void vecsFlush( vecsCommandBuffer* cb );
-inline uint32_t vecsCmdCreate( vecsCommandBuffer* cb );
-inline void vecsCmdDestroy( vecsCommandBuffer* cb, vecsEntity e );
-template< typename T > inline void vecsCmdSet( vecsCommandBuffer* cb, vecsEntity e, const T& val );
-template< typename T > inline void vecsCmdUnset( vecsCommandBuffer* cb, vecsEntity e );
-inline void vecsCmdSetParent( vecsCommandBuffer* cb, vecsEntity child, vecsEntity parent );
 inline void vecsSnapshotCaptureInto( vecsWorld* w, struct vecsWorldSnapshot* snap );
 
 // --------------------------------------------------------------------------
@@ -927,16 +900,6 @@ struct vecsWorld
     vecsObserverList* observers;
     vecsRelationshipData* relationships;
     uint32_t maxEntities;
-
-    // Async snapshot capture state. captureInProgress != 0 means
-    // mutation wrappers must defer to captureCmdBuffer. Raw uint32_t
-    // (not std::atomic) so vecsWorld stays malloc-friendly; access
-    // via std::atomic_*_explicit free functions.
-    std::atomic<uint32_t> captureInProgress;
-    std::atomic<uint32_t> activeMutations;
-    struct vecsCommandBuffer* captureCmdBuffer{ nullptr };
-    // Deferred creates dropped during flush because the pool was full.
-    std::atomic<uint32_t> droppedDeferredCreates{ 0u };
 };
 
 inline uint32_t& vecsGetTypeIdCounterMutable()
@@ -993,10 +956,6 @@ inline vecsWorld* vecsCreateWorld( uint32_t maxEntities = VECS_MAX_ENTITIES )
     world->observers->count = 0;
     world->observers->capacity = 0;
     world->relationships = vecsCreateRelationships( normalizedMaxEntities );
-    world->captureCmdBuffer = nullptr;
-    std::atomic_store_explicit( &world->captureInProgress, 0u, std::memory_order_relaxed );
-    std::atomic_store_explicit( &world->activeMutations, 0u, std::memory_order_relaxed );
-    std::atomic_store_explicit( &world->droppedDeferredCreates, 0u, std::memory_order_relaxed );
     return world;
 }
 
@@ -1222,7 +1181,6 @@ inline void vecsDestroyWorld( vecsWorld* world )
     {
         return;
     }
-    assert( std::atomic_load_explicit(&world->captureInProgress, std::memory_order_acquire) == 0u && "Cannot destroy world during snapshot capture" );
     for ( uint32_t i = 0; i < VECS_MAX_COMPONENTS; i++ )
     {
         vecsDestroyPool( world->pools[i] );
@@ -1242,20 +1200,7 @@ inline void vecsDestroyWorld( vecsWorld* world )
     }
     vecsDestroyRelationships( world->relationships );
     vecsDestroyEntityPool( world->entities );
-    if ( world->captureCmdBuffer )
-    {
-        vecsDestroyCommandBuffer( world->captureCmdBuffer );
-    }
     std::free( world );
-}
-
-inline struct vecsCommandBuffer* vecsGetOrCreateCaptureCmdBuffer( vecsWorld* w )
-{
-    if ( !w->captureCmdBuffer )
-    {
-        w->captureCmdBuffer = vecsCreateCommandBuffer( w );
-    }
-    return w->captureCmdBuffer;
 }
 
 // Reset the world to its initial empty state, preserving allocated memory.
@@ -1266,7 +1211,6 @@ inline void vecsClearWorld( vecsWorld* world )
     {
         return;
     }
-    assert( std::atomic_load_explicit(&world->captureInProgress, std::memory_order_acquire) == 0u && "Cannot clear world during snapshot capture" );
 
     for ( uint32_t i = 0; i < VECS_MAX_COMPONENTS; i++ )
     {
@@ -1335,15 +1279,7 @@ inline void vecsClearWorld( vecsWorld* world )
 inline vecsEntity vecsCreate( vecsWorld* w )
 {
     assert( w );
-    if ( std::atomic_load_explicit(&w->captureInProgress, std::memory_order_acquire) )
-    {
-        uint32_t idx = vecsCmdCreate( vecsGetOrCreateCaptureCmdBuffer( w ) );
-        return vecsMakeEntity( idx, VECS_DEFERRED_GEN );
-    }
-    std::atomic_fetch_add_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
-    vecsEntity e = vecsEntityPoolCreate( w->entities );
-    std::atomic_fetch_sub_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
-    return e;
+    return vecsEntityPoolCreate( w->entities );
 }
 
 inline bool vecsAlive( vecsWorld* w, vecsEntity e )
@@ -1351,11 +1287,6 @@ inline bool vecsAlive( vecsWorld* w, vecsEntity e )
     assert( w );
     return vecsEntityPoolAlive( w->entities, e );
 }
-
-// Resolve a deferred-entity token to its real entity. Post-flush returns the
-// real handle; pre-flush returns VECS_INVALID_ENTITY (slot not yet populated).
-// Pass-through for non-deferred. Defined after vecsCommandBuffer.
-inline vecsEntity vecsResolveDeferredEntity( vecsWorld* w, vecsEntity e );
 
 // Cascading destruction. Nuke the entity and its entire child subtree.
 // Uses Entity Signatures to skip empty component pools at O(active_components) speed.
@@ -1418,15 +1349,8 @@ inline void vecsDestroyRecursive( vecsWorld* w, vecsEntity e )
 inline void vecsDestroy( vecsWorld* w, vecsEntity e )
 {
     assert( w );
-    if ( std::atomic_load_explicit(&w->captureInProgress, std::memory_order_acquire) )
-    {
-        vecsCmdDestroy( vecsGetOrCreateCaptureCmdBuffer( w ), e );
-        return;
-    }
     if ( !vecsAlive( w, e ) ) return;
-    std::atomic_fetch_add_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
     vecsDestroyRecursive( w, e );
-    std::atomic_fetch_sub_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
 }
 
 inline uint32_t vecsCount( vecsWorld* w )
@@ -1469,37 +1393,6 @@ template< typename T >
 inline T* vecsSet( vecsWorld* w, vecsEntity e, const T& val = {} )
 {
     assert( w );
-    if ( std::atomic_load_explicit(&w->captureInProgress, std::memory_order_acquire) )
-    {
-        // seqlock in-place overwrite; structural ops + non-trivial T defer below
-        if constexpr ( std::is_trivially_copyable<T>::value && !std::is_empty<T>::value )
-        {
-            if ( vecsAlive( w, e ) )
-            {
-                uint32_t componentId = vecsTypeId<T>();
-                if ( vecsComponentIdValid( componentId ) )
-                {
-                    vecsPool* pool = w->pools[componentId];
-                    uint32_t idx = vecsEntityIndex( e );
-                    if ( pool && vecsPoolHas( pool, idx ) )
-                    {
-                        T* dst = ( T* )vecsPoolGet( pool, idx );
-                        std::atomic_fetch_add_explicit( &pool->gen, 1ull, std::memory_order_release );
-                        *dst = val;
-                        std::atomic_fetch_add_explicit( &pool->gen, 1ull, std::memory_order_release );
-                        return dst;
-                    }
-                }
-            }
-        }
-        vecsCmdSet<T>( vecsGetOrCreateCaptureCmdBuffer( w ), e, val );
-        if constexpr ( std::is_empty<T>::value )
-        {
-            static T tagValue = {};
-            return &tagValue;
-        }
-        return nullptr;
-    }
     assert( vecsAlive( w, e ) );
     uint32_t componentId = vecsTypeId<T>();
     assert( componentId < VECS_MAX_COMPONENTS );
@@ -1507,30 +1400,25 @@ inline T* vecsSet( vecsWorld* w, vecsEntity e, const T& val = {} )
     {
         return nullptr;
     }
-    std::atomic_fetch_add_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
     vecsPool* pool = vecsEnsurePool<T>( w );
     if ( !pool )
     {
-        std::atomic_fetch_sub_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
         return nullptr;
     }
     uint32_t idx = vecsEntityIndex( e );
     if ( vecsPoolHas( pool, idx ) )
     {
-        T* ret;
         if constexpr ( std::is_empty<T>::value )
         {
             static T tagValue = {};
-            ret = &tagValue;
+            return &tagValue;
         }
         else
         {
             T* ptr = ( T* )vecsPoolGet( pool, idx );
             *ptr = val;
-            ret = ptr;
+            return ptr;
         }
-        std::atomic_fetch_sub_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
-        return ret;
     }
     T* result = nullptr;
     if constexpr ( std::is_empty<T>::value )
@@ -1546,7 +1434,6 @@ inline T* vecsSet( vecsWorld* w, vecsEntity e, const T& val = {} )
 
     vecsSetSignatureBit( w, idx, componentId );
     vecsNotifyObservers( w, e, componentId, true, result );
-    std::atomic_fetch_sub_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
     return result;
 }
 
@@ -1554,11 +1441,6 @@ template< typename T >
 inline void vecsUnset( vecsWorld* w, vecsEntity e )
 {
     assert( w );
-    if ( std::atomic_load_explicit(&w->captureInProgress, std::memory_order_acquire) )
-    {
-        vecsCmdUnset<T>( vecsGetOrCreateCaptureCmdBuffer( w ), e );
-        return;
-    }
     assert( vecsAlive( w, e ) );
     uint32_t componentId = vecsTypeId<T>();
     assert( componentId < VECS_MAX_COMPONENTS );
@@ -1566,18 +1448,15 @@ inline void vecsUnset( vecsWorld* w, vecsEntity e )
     {
         return;
     }
-    std::atomic_fetch_add_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
     vecsPool* pool = vecsEnsurePool<T>( w );
     if ( !pool )
     {
-        std::atomic_fetch_sub_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
         return;
     }
     uint32_t idx = vecsEntityIndex( e );
     assert( vecsPoolHas( pool, idx ) );
     ( void )pool;
     vecsUnsetById( w, e, componentId );
-    std::atomic_fetch_sub_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
 }
 
 template< typename T >
@@ -1621,8 +1500,6 @@ inline bool vecsHas( vecsWorld* w, vecsEntity e )
 inline vecsEntity vecsClone( vecsWorld* w, vecsEntity src )
 {
     assert( w );
-    assert( std::atomic_load_explicit(&w->captureInProgress, std::memory_order_acquire) == 0u
-            && "Cannot clone during snapshot capture (drain cmdBuffer first)" );
     assert( vecsAlive( w, src ) );
     vecsEntity dst = vecsCreate( w );
     if ( dst == VECS_INVALID_ENTITY )
@@ -3248,25 +3125,13 @@ inline void vecsEach( vecsWorld* w, Fn&& fn )
         {
             return;
         }
-        // During capture, defer post-callback value to cmdbuf so the in-flight snapshot sees pre-callback state.
-        const bool kDefer = std::atomic_load_explicit( &w->captureInProgress, std::memory_order_acquire ) != 0u;
         const uint32_t count = pool->count;
         for ( uint32_t i = 0; i < count; i++ )
         {
             uint32_t entityIdx = pool->denseEntities[i];
             vecsEntity entity = vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
             First* data = vecsDetail::getData<First>( pool, entityIdx );
-            if ( kDefer )
-            {
-                First copy = *data;
-                fn( entity, copy );
-                if ( !std::memcmp( &copy, data, sizeof( First ) ) ) continue;
-                vecsCmdSet<First>( vecsGetOrCreateCaptureCmdBuffer( w ), entity, copy );
-            }
-            else
-            {
-                fn( entity, *data );
-            }
+            fn( entity, *data );
         }
     }
     else
@@ -3304,17 +3169,6 @@ template< typename T, typename... Args >
 inline T* vecsEmplace( vecsWorld* w, vecsEntity e, Args&&... args )
 {
     assert( w );
-    if ( std::atomic_load_explicit(&w->captureInProgress, std::memory_order_acquire) )
-    {
-        T val( std::forward<Args>( args )... );
-        vecsCmdSet<T>( vecsGetOrCreateCaptureCmdBuffer( w ), e, val );
-        if constexpr ( std::is_empty<T>::value )
-        {
-            static T tagValue = {};
-            return &tagValue;
-        }
-        return nullptr;
-    }
     assert( vecsAlive( w, e ) );
     uint32_t componentId = vecsTypeId<T>();
     assert( componentId < VECS_MAX_COMPONENTS );
@@ -3322,11 +3176,9 @@ inline T* vecsEmplace( vecsWorld* w, vecsEntity e, Args&&... args )
     {
         return nullptr;
     }
-    std::atomic_fetch_add_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
     vecsPool* pool = vecsEnsurePool<T>( w );
     if ( !pool )
     {
-        std::atomic_fetch_sub_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
         return nullptr;
     }
     uint32_t idx = vecsEntityIndex( e );
@@ -3342,7 +3194,6 @@ inline T* vecsEmplace( vecsWorld* w, vecsEntity e, Args&&... args )
             }
             new ( ptr ) T( std::forward<Args>( args )... );
         }
-        std::atomic_fetch_sub_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
         return ptr;
     }
 
@@ -3369,7 +3220,6 @@ inline T* vecsEmplace( vecsWorld* w, vecsEntity e, Args&&... args )
 
     vecsSetSignatureBit( w, idx, componentId );
     vecsNotifyObservers( w, e, componentId, true, result );
-    std::atomic_fetch_sub_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
     return result;
 }
 
@@ -3378,11 +3228,6 @@ inline void vecsAddTag( vecsWorld* w, vecsEntity e )
 {
     static_assert( std::is_empty<T>::value, "vecsAddTag can only be used on empty structs (tags)" );
     assert( w );
-    if ( std::atomic_load_explicit(&w->captureInProgress, std::memory_order_acquire) )
-    {
-        vecsCmdSet<T>( vecsGetOrCreateCaptureCmdBuffer( w ), e, T{} );
-        return;
-    }
     assert( vecsAlive( w, e ) );
     uint32_t componentId = vecsTypeId<T>();
     assert( componentId < VECS_MAX_COMPONENTS );
@@ -3390,18 +3235,15 @@ inline void vecsAddTag( vecsWorld* w, vecsEntity e )
     {
         return;
     }
-    std::atomic_fetch_add_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
     vecsPool* pool = vecsEnsurePool<T>( w );
     if ( !pool )
     {
-        std::atomic_fetch_sub_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
         return;
     }
     uint32_t idx = vecsEntityIndex( e );
 
     if ( vecsPoolHas( pool, idx ) )
     {
-        std::atomic_fetch_sub_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
         return;
     }
 
@@ -3410,7 +3252,6 @@ inline void vecsAddTag( vecsWorld* w, vecsEntity e )
 
     vecsSetSignatureBit( w, idx, componentId );
     vecsNotifyObservers( w, e, componentId, true, &tagValue );
-    std::atomic_fetch_sub_explicit(&w->activeMutations, 1u, std::memory_order_acq_rel);
 }
 
 // --------------------------------------------------------------------------
@@ -3537,8 +3378,6 @@ inline T* vecsSetSingleton( vecsWorld* w, const T& val = {} )
     static_assert( std::is_trivially_copyable<T>::value,
         "vecs singletons must be trivially copyable: snapshots deep-copy via memcpy." );
     assert( w );
-    assert( std::atomic_load_explicit(&w->captureInProgress, std::memory_order_acquire) == 0u
-            && "Cannot set singleton during snapshot capture" );
     uint32_t id = vecsTypeId<T>();
     assert( id < VECS_MAX_COMPONENTS );
     if ( !vecsComponentIdValid( id ) )
@@ -3610,11 +3449,6 @@ inline void vecsOnRemove( vecsWorld* w, void ( *callback )( vecsWorld*, vecsEnti
 inline void vecsSetChildOf( vecsWorld* w, vecsEntity child, vecsEntity parent )
 {
     assert( w );
-    if ( std::atomic_load_explicit(&w->captureInProgress, std::memory_order_acquire) )
-    {
-        vecsCmdSetParent( vecsGetOrCreateCaptureCmdBuffer( w ), child, parent );
-        return;
-    }
     if ( !vecsAlive( w, child ) ) return;
     if ( parent != VECS_INVALID_ENTITY && !vecsAlive( w, parent ) ) return;
     if ( !w->relationships )
@@ -3783,574 +3617,10 @@ inline vecsHandle vecsMakeHandle( vecsWorld* w, vecsEntity e )
 }
 
 // --------------------------------------------------------------------------
-// Command Buffer
-// --------------------------------------------------------------------------
-
-struct vecsCommand
-{
-    enum Type : uint8_t
-    {
-        CREATE,
-        DESTROY,
-        SET_COMPONENT,
-        UNSET_COMPONENT,
-        SET_PARENT
-    };
-
-    Type type;
-    vecsEntity entity;
-    uint32_t componentId;
-    uint32_t dataOffset;
-    uint32_t dataSize;
-    uint32_t createdIndex;
-    vecsPool* pool;
-    vecsEntity parent;
-    void* dataPtr;
-    void ( *dataDestructor )( void* );
-    uint32_t dataAlignment;
-};
-
-struct vecsCommandBuffer
-{
-    vecsWorld* world;
-    vecsCommand* commands;
-    uint32_t commandCount;
-    uint32_t commandCapacity;
-    uint8_t* dataBuffer;
-    uint32_t dataSize;
-    uint32_t dataCapacity;
-    vecsEntity* created;
-    uint32_t createdCount;
-    uint32_t createdCapacity;
-};
-
-constexpr uint32_t VECS_COMMAND_BUFFER_ALIGNMENT = 64u;
-
-inline uint32_t vecsAlignUp( uint32_t value, uint32_t alignment )
-{
-    assert( alignment > 0u );
-    assert( ( alignment & ( alignment - 1u ) ) == 0u );
-    return ( value + alignment - 1u ) & ~( alignment - 1u );
-}
-
-inline void vecsCmdGrowCommands( vecsCommandBuffer* cb )
-{
-    assert( cb );
-    uint32_t cap = cb->commandCapacity ? cb->commandCapacity * 2u : 64u;
-    vecsCommand* ptr = ( vecsCommand* )std::realloc( cb->commands, ( size_t )cap * sizeof( vecsCommand ) );
-    assert( ptr );
-    cb->commands = ptr;
-    cb->commandCapacity = cap;
-}
-
-inline void vecsCmdGrowData( vecsCommandBuffer* cb, uint32_t minExtra )
-{
-    assert( cb );
-    uint32_t need = cb->dataSize + minExtra;
-    if ( cb->dataCapacity >= need )
-    {
-        return;
-    }
-    uint32_t cap = cb->dataCapacity ? cb->dataCapacity * 2u : 256u;
-    while ( cap < need )
-    {
-        cap *= 2u;
-    }
-    uint8_t* ptr = cb->dataBuffer
-        ? ( uint8_t* )vecsAlignedRealloc( cb->dataBuffer, cap, VECS_COMMAND_BUFFER_ALIGNMENT )
-        : ( uint8_t* )vecsAlignedAlloc( cap, VECS_COMMAND_BUFFER_ALIGNMENT );
-    assert( ptr );
-    cb->dataBuffer = ptr;
-    cb->dataCapacity = cap;
-}
-
-inline void vecsCmdDestroyStoredData( vecsCommand& cmd )
-{
-    if ( !cmd.dataPtr )
-    {
-        return;
-    }
-    if ( cmd.dataDestructor )
-    {
-        cmd.dataDestructor( cmd.dataPtr );
-    }
-    if ( cmd.dataAlignment > 8u )
-    {
-        vecsAlignedFree( cmd.dataPtr );
-    }
-    else
-    {
-        std::free( cmd.dataPtr );
-    }
-    cmd.dataPtr = nullptr;
-    cmd.dataDestructor = nullptr;
-    cmd.dataAlignment = 0u;
-}
-
-inline void vecsCmdGrowCreated( vecsCommandBuffer* cb )
-{
-    assert( cb );
-    uint32_t cap = cb->createdCapacity ? cb->createdCapacity * 2u : 32u;
-    vecsEntity* ptr = ( vecsEntity* )std::realloc( cb->created, ( size_t )cap * sizeof( vecsEntity ) );
-    assert( ptr );
-    cb->created = ptr;
-    cb->createdCapacity = cap;
-}
-
-inline vecsCommandBuffer* vecsCreateCommandBuffer( vecsWorld* w )
-{
-    assert( w );
-    vecsCommandBuffer* cb = ( vecsCommandBuffer* )std::malloc( sizeof( vecsCommandBuffer ) );
-    assert( cb );
-    cb->world = w;
-    cb->commands = nullptr;
-    cb->commandCount = 0;
-    cb->commandCapacity = 0;
-    cb->dataBuffer = nullptr;
-    cb->dataSize = 0;
-    cb->dataCapacity = 0;
-    cb->created = nullptr;
-    cb->createdCount = 0;
-    cb->createdCapacity = 0;
-    return cb;
-}
-
-inline void vecsDestroyCommandBuffer( vecsCommandBuffer* cb )
-{
-    if ( !cb )
-    {
-        return;
-    }
-    for ( uint32_t i = 0; i < cb->commandCount; i++ )
-    {
-        vecsCmdDestroyStoredData( cb->commands[i] );
-    }
-    std::free( cb->commands );
-    vecsAlignedFree( cb->dataBuffer );
-    std::free( cb->created );
-    std::free( cb );
-}
-
-inline uint32_t vecsCmdCreate( vecsCommandBuffer* cb )
-{
-    assert( cb );
-    if ( cb->createdCount == cb->createdCapacity )
-    {
-        vecsCmdGrowCreated( cb );
-    }
-    uint32_t index = cb->createdCount++;
-    cb->created[index] = VECS_INVALID_ENTITY;
-
-    if ( cb->commandCount == cb->commandCapacity )
-    {
-        vecsCmdGrowCommands( cb );
-    }
-    vecsCommand& cmd = cb->commands[cb->commandCount++];
-    cmd.type = vecsCommand::CREATE;
-    cmd.entity = VECS_INVALID_ENTITY;
-    cmd.componentId = VECS_INVALID_INDEX;
-    cmd.dataOffset = 0;
-    cmd.dataSize = 0;
-    cmd.createdIndex = index;
-    cmd.pool = nullptr;
-    cmd.parent = VECS_INVALID_ENTITY;
-    cmd.dataPtr = nullptr;
-    cmd.dataDestructor = nullptr;
-    cmd.dataAlignment = 0u;
-    return index;
-}
-
-inline void vecsCmdDestroy( vecsCommandBuffer* cb, vecsEntity e )
-{
-    assert( cb );
-    assert( cb->world );
-    assert( e == VECS_INVALID_ENTITY || vecsEntityIsDeferred( e ) || vecsAlive( cb->world, e ) );
-    if ( cb->commandCount == cb->commandCapacity )
-    {
-        vecsCmdGrowCommands( cb );
-    }
-    vecsCommand& cmd = cb->commands[cb->commandCount++];
-    cmd.type = vecsCommand::DESTROY;
-    if ( vecsEntityIsDeferred( e ) )
-    {
-        cmd.entity = VECS_INVALID_ENTITY;
-        cmd.createdIndex = vecsEntityDeferredIndex( e );
-    }
-    else
-    {
-        cmd.entity = e;
-        cmd.createdIndex = VECS_INVALID_INDEX;
-    }
-    cmd.componentId = VECS_INVALID_INDEX;
-    cmd.dataOffset = 0;
-    cmd.dataSize = 0;
-    cmd.pool = nullptr;
-    cmd.parent = VECS_INVALID_ENTITY;
-    cmd.dataPtr = nullptr;
-    cmd.dataDestructor = nullptr;
-    cmd.dataAlignment = 0u;
-}
-
-template< typename T >
-inline void vecsCmdSet( vecsCommandBuffer* cb, vecsEntity e, const T& val )
-{
-    assert( cb );
-    assert( cb->world );
-    assert( vecsEntityIsDeferred( e ) || vecsAlive( cb->world, e ) );
-    uint32_t componentId = vecsTypeId<T>();
-    assert( componentId < VECS_MAX_COMPONENTS );
-    if ( !vecsComponentIdValid( componentId ) )
-    {
-        return;
-    }
-    vecsPool* pool = vecsEnsurePool<T>( cb->world );
-    if ( !pool )
-    {
-        return;
-    }
-    if ( cb->commandCount == cb->commandCapacity )
-    {
-        vecsCmdGrowCommands( cb );
-    }
-    vecsCommand& cmd = cb->commands[cb->commandCount++];
-    cmd.type = vecsCommand::SET_COMPONENT;
-    if ( vecsEntityIsDeferred( e ) )
-    {
-        cmd.entity = VECS_INVALID_ENTITY;
-        cmd.createdIndex = vecsEntityDeferredIndex( e );
-    }
-    else
-    {
-        cmd.entity = e;
-        cmd.createdIndex = VECS_INVALID_INDEX;
-    }
-    cmd.componentId = componentId;
-    cmd.dataOffset = 0;
-    cmd.dataSize = 0;
-    cmd.pool = pool;
-    cmd.parent = VECS_INVALID_ENTITY;
-    cmd.dataPtr = nullptr;
-    cmd.dataDestructor = nullptr;
-    cmd.dataAlignment = 0u;
-    if constexpr ( !std::is_empty<T>::value )
-    {
-        if constexpr ( std::is_trivially_copyable<T>::value && alignof( T ) <= VECS_COMMAND_BUFFER_ALIGNMENT )
-        {
-            uint32_t alignedOffset = vecsAlignUp( cb->dataSize, ( uint32_t )alignof( T ) );
-            vecsCmdGrowData( cb, ( alignedOffset - cb->dataSize ) + ( uint32_t )sizeof( T ) );
-            cmd.dataOffset = alignedOffset;
-            cmd.dataSize = ( uint32_t )sizeof( T );
-            std::memcpy( cb->dataBuffer + alignedOffset, &val, sizeof( T ) );
-            cb->dataSize = alignedOffset + ( uint32_t )sizeof( T );
-        }
-        else
-        {
-            constexpr uint32_t kAlignment = ( uint32_t )alignof( T );
-            size_t allocSize = vecsAlignUp( ( uint32_t )sizeof( T ), kAlignment );
-            void* storage = ( kAlignment > 8u ) ? vecsAlignedAlloc( allocSize, kAlignment ) : std::malloc( sizeof( T ) );
-            assert( storage );
-            new ( storage ) T( val );
-            cmd.dataPtr = storage;
-            cmd.dataSize = ( uint32_t )sizeof( T );
-            cmd.dataAlignment = kAlignment;
-            if constexpr ( !std::is_trivially_destructible<T>::value )
-            {
-                cmd.dataDestructor = []( void* ptr ) { static_cast<T*>( ptr )->~T(); };
-            }
-        }
-    }
-}
-
-template< typename T >
-inline void vecsCmdSetCreated( vecsCommandBuffer* cb, uint32_t createdIndex, const T& val )
-{
-    assert( cb );
-    assert( cb->world );
-    assert( createdIndex < cb->createdCount );
-    uint32_t componentId = vecsTypeId<T>();
-    assert( componentId < VECS_MAX_COMPONENTS );
-    if ( !vecsComponentIdValid( componentId ) )
-    {
-        return;
-    }
-    vecsPool* pool = vecsEnsurePool<T>( cb->world );
-    if ( !pool )
-    {
-        return;
-    }
-    if ( cb->commandCount == cb->commandCapacity )
-    {
-        vecsCmdGrowCommands( cb );
-    }
-    vecsCommand& cmd = cb->commands[cb->commandCount++];
-    cmd.type = vecsCommand::SET_COMPONENT;
-    cmd.entity = VECS_INVALID_ENTITY;
-    cmd.componentId = componentId;
-    cmd.dataOffset = 0;
-    cmd.dataSize = 0;
-    cmd.createdIndex = createdIndex;
-    cmd.pool = pool;
-    cmd.parent = VECS_INVALID_ENTITY;
-    cmd.dataPtr = nullptr;
-    cmd.dataDestructor = nullptr;
-    cmd.dataAlignment = 0u;
-    if constexpr ( !std::is_empty<T>::value )
-    {
-        if constexpr ( std::is_trivially_copyable<T>::value && alignof( T ) <= VECS_COMMAND_BUFFER_ALIGNMENT )
-        {
-            uint32_t alignedOffset = vecsAlignUp( cb->dataSize, ( uint32_t )alignof( T ) );
-            vecsCmdGrowData( cb, ( alignedOffset - cb->dataSize ) + ( uint32_t )sizeof( T ) );
-            cmd.dataOffset = alignedOffset;
-            cmd.dataSize = ( uint32_t )sizeof( T );
-            std::memcpy( cb->dataBuffer + alignedOffset, &val, sizeof( T ) );
-            cb->dataSize = alignedOffset + ( uint32_t )sizeof( T );
-        }
-        else
-        {
-            constexpr uint32_t kAlignment = ( uint32_t )alignof( T );
-            size_t allocSize = vecsAlignUp( ( uint32_t )sizeof( T ), kAlignment );
-            void* storage = ( kAlignment > 8u ) ? vecsAlignedAlloc( allocSize, kAlignment ) : std::malloc( sizeof( T ) );
-            assert( storage );
-            new ( storage ) T( val );
-            cmd.dataPtr = storage;
-            cmd.dataSize = ( uint32_t )sizeof( T );
-            cmd.dataAlignment = kAlignment;
-            if constexpr ( !std::is_trivially_destructible<T>::value )
-            {
-                cmd.dataDestructor = []( void* ptr ) { static_cast<T*>( ptr )->~T(); };
-            }
-        }
-    }
-}
-
-template< typename T >
-inline void vecsCmdUnset( vecsCommandBuffer* cb, vecsEntity e )
-{
-    assert( cb );
-    assert( cb->world );
-    assert( vecsEntityIsDeferred( e ) || vecsAlive( cb->world, e ) );
-    uint32_t componentId = vecsTypeId<T>();
-    assert( componentId < VECS_MAX_COMPONENTS );
-    if ( !vecsComponentIdValid( componentId ) )
-    {
-        return;
-    }
-    if ( cb->commandCount == cb->commandCapacity )
-    {
-        vecsCmdGrowCommands( cb );
-    }
-    vecsCommand& cmd = cb->commands[cb->commandCount++];
-    cmd.type = vecsCommand::UNSET_COMPONENT;
-    if ( vecsEntityIsDeferred( e ) )
-    {
-        cmd.entity = VECS_INVALID_ENTITY;
-        cmd.createdIndex = vecsEntityDeferredIndex( e );
-    }
-    else
-    {
-        cmd.entity = e;
-        cmd.createdIndex = VECS_INVALID_INDEX;
-    }
-    cmd.componentId = componentId;
-    cmd.dataOffset = 0;
-    cmd.dataSize = 0;
-    cmd.pool = vecsDetail::getPool<T>( cb->world );
-    cmd.parent = VECS_INVALID_ENTITY;
-    cmd.dataPtr = nullptr;
-    cmd.dataDestructor = nullptr;
-    cmd.dataAlignment = 0u;
-}
-
-inline void vecsCmdSetParent( vecsCommandBuffer* cb, vecsEntity child, vecsEntity parent )
-{
-    assert( cb );
-    assert( cb->world );
-    assert( vecsAlive( cb->world, child ) );
-    if ( parent != VECS_INVALID_ENTITY )
-    {
-        assert( vecsAlive( cb->world, parent ) );
-    }
-    if ( cb->commandCount == cb->commandCapacity )
-    {
-        vecsCmdGrowCommands( cb );
-    }
-    vecsCommand& cmd = cb->commands[cb->commandCount++];
-    cmd.type = vecsCommand::SET_PARENT;
-    cmd.entity = child;
-    cmd.componentId = VECS_INVALID_INDEX;
-    cmd.dataOffset = 0;
-    cmd.dataSize = 0;
-    cmd.createdIndex = VECS_INVALID_INDEX;
-    cmd.pool = nullptr;
-    cmd.parent = parent;
-    cmd.dataPtr = nullptr;
-    cmd.dataDestructor = nullptr;
-    cmd.dataAlignment = 0u;
-}
-
-inline void vecsFlush( vecsCommandBuffer* cb )
-{
-    assert( cb );
-    assert( cb->world );
-    for ( uint32_t i = 0; i < cb->commandCount; i++ )
-    {
-        const vecsCommand& cmd = cb->commands[i];
-        switch ( cmd.type )
-        {
-            case vecsCommand::CREATE:
-                cb->created[cmd.createdIndex] = vecsCreate( cb->world );
-                if ( cb->created[cmd.createdIndex] == VECS_INVALID_ENTITY )
-                {
-                    std::atomic_fetch_add_explicit(
-                        &cb->world->droppedDeferredCreates, 1u, std::memory_order_relaxed );
-                }
-                break;
-            case vecsCommand::DESTROY:
-                {
-                    vecsEntity target = cmd.entity;
-                    if ( target == VECS_INVALID_ENTITY && cmd.createdIndex != VECS_INVALID_INDEX )
-                    {
-                        if ( cmd.createdIndex < cb->createdCount )
-                        {
-                            target = cb->created[cmd.createdIndex];
-                        }
-                    }
-                    if ( vecsAlive( cb->world, target ) )
-                    {
-                        vecsDestroy( cb->world, target );
-                    }
-                }
-                break;
-            case vecsCommand::SET_COMPONENT:
-                {
-                    vecsEntity target = cmd.entity;
-                    if ( target == VECS_INVALID_ENTITY && cmd.createdIndex != VECS_INVALID_INDEX )
-                    {
-                        if ( cmd.createdIndex < cb->createdCount )
-                        {
-                            target = cb->created[cmd.createdIndex];
-                        }
-                    }
-                    if ( !vecsAlive( cb->world, target ) )
-                    {
-                        break;
-                    }
-                    uint32_t idx = vecsEntityIndex( target );
-                    bool hadComponent = vecsPoolHas( cmd.pool, idx );
-                    void* observerData = nullptr;
-                    if ( cmd.pool->noData )
-                    {
-                        if ( !hadComponent )
-                        {
-                            vecsPoolSet( cmd.pool, idx, nullptr );
-                        }
-                    }
-                    else
-                    {
-                        const void* data = cmd.dataPtr ? cmd.dataPtr : ( cb->dataBuffer + cmd.dataOffset );
-                        if ( hadComponent )
-                        {
-                            void* dst = vecsPoolGet( cmd.pool, idx );
-                            if ( cmd.pool->destructor )
-                            {
-                                cmd.pool->destructor( dst );
-                            }
-                            if ( cmd.pool->copyCtor )
-                            {
-                                cmd.pool->copyCtor( dst, data );
-                            }
-                            else
-                            {
-                                std::memcpy( dst, data, cmd.dataSize );
-                            }
-                        }
-                        else
-                        {
-                            observerData = vecsPoolSet( cmd.pool, idx, data );
-                        }
-                    }
-                    if ( !hadComponent )
-                    {
-                        vecsSetSignatureBit( cb->world, idx, cmd.componentId );
-                        vecsNotifyObservers( cb->world, target, cmd.componentId, true, cmd.pool->noData ? nullptr : observerData );
-                    }
-                }
-                break;
-            case vecsCommand::UNSET_COMPONENT:
-                {
-                    vecsEntity target = cmd.entity;
-                    if ( target == VECS_INVALID_ENTITY && cmd.createdIndex != VECS_INVALID_INDEX )
-                    {
-                        if ( cmd.createdIndex < cb->createdCount )
-                        {
-                            target = cb->created[cmd.createdIndex];
-                        }
-                    }
-                    if ( vecsAlive( cb->world, target ) && cmd.pool )
-                    {
-                        uint32_t idx = vecsEntityIndex( target );
-                        if ( vecsPoolHas( cmd.pool, idx ) )
-                        {
-                            vecsUnsetById( cb->world, target, cmd.componentId );
-                        }
-                    }
-                }
-                break;
-            case vecsCommand::SET_PARENT:
-                if ( vecsAlive( cb->world, cmd.entity ) )
-                {
-                    vecsSetChildOf( cb->world, cmd.entity, cmd.parent );
-                }
-                break;
-            default:
-                assert( false );
-                break;
-        }
-        vecsCmdDestroyStoredData( cb->commands[i] );
-    }
-    cb->commandCount = 0;
-    cb->dataSize = 0;
-}
-
-inline vecsEntity vecsCmdGetCreated( vecsCommandBuffer* cb, uint32_t index )
-{
-    assert( cb );
-    assert( index < cb->createdCount );
-    return cb->created[index];
-}
-
-// Resolve a deferred-entity token. Post-flush returns the real handle;
-// pre-flush returns VECS_INVALID_ENTITY (cmdBuffer slot not yet populated).
-// Pass-through for non-deferred or out-of-bounds tokens.
-inline vecsEntity vecsResolveDeferredEntity( vecsWorld* w, vecsEntity e )
-{
-    if ( vecsEntityIsDeferred( e ) && w->captureCmdBuffer )
-    {
-        uint32_t idx = vecsEntityDeferredIndex( e );
-        if ( idx < w->captureCmdBuffer->createdCount )
-        {
-            return w->captureCmdBuffer->created[idx];
-        }
-    }
-    return e;
-}
-
-inline void vecsCreateBatch( vecsWorld* w, vecsEntity* out, uint32_t count )
-{
-    assert( w );
-    assert( out );
-    for ( uint32_t i = 0; i < count; i++ )
-    {
-        out[i] = vecsCreate( w );
-    }
-}
-
-// --------------------------------------------------------------------------
 // World Snapshot - Implementation
 // --------------------------------------------------------------------------
 //
 // Sync: Create -> CaptureInto -> Restore -> Destroy.
-// Async: Begin (mutations defer) -> Execute (worker) -> Join (flush deferred) -> JobDestroy.
 
 namespace vecs_snapshot_detail
 {
@@ -4559,13 +3829,6 @@ struct vecsWorldSnapshot
     vecs_snapshot_detail::CapturedSnapshot* state;
 };
 
-struct vecsSnapshotJob
-{
-    vecsWorld* w;
-    vecsWorldSnapshot* snap;
-    std::atomic<uint32_t> phase; // 0=not started, 1=running, 2=done. malloc'd, use std::atomic_init.
-};
-
 inline vecsWorldSnapshot* vecsSnapshotCreate( vecsWorld* w )
 {
     assert( w );
@@ -4582,7 +3845,6 @@ inline void vecsSnapshotCaptureInto( vecsWorld* w, vecsWorldSnapshot* snap )
     assert( snap );
     assert( snap->state );
     assert( snap->state->maxEntities == w->maxEntities );
-    // captureInProgress==1 when called from vecsSnapshotExecute
 
     using namespace vecs_snapshot_detail;
     CapturedSnapshot* s = snap->state;
@@ -4746,7 +4008,6 @@ inline void vecsSnapshotRestore( vecsWorld* w, const vecsWorldSnapshot* snap )
     const vecs_snapshot_detail::CapturedSnapshot* s = snap->state;
     assert( s->maxEntities == w->maxEntities && "Snapshot maxEntities must match world" );
     assert( s->maxEntities == w->entities->maxEntities && "Snapshot maxEntities must match entity pool" );
-    assert( std::atomic_load_explicit(&w->captureInProgress, std::memory_order_acquire) == 0u && "Cannot restore during snapshot capture" );
 
     // Step 1: entity pool wholesale (incl. signatures).
     std::memcpy( w->entities->generations, s->generations, w->maxEntities * sizeof( uint32_t ) );
@@ -4981,91 +4242,13 @@ inline void vecsSnapshotRestore( vecsWorld* w, const vecsWorldSnapshot* snap )
     std::free( cursor );
 }
 
-inline vecsSnapshotJob* vecsSnapshotBegin( vecsWorld* w, vecsWorldSnapshot* snap )
-{
-    assert( w );
-    assert( snap );
-    assert( snap->state );
-    assert( snap->state->maxEntities == w->maxEntities );
-    assert( std::atomic_load_explicit(&w->captureInProgress, std::memory_order_acquire) == 0u && "Already capturing" );
-
-    // Mark capture pending; subsequent mutations on any thread will defer.
-    std::atomic_store_explicit(&w->captureInProgress, 1u, std::memory_order_release);
-
-    vecsSnapshotJob* job = ( vecsSnapshotJob* )std::malloc( sizeof( vecsSnapshotJob ) );
-    assert( job );
-    job->w = w;
-    job->snap = snap;
-    std::atomic_store_explicit( &job->phase, 0u, std::memory_order_relaxed );
-    return job;
-}
-
-inline void vecsSnapshotExecute( vecsSnapshotJob* job )
-{
-    assert( job );
-    // Claim the running phase. If we lost the race (already done), bail.
-    uint32_t expected = 0u;
-    if ( !std::atomic_compare_exchange_strong_explicit( &job->phase, &expected, 1u, std::memory_order_acq_rel, std::memory_order_acquire ) )
-    {
-        return;
-    }
-    // Wait for any in-flight direct mutations to drain.
-    vecsWorld* w = job->w;
-    while ( std::atomic_load_explicit(&w->activeMutations, std::memory_order_acquire) > 0u )
-    {
-        std::this_thread::yield();
-    }
-    // Capture (cmdBuffer may still be filling, but denseData for already-snapshotted
-    // pools is stable; new pools appear with count=0 and are captured as empty).
-    vecsSnapshotCaptureInto( w, job->snap );
-    // Publish phase=2 first (seq_cst) so any reader using acquire/seq_cst sees completion before captureInProgress clears.
-    std::atomic_store_explicit( &job->phase, 2u, std::memory_order_seq_cst );
-    std::atomic_thread_fence( std::memory_order_seq_cst );
-    std::atomic_store_explicit( &w->captureInProgress, 0u, std::memory_order_release );
-}
-
-inline bool vecsSnapshotPoll( const vecsSnapshotJob* job )
-{
-    assert( job );
-    return std::atomic_load_explicit( &job->phase, std::memory_order_acquire ) == 2u;
-}
-
-inline void vecsSnapshotJoin( vecsSnapshotJob* job )
-{
-    assert( job );
-    // Wait for worker; if Execute never ran, drive it inline.
-    while ( std::atomic_load_explicit( &job->phase, std::memory_order_acquire ) != 2u )
-    {
-        if ( std::atomic_load_explicit( &job->phase, std::memory_order_acquire ) == 0u )
-        {
-            vecsSnapshotExecute( job );
-            break;
-        }
-        std::this_thread::yield();
-    }
-    // Drain deferred mutations back into the world. This runs with
-    // captureInProgress=0 so internal helpers won't re-defer.
-    if ( job->w->captureCmdBuffer )
-    {
-        vecsFlush( job->w->captureCmdBuffer );
-    }
-}
-
-inline void vecsSnapshotJobDestroy( vecsSnapshotJob* job )
-{
-    std::free( job );
-}
-
-// --------------------------------------------------------------------------
-// World Snapshot - Public API
-// --------------------------------------------------------------------------
 
 // Opaque, owns its own storage. Deep-copies components via each pool's
 // copyCtor when set; memcpy fallback for trivially-copyable types.
 struct vecsWorldSnapshot;
 
 // Blocking capture from the calling thread. world must be quiescent
-// (no concurrent mutations). For thread-safe capture see vecsSnapshotBegin.
+// (no concurrent mutations). For thread-safe capture see vecsSnapshotCreate.
 vecsWorldSnapshot* vecsSnapshotCreate( vecsWorld* w );
 
 // Hot-path capture: reuse an existing snapshot's buffers. Grows only,
@@ -5084,40 +4267,6 @@ void vecsSnapshotRestore( vecsWorld* w, const vecsWorldSnapshot* snap );
 void vecsSnapshotDestroy( vecsWorldSnapshot* snap );
 
 size_t vecsSnapshotBytes( const vecsWorldSnapshot* snap );
-
-// Async capture state machine (deferred-mutation capture).
-// Lifecycle:
-//   main:   job = vecsSnapshotBegin(w, snap)
-//   worker: vecsSnapshotExecute(job)
-//   main:   while (!vecsSnapshotPoll(job)) { do work; }
-//   main:   vecsSnapshotJoin(job)   // drains deferred mutations back into world
-//
-// Deferred-entity contract:
-//   During capture, mutators may return deferred-entity tokens (VECS_DEFERRED_GEN).
-//   Tokens are not alive and not readable until vecsSnapshotJoin flushes the
-//   cmdBuffer. Resolve post-join via vecsResolveDeferredEntity. Structural
-//   bulk-ops (vecsClone, vecsDestroyWorld, vecsClearWorld, vecsSetSingleton)
-//   assert captureInProgress==0.
-struct vecsSnapshotJob;
-
-// Defers mutations to captureCmdBuffer; assert no capture in progress.
-vecsSnapshotJob* vecsSnapshotBegin( vecsWorld* w, vecsWorldSnapshot* snap );
-
-// Worker entry: drains active mutations, deep-copies world to snapshot.
-void vecsSnapshotExecute( vecsSnapshotJob* job );
-
-// Lock-free poll; true once Execute has finished.
-bool vecsSnapshotPoll( const vecsSnapshotJob* job );
-
-// Blocks until Execute done; clears capture flag; flushes deferred mutations. Same thread as Begin.
-void vecsSnapshotJoin( vecsSnapshotJob* job );
-
-void vecsSnapshotJobDestroy( vecsSnapshotJob* job );
-
-// Resolve a deferred-entity token. Post-flush returns the real handle;
-// pre-flush returns VECS_INVALID_ENTITY (cmdBuffer slot not yet populated).
-// Pass-through for non-deferred or out-of-bounds tokens.
-vecsEntity vecsResolveDeferredEntity( vecsWorld* w, vecsEntity e );
 
 // --------------------------------------------------------------------------
 // SIMD
