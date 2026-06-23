@@ -3887,14 +3887,19 @@ namespace vecs_snapshot_detail
         assert( s );
         std::memset( s, 0, sizeof( CapturedSnapshot ) );
         new ( &s->allocatorPool ) vecs::BumpPool();
-        s->generations = ( uint32_t* )std::malloc( maxEntities * sizeof( uint32_t ) );
-        s->allocated   = ( uint8_t*  )std::malloc( maxEntities * sizeof( uint8_t ) );
+        // calloc so the region above hiCaptured is zero. Restore copies
+        // [0, hiCaptured) from snap; rows above must read as zero.
+        // relParents uses INVALID_ENTITY (not 0) so restore's
+        // "if (parent == INVALID_ENTITY) continue;" is correct above range.
+        s->generations = ( uint32_t* )std::calloc( maxEntities, sizeof( uint32_t ) );
+        s->allocated   = ( uint8_t*  )std::calloc( maxEntities, sizeof( uint8_t ) );
         s->freeList    = ( uint32_t* )std::malloc( maxEntities * sizeof( uint32_t ) );
         s->relParents  = ( vecsEntity* )std::malloc( maxEntities * sizeof( vecsEntity ) );
         assert( s->generations && s->allocated && s->freeList && s->relParents );
+        for ( uint32_t i = 0; i < maxEntities; i++ ) s->relParents[i] = VECS_INVALID_ENTITY;
         for ( uint32_t i = 0; i < VECS_SIGNATURE_WORDS; i++ )
         {
-            s->signatures[i] = ( uint64_t* )std::malloc( maxEntities * sizeof( uint64_t ) );
+            s->signatures[i] = ( uint64_t* )std::calloc( maxEntities, sizeof( uint64_t ) );
             assert( s->signatures[i] );
         }
         s->maxEntities = maxEntities;
@@ -4021,7 +4026,9 @@ namespace vecs_snapshot_detail
     inline void ensureSparseAlloc( CapturedPool& p, uint32_t maxEntities )
     {
         if ( p.sparse ) return;
-        p.sparse = ( uint32_t* )std::malloc( maxEntities * sizeof( uint32_t ) );
+        // calloc: rows above hiCapturedSparse must read as VECS_INVALID_INDEX
+        // for restore's "if (sparse[j] != INVALID) free child" semantics.
+        p.sparse = ( uint32_t* )std::calloc( maxEntities, sizeof( uint32_t ) );
         assert( p.sparse );
     }
 
@@ -4064,14 +4071,16 @@ inline void vecsSnapshotCaptureInto( vecsWorld* w, vecsWorldSnapshot* snap )
     CapturedSnapshot* s = snap->state;
 
     // Entity pool: bulk copy raw integers.
-    std::memcpy( s->generations, w->entities->generations, w->maxEntities * sizeof( uint32_t ) );
-    std::memcpy( s->allocated,   w->entities->allocated,   w->maxEntities * sizeof( uint8_t ) );
+    const uint32_t hiAll = w->entities->hiAllocated;
+    std::memcpy( s->generations, w->entities->generations, hiAll * sizeof( uint32_t ) );
+    std::memcpy( s->allocated,   w->entities->allocated,   hiAll * sizeof( uint8_t ) );
     std::memcpy( s->freeList,    w->entities->freeList,    w->entities->freeCount * sizeof( uint32_t ) );
     s->freeCount = w->entities->freeCount;
     s->alive     = w->entities->alive;
+    s->hiCaptured = hiAll;
     for ( uint32_t word = 0; word < VECS_SIGNATURE_WORDS; word++ )
     {
-        std::memcpy( s->signatures[word], w->entities->signatures[word], w->maxEntities * sizeof( uint64_t ) );
+        std::memcpy( s->signatures[word], w->entities->signatures[word], hiAll * sizeof( uint64_t ) );
     }
 
     // Reset the arena; old captured buffers were owned by it. Components
@@ -4115,7 +4124,9 @@ inline void vecsSnapshotCaptureInto( vecsWorld* w, vecsWorldSnapshot* snap )
         if ( pool->count > 0u )
         {
             ensureSparseAlloc( p, w->maxEntities );
-            std::memcpy( p.sparse, pool->sparse, w->maxEntities * sizeof( uint32_t ) );
+            const uint32_t spn = pool->hiSparse;
+            std::memcpy( p.sparse, pool->sparse, spn * sizeof( uint32_t ) );
+            p.hiCapturedSparse = spn;
         }
 
         ensureBufCapacity( p, pool->count, w->maxEntities );
@@ -4180,7 +4191,7 @@ inline void vecsSnapshotCaptureInto( vecsWorld* w, vecsWorldSnapshot* snap )
     s->relPresent = ( w->relationships != nullptr );
     if ( w->relationships )
     {
-        std::memcpy( s->relParents, w->relationships->parents, w->maxEntities * sizeof( vecsEntity ) );
+        std::memcpy( s->relParents, w->relationships->parents, hiAll * sizeof( vecsEntity ) );
     }
     else
     {

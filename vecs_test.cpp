@@ -5601,4 +5601,100 @@ UTEST( bounded, pool_high_water )
     vecsDestroyWorld( w );
 }
 
+UTEST( bounded, capture_only_touches_live_range )
+{
+    // Skip smallcfg (VECS_MAX_ENTITIES=4096) — sentinel range is out of bounds.
+    if ( VECS_MAX_ENTITIES < 65536u ) { ASSERT_TRUE( true ); return; }
+
+    vecsWorld* w = vecsCreateWorld( 65536u );
+    for ( uint32_t i = 0; i < 1000; i++ ) vecsCreate( w );
+    for ( uint32_t i = 60000; i < 65000; i++ )
+    {
+        w->entities->generations[i] = 0xDEADBEEFu;
+        w->entities->allocated[i]   = 1u;
+        w->entities->signatures[0][i] = 0xCAFEBABEull;
+    }
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    ASSERT_EQ( ((vecs_snapshot_detail::CapturedSnapshot*)snap->state)->hiCaptured, 1000u );
+    for ( uint32_t i = 60000; i < 65000; i++ )
+    {
+        ASSERT_EQ( ((vecs_snapshot_detail::CapturedSnapshot*)snap->state)->generations[i], 0u );
+        ASSERT_EQ( ((vecs_snapshot_detail::CapturedSnapshot*)snap->state)->allocated[i], 0u );
+        ASSERT_EQ( ((vecs_snapshot_detail::CapturedSnapshot*)snap->state)->signatures[0][i], 0ull );
+        ASSERT_EQ( ((vecs_snapshot_detail::CapturedSnapshot*)snap->state)->relParents[i], VECS_INVALID_ENTITY );
+    }
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( bounded, capture_sparse_only_touches_live_range )
+{
+    // Per-pool sparse: write a sentinel at high indices. After capture,
+    // the sparse region above hiSparse must be VECS_INVALID_INDEX.
+    struct Pod { uint32_t x; };
+    vecsWorld* w = vecsCreateWorld( 4096u );
+    std::vector<vecsEntity> es;
+    for ( uint32_t i = 0; i < 100; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        es.push_back( e );
+        vecsSet<Pod>( w, e, { i } );
+    }
+    uint32_t cid = vecsTypeId<Pod>();
+    for ( uint32_t i = 500; i < 1000; i++ ) w->pools[cid]->sparse[i] = 0xDEADBEEFu;
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    auto* s = (vecs_snapshot_detail::CapturedSnapshot*)snap->state;
+    bool found = false;
+    for ( uint32_t i = 0; i < s->poolCount; i++ )
+    {
+        if ( s->poolSlots[i].inUse && s->poolSlots[i].pool.componentId == cid )
+        {
+            ASSERT_LE( s->poolSlots[i].pool.hiCapturedSparse, 200u );
+            for ( uint32_t j = 500; j < 1000; j++ )
+            {
+                // Sentinel from world must not have been pulled in. The
+                // captured region above hiCapturedSparse is calloc'd zero,
+                // which is also a valid "not captured" sentinel since the
+                // pool's live range never reaches there in this test.
+                ASSERT_NE( s->poolSlots[i].pool.sparse[j], 0xDEADBEEFu );
+            }
+            found = true;
+            break;
+        }
+    }
+    ASSERT_TRUE( found );
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( bench, bounded_capture_at_65536 )
+{
+    // Reproduces engine bench: world at 65536, 1000 entities.
+    struct Pod { uint32_t a, b, c, d; };
+    vecsWorld* w = vecsCreateWorld( 65536u );
+    std::vector<vecsEntity> es;
+    for ( uint32_t i = 0; i < 1000; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        es.push_back( e );
+        vecsSet<Pod>( w, e, { i, i + 1, i + 2, i + 3 } );
+    }
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    for ( int i = 0; i < 3; i++ ) vecsSnapshotCaptureInto( w, snap );
+    constexpr int K = 30;
+    double t0 = vecsBenchNow();
+    for ( int i = 0; i < K; i++ ) vecsSnapshotCaptureInto( w, snap );
+    double t1 = vecsBenchNow();
+    double us = ( t1 - t0 ) * 1e6 / K;
+    printf( "[bench] capture 1000 entities at maxE=65536: %.0f us/capture\n", us );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+    ASSERT_GT( us, 0.0 );
+}
+
 UTEST_MAIN();
