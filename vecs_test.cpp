@@ -5697,4 +5697,47 @@ UTEST( bench, bounded_capture_at_65536 )
     ASSERT_GT( us, 0.0 );
 }
 
+UTEST( bounded, restore_onto_larger_world )
+{
+    // Architect's critical test: capture at hiCaptured=N, then grow the
+    // world past N, then restore. Stale allocated=1 rows above N must
+    // be cleared so the freeList invariant holds (no slot both
+    // allocated and free).
+    vecsWorld* w = vecsCreateWorld( 4096u );
+    std::vector<vecsEntity> small;
+    for ( uint32_t i = 0; i < 100; i++ ) small.push_back( vecsCreate( w ) );
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    // Grow past 100: create 200 more entities.
+    for ( uint32_t i = 0; i < 200; i++ ) vecsCreate( w );
+    ASSERT_GT( w->entities->hiAllocated, 100u );
+
+    // Restore back to the small state.
+    vecsSnapshotRestore( w, snap );
+
+    // The 200 entities created after the snap must now be dead.
+    ASSERT_EQ( w->entities->alive, 100u );
+    ASSERT_EQ( w->entities->hiAllocated, 100u );
+    for ( uint32_t i = 100; i < 300; i++ )
+    {
+        ASSERT_EQ( w->entities->allocated[i], 0u );
+    }
+    // The freeList invariant: every index on the freeList must be unallocated.
+    for ( uint32_t i = 0; i < w->entities->freeCount; i++ )
+    {
+        uint32_t fIdx = w->entities->freeList[i];
+        ASSERT_EQ( w->entities->allocated[fIdx], 0u );
+    }
+    // The 100 small entities must still be live.
+    for ( vecsEntity e : small ) ASSERT_TRUE( vecsAlive( w, e ) );
+    // Next create must not double-allocate any stale slot.
+    vecsEntity ne = vecsCreate( w );
+    ASSERT_NE( ne, VECS_INVALID_ENTITY );
+    ASSERT_TRUE( vecsAlive( w, ne ) );
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
 UTEST_MAIN();

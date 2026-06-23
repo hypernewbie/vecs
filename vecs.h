@@ -3887,10 +3887,7 @@ namespace vecs_snapshot_detail
         assert( s );
         std::memset( s, 0, sizeof( CapturedSnapshot ) );
         new ( &s->allocatorPool ) vecs::BumpPool();
-        // calloc so the region above hiCaptured is zero. Restore copies
-        // [0, hiCaptured) from snap; rows above must read as zero.
-        // relParents uses INVALID_ENTITY (not 0) so restore's
-        // "if (parent == INVALID_ENTITY) continue;" is correct above range.
+        // calloc so rows above hiCaptured read as zero (INVALID_ENTITY for relParents).
         s->generations = ( uint32_t* )std::calloc( maxEntities, sizeof( uint32_t ) );
         s->allocated   = ( uint8_t*  )std::calloc( maxEntities, sizeof( uint8_t ) );
         s->freeList    = ( uint32_t* )std::malloc( maxEntities * sizeof( uint32_t ) );
@@ -4026,8 +4023,7 @@ namespace vecs_snapshot_detail
     inline void ensureSparseAlloc( CapturedPool& p, uint32_t maxEntities )
     {
         if ( p.sparse ) return;
-        // calloc: rows above hiCapturedSparse must read as VECS_INVALID_INDEX
-        // for restore's "if (sparse[j] != INVALID) free child" semantics.
+        // calloc: rows above hiCapturedSparse must read as VECS_INVALID_INDEX.
         p.sparse = ( uint32_t* )std::calloc( maxEntities, sizeof( uint32_t ) );
         assert( p.sparse );
     }
@@ -4243,15 +4239,23 @@ inline void vecsSnapshotRestore( vecsWorld* w, const vecsWorldSnapshot* snap )
     assert( s->maxEntities == w->maxEntities && "Snapshot maxEntities must match world" );
     assert( s->maxEntities == w->entities->maxEntities && "Snapshot maxEntities must match entity pool" );
 
-    // Step 1: entity pool wholesale (incl. signatures).
-    std::memcpy( w->entities->generations, s->generations, w->maxEntities * sizeof( uint32_t ) );
-    std::memcpy( w->entities->allocated,   s->allocated,   w->maxEntities * sizeof( uint8_t ) );
+    // Step 1: entity pool bounded by hiCaptured. Zero [n, max(n, w->hiAllocated))
+    // so the freeList invariant (no slot both allocated and free) holds even
+    // when the world grew past the snapshot's high-water mark.
+    const uint32_t n  = s->hiCaptured;
+    const uint32_t nClr = ( w->entities->hiAllocated > n ) ? w->entities->hiAllocated : n;
+    std::memcpy( w->entities->generations, s->generations, n * sizeof( uint32_t ) );
+    if ( nClr > n ) std::memset( w->entities->generations + n, 0, ( nClr - n ) * sizeof( uint32_t ) );
+    std::memcpy( w->entities->allocated,   s->allocated,   n * sizeof( uint8_t ) );
+    if ( nClr > n ) std::memset( w->entities->allocated + n, 0, ( nClr - n ) * sizeof( uint8_t ) );
     std::memcpy( w->entities->freeList,    s->freeList,    s->freeCount * sizeof( uint32_t ) );
     w->entities->freeCount = s->freeCount;
     w->entities->alive     = s->alive;
+    w->entities->hiAllocated = n;
     for ( uint32_t word = 0; word < VECS_SIGNATURE_WORDS; word++ )
     {
-        std::memcpy( w->entities->signatures[word], s->signatures[word], w->maxEntities * sizeof( uint64_t ) );
+        std::memcpy( w->entities->signatures[word], s->signatures[word], n * sizeof( uint64_t ) );
+        if ( nClr > n ) std::memset( w->entities->signatures[word] + n, 0, ( nClr - n ) * sizeof( uint64_t ) );
     }
 
     // Step 2a: pools present-in-world / absent-in-snapshot -> empty (fires onRemove first).
@@ -4356,7 +4360,12 @@ inline void vecsSnapshotRestore( vecsWorld* w, const vecsWorldSnapshot* snap )
         // count==0 may still hold stale sparse from prior capture; don't copy it
         if ( sp.count > 0u && sp.sparse && pool->sparse )
         {
-            std::memcpy( pool->sparse, sp.sparse, w->maxEntities * sizeof( uint32_t ) );
+            // Bounded by sp.hiCapturedSparse; clear up to the live range.
+            const uint32_t spn = sp.hiCapturedSparse;
+            std::memcpy( pool->sparse, sp.sparse, spn * sizeof( uint32_t ) );
+            const uint32_t spClr = ( pool->hiSparse > spn ) ? pool->hiSparse : spn;
+            if ( spClr > spn ) std::memset( pool->sparse + spn, 0xFFu, ( spClr - spn ) * sizeof( uint32_t ) );
+            pool->hiSparse = spn;
         }
         else
         {
@@ -4432,14 +4441,16 @@ inline void vecsSnapshotRestore( vecsWorld* w, const vecsWorldSnapshot* snap )
         }
     }
 
-    // Step 4: relationships. Bulk-copy parents[]; rebuild children[][] in one O(N) pass.
+    // Step 4: relationships. Bulk-copy parents[] bounded by hiCaptured;
+    // rebuild children[][] from snap data also bounded to live range.
     if ( !w->relationships )
     {
         w->relationships = vecsCreateRelationships( w->maxEntities );
     }
-    for ( uint32_t i = 0; i < w->maxEntities; i++ )
+    // Free stale child arrays above hiCaptured (world may have grown since snap).
+    std::memcpy( w->relationships->parents, s->relParents, n * sizeof( vecsEntity ) );
+    for ( uint32_t i = 0; i < nClr; i++ )
     {
-        w->relationships->parents[i] = s->relParents[i];
         w->relationships->childCounts[i] = 0u;
         if ( w->relationships->children[i] )
         {
@@ -4448,7 +4459,9 @@ inline void vecsSnapshotRestore( vecsWorld* w, const vecsWorldSnapshot* snap )
         }
         w->relationships->childCapacities[i] = 0u;
     }
-    for ( uint32_t i = 0; i < w->maxEntities; i++ )
+    // Rows above nClr stay as-is; they were zero in a fresh world and the
+    // children-free loop only touches the snapped range.
+    for ( uint32_t i = 0; i < n; i++ )
     {
         vecsEntity parent = s->relParents[i];
         if ( parent == VECS_INVALID_ENTITY ) continue;
@@ -4456,7 +4469,7 @@ inline void vecsSnapshotRestore( vecsWorld* w, const vecsWorldSnapshot* snap )
         if ( parentIdx >= w->maxEntities ) continue;
         w->relationships->childCounts[parentIdx]++;
     }
-    for ( uint32_t p = 0; p < w->maxEntities; p++ )
+    for ( uint32_t p = 0; p < n; p++ )
     {
         uint32_t cnt = w->relationships->childCounts[p];
         if ( cnt == 0u ) continue;
@@ -4464,7 +4477,7 @@ inline void vecsSnapshotRestore( vecsWorld* w, const vecsWorldSnapshot* snap )
         w->relationships->childCapacities[p] = cnt;
     }
     uint32_t* cursor = ( uint32_t* )std::calloc( w->maxEntities, sizeof( uint32_t ) );
-    for ( uint32_t i = 0; i < w->maxEntities; i++ )
+    for ( uint32_t i = 0; i < n; i++ )
     {
         vecsEntity parent = s->relParents[i];
         if ( parent == VECS_INVALID_ENTITY ) continue;
