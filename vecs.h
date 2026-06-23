@@ -194,6 +194,8 @@ struct vecsEntityPool
     uint32_t freeCount;
     uint32_t maxEntities;
     uint32_t alive;
+    // High-water mark: highest live index + 1. Bounds snapshot capture/restore to live range.
+    uint32_t hiAllocated;
 };
 
 inline vecsEntityPool* vecsCreateEntityPool( uint32_t maxEntities )
@@ -216,6 +218,7 @@ inline vecsEntityPool* vecsCreateEntityPool( uint32_t maxEntities )
     pool->freeCount = maxEntities;
     pool->maxEntities = maxEntities;
     pool->alive = 0;
+    pool->hiAllocated = 0u;
     for ( uint32_t i = 0; i < maxEntities; i++ )
     {
         pool->freeList[i] = maxEntities - i - 1;
@@ -250,6 +253,7 @@ inline vecsEntity vecsEntityPoolCreate( vecsEntityPool* pool )
     assert( !pool->allocated[index] );
     pool->allocated[index] = 1u;
     pool->alive++;
+    if ( index + 1u > pool->hiAllocated ) pool->hiAllocated = index + 1u;
     return vecsMakeEntity( index, pool->generations[index] );
 }
 
@@ -267,6 +271,12 @@ inline void vecsEntityPoolDestroy( vecsEntityPool* pool, vecsEntity entity )
     pool->freeList[pool->freeCount++] = index;
     assert( pool->alive > 0 );
     if ( pool->alive > 0u ) pool->alive--;
+    // Scan-back: freeList is LIFO so the freed slot is usually re-allocated before
+    // shrinking, keeping this O(1) amortised. Worst case is one full scan on world shrink.
+    if ( index + 1u == pool->hiAllocated )
+    {
+        while ( pool->hiAllocated > 0u && !pool->allocated[pool->hiAllocated - 1u] ) pool->hiAllocated--;
+    }
 }
 
 inline bool vecsEntityPoolAlive( vecsEntityPool* pool, vecsEntity entity )
@@ -413,6 +423,8 @@ struct vecsPool
 
     // Seqlock. Even = stable, odd = writer in progress. atomic_init after malloc.
     std::atomic<uint64_t> gen;
+    // High-water mark: highest live entity index + 1. Bounds snapshot capture/restore.
+    uint32_t hiSparse;
 };
 
 inline void vecsPoolGrow( vecsPool* pool )
@@ -508,6 +520,7 @@ inline vecsPool* vecsCreatePool( uint32_t maxEntities, uint32_t stride, uint32_t
     pool->moveCtor = moveC;
     pool->copyCtor = copyC;
     std::atomic_init( &pool->gen, 0ull );
+    pool->hiSparse = 0u;
     return pool;
 }
 
@@ -567,6 +580,7 @@ inline void* vecsPoolSet( vecsPool* pool, uint32_t entityIndex, const void* data
         }
     }
     vecsBitfieldSet( &pool->bitfield, entityIndex );
+    if ( entityIndex + 1u > pool->hiSparse ) pool->hiSparse = entityIndex + 1u;
     return dst;
 }
 
@@ -610,6 +624,10 @@ inline void vecsPoolUnset( vecsPool* pool, uint32_t entityIndex )
     vecsBitfieldUnset( &pool->bitfield, entityIndex );
     pool->sparse[entityIndex] = VECS_INVALID_INDEX;
     pool->count--;
+    if ( entityIndex + 1u == pool->hiSparse )
+    {
+        while ( pool->hiSparse > 0u && pool->sparse[pool->hiSparse - 1u] == VECS_INVALID_INDEX ) pool->hiSparse--;
+    }
 }
 
 inline void* vecsPoolGet( vecsPool* pool, uint32_t entityIndex )
@@ -1231,6 +1249,7 @@ inline void vecsClearWorld( vecsWorld* world )
             {
                 pool->sparse[j] = VECS_INVALID_INDEX;
             }
+            pool->hiSparse = 0u;
         }
 
         if ( world->singletons[i].data )
@@ -1249,6 +1268,7 @@ inline void vecsClearWorld( vecsWorld* world )
     vecsEntityPool* ep = world->entities;
     ep->freeCount = world->maxEntities;
     ep->alive = 0;
+    ep->hiAllocated = 0u;
     for ( uint32_t i = 0; i < world->maxEntities; i++ )
     {
         ep->freeList[i] = world->maxEntities - i - 1;
@@ -3812,6 +3832,7 @@ namespace vecs_snapshot_detail
         uint32_t      alignment;
         uint32_t      count;
         uint32_t      bufCapacity;
+        uint32_t      hiCapturedSparse;
         vecsBitfield  bitfield;
         uint32_t*     sparse;
         uint32_t*     denseEntities;
@@ -3844,6 +3865,7 @@ namespace vecs_snapshot_detail
         uint32_t  freeCount;
         uint32_t  alive;
         uint32_t  maxEntities;
+        uint32_t  hiCaptured;
 
         CapturedPoolSlot*      poolSlots;
         uint32_t               poolCount;

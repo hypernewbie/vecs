@@ -5493,4 +5493,112 @@ UTEST( bench, create_set_with_pool_allocator )
     ASSERT_TRUE( true );
 }
 
+UTEST( bounded, entity_pool_high_water )
+{
+    vecsWorld* w = vecsCreateWorld( 64u );
+
+    // Empty world.
+    ASSERT_EQ( w->entities->hiAllocated, 0u );
+
+    // Create 10 entities. Initial freeList fills 63..0 at the tail, so
+    // first create pops index 0, second index 1, etc.
+    std::vector<vecsEntity> ents;
+    for ( int i = 0; i < 10; i++ ) ents.push_back( vecsCreate( w ) );
+    ASSERT_EQ( w->entities->alive, 10u );
+    ASSERT_EQ( w->entities->hiAllocated, 10u );
+
+    // Destroy an interior entity; high water unchanged.
+    vecsDestroy( w, ents[5] );
+    ASSERT_EQ( w->entities->alive, 9u );
+    ASSERT_EQ( w->entities->hiAllocated, 10u );
+
+    // Destroy the current top (index 9). Scan-back drops hiAllocated to 9.
+    vecsDestroy( w, ents[9] );
+    ASSERT_EQ( w->entities->alive, 8u );
+    ASSERT_EQ( w->entities->hiAllocated, 9u );
+
+    // Re-create: gets the freed slot 9 (LIFO). hiAllocated advances back to 10.
+    vecsEntity e = vecsCreate( w );
+    ASSERT_EQ( vecsEntityIndex( e ), 9u );
+    ASSERT_EQ( w->entities->hiAllocated, 10u );
+
+    // Destroy ents[8], ents[7], ents[6], ents[4], ents[3], ents[2].
+    // None is at the high slot (9), so hiAllocated stays 10.
+    vecsDestroy( w, ents[8] );
+    vecsDestroy( w, ents[7] );
+    vecsDestroy( w, ents[6] );
+    vecsDestroy( w, ents[4] );
+    vecsDestroy( w, ents[3] );
+    vecsDestroy( w, ents[2] );
+    ASSERT_EQ( w->entities->hiAllocated, 10u );
+    // alive: {0, 1, 9}
+
+    // Destroy ents[0]. Not the high slot; hiAllocated stays 10.
+    vecsDestroy( w, ents[0] );
+    ASSERT_EQ( w->entities->hiAllocated, 10u );
+    // alive: {1, 9}
+
+    // Destroy ents[1]. Not the high slot; hiAllocated stays 10.
+    vecsDestroy( w, ents[1] );
+    ASSERT_EQ( w->entities->hiAllocated, 10u );
+    // alive: {9}
+
+    // Destroy the entity at high slot (idx 9). Scan-back: only slot 9
+    // was alive, now dead. hiAllocated drops to 0.
+    vecsEntity highEnt = vecsMakeEntity( 9u, w->entities->generations[9u] );
+    vecsDestroy( w, highEnt );
+    ASSERT_EQ( w->entities->alive, 0u );
+    ASSERT_EQ( w->entities->hiAllocated, 0u );
+
+    (void)e;
+
+    // ClearWorld resets.
+    vecsClearWorld( w );
+    ASSERT_EQ( w->entities->hiAllocated, 0u );
+    ASSERT_EQ( w->entities->alive, 0u );
+
+    vecsDestroyWorld( w );
+}
+
+UTEST( bounded, pool_high_water )
+{
+    vecsWorld* w = vecsCreateWorld( 64u );
+    struct Pos { uint32_t x, y; };
+    struct Tag {};
+
+    vecsEntity e1 = vecsCreate( w );  // idx 0
+    vecsEntity e2 = vecsCreate( w );  // idx 1
+    vecsEntity e3 = vecsCreate( w );  // idx 2
+
+    vecsSet<Pos>( w, e1, { 1, 1 } );
+    ASSERT_EQ( w->pools[vecsTypeId<Pos>()]->hiSparse, 1u );
+
+    vecsSet<Pos>( w, e2, { 2, 2 } );
+    ASSERT_EQ( w->pools[vecsTypeId<Pos>()]->hiSparse, 2u );
+
+    vecsSet<Pos>( w, e3, { 3, 3 } );
+    ASSERT_EQ( w->pools[vecsTypeId<Pos>()]->hiSparse, 3u );
+
+    // Tag pool: only e1 (idx 0).
+    vecsAddTag<Tag>( w, e1 );
+    ASSERT_EQ( w->pools[vecsTypeId<Tag>()]->hiSparse, 1u );
+
+    // Unset Tag from e1: scan back, no live rows. hiSparse=0.
+    vecsUnset<Tag>( w, e1 );
+    ASSERT_EQ( w->pools[vecsTypeId<Tag>()]->hiSparse, 0u );
+
+    // Unset Pos from e3 (current high, idx 2). LIFO means next Set
+    // re-uses idx 2; hiSparse stays 3. To force a shrink, unset e2 then e3.
+    vecsUnset<Pos>( w, e2 );
+    ASSERT_EQ( w->pools[vecsTypeId<Pos>()]->hiSparse, 3u );
+    vecsUnset<Pos>( w, e3 );
+    ASSERT_EQ( w->pools[vecsTypeId<Pos>()]->hiSparse, 1u );
+
+    // ClearWorld resets.
+    vecsClearWorld( w );
+    ASSERT_EQ( w->pools[vecsTypeId<Pos>()]->hiSparse, 0u );
+
+    vecsDestroyWorld( w );
+}
+
 UTEST_MAIN();
