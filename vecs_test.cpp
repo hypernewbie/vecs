@@ -5446,4 +5446,51 @@ UTEST( pool_allocator, pinned_user_pool )
     ASSERT_FALSE( a == c );
 }
 
+UTEST( bench, create_set_with_pool_allocator )
+{
+    // Create+set N entities with a std::vector<int> component, default vs
+    // pool_allocator. Outside capture PoolScope the pool falls back to
+    // malloc; difference is allocator-equality semantics, not the bump.
+    struct InvDefault { std::vector<uint32_t> items; uint32_t gold; };
+    struct InvPooled  { std::vector<uint32_t, vecs::pool_allocator<uint32_t>> items; uint32_t gold; };
+
+    auto run = []( uint32_t N, int iters, bool pooled ) {
+        vecsWorld* w = vecsCreateWorld( (uint32_t)(N * iters) + 64u );
+        auto t0 = vecsBenchNow();
+        for ( int it = 0; it < iters; it++ )
+        {
+            for ( uint32_t i = 0; i < N; i++ )
+            {
+                vecsEntity e = vecsCreate( w );
+                if ( pooled )
+                {
+                    InvPooled inv; inv.items = { i, i+1, i+2 }; inv.gold = i;
+                    vecsSet<InvPooled>( w, e, inv );
+                }
+                else
+                {
+                    InvDefault inv; inv.items = { i, i+1, i+2 }; inv.gold = i;
+                    vecsSet<InvDefault>( w, e, inv );
+                }
+            }
+        }
+        auto t1 = vecsBenchNow();
+        vecsDestroyWorld( w );
+        return ( t1 - t0 ) * 1e6 / iters;
+    };
+
+    for ( uint32_t N : { 1000u, 5000u } )
+    {
+        int iters = N <= 1000 ? 50 : 10;
+        // Skip sizes that overflow the world's entity capacity (smallcfg test).
+        if ( (uint32_t)(N * iters) + 64u > VECS_MAX_ENTITIES ) continue;
+        run( N, 3, false ); run( N, 3, true ); // warmup
+        double d = run( N, iters, false );
+        double p = run( N, iters, true );
+        printf( "[bench] N=%u create+set: default-alloc=%.0f us, pool-alloc=%.0f us\n",
+                N, d, p );
+    }
+    ASSERT_TRUE( true );
+}
+
 UTEST_MAIN();
