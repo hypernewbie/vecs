@@ -3745,18 +3745,18 @@ namespace vecs
         pool_allocator() noexcept = default;
 
         // Pin to a specific pool (user-owned). All alloc/dealloc go to that pool.
-        explicit pool_allocator( BumpPool& p ) noexcept : pool( &p ) {}
+        explicit pool_allocator( BumpPool& p ) noexcept : m_pool( &p ) {}
 
         // Rebind ctor: copy pool pointer across T types. Uses the public
-        // pool() accessor so no friend declaration is needed.
+        // pool_get() accessor so no friend declaration is needed.
         template< typename U >
-        pool_allocator( const pool_allocator<U>& o ) noexcept : pool( o.pool() ) {}
+        pool_allocator( const pool_allocator<U>& o ) noexcept : m_pool( o.pool_get() ) {}
 
-        BumpPool* pool_get() const noexcept { return pool; }
+        BumpPool* pool_get() const noexcept { return m_pool; }
 
         T* allocate( size_t n )
         {
-            BumpPool* p = pool ? pool : detail::tls_active_pool;
+            BumpPool* p = m_pool ? m_pool : detail::tls_active_pool;
             if ( p ) return static_cast<T*>( p->alloc( n * sizeof(T), alignof(T) ) );
             // Fallback: over-aligned types need aligned_alloc; mirror the
             // alignment > 8u branch used elsewhere in this header.
@@ -3772,9 +3772,9 @@ namespace vecs
 
         void deallocate( T* p, size_t ) noexcept
         {
-            if ( pool )
+            if ( m_pool )
             {
-                if ( pool->owns( p ) ) return;
+                if ( m_pool->owns( p ) ) return;
                 if constexpr ( alignof(T) > 8u ) vecsAlignedFree( p );
                 else std::free( p );
                 return;
@@ -3786,7 +3786,7 @@ namespace vecs
         }
 
     private:
-        BumpPool* pool = nullptr;
+        BumpPool* m_pool = nullptr;
     };
 
     template< typename T, typename U >
