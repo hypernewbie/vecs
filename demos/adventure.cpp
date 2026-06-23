@@ -37,7 +37,7 @@ struct CActiveState {}; // Tag for current player location
 struct GameConfig {
     bool isRunning = true;
     bool testMode = false;
-    std::string startId = "S01";
+    char startId[16] = "S01";
 };
 
 // --- Helpers ---
@@ -299,7 +299,7 @@ int main(int argc, char** argv) {
     if (cfg->testMode) {
         RunTests(world);
     } else {
-        SetActiveState(world, cfg->startId);
+        SetActiveState(world, std::string( cfg->startId ) );
         while (cfg->isRunning) {
             SysRender(world);
             SysInput(world);

@@ -913,10 +913,8 @@ inline void vecsSnapshotCaptureInto( vecsWorld* w, struct vecsWorldSnapshot* sna
 // The central registry. Maintains pools, observers, and hierarchy.
 struct vecsWorld
 {
-    // Singletons must be trivially copyable: snapshot deep-copies via memcpy.
-// A non-trivially-copyable singleton would alias internal pointers between
-// the live slot and the snapshot slot, double-freeing on destroy.
-struct vecsSingletonSlot
+    // Trivially copyable; enforced at vecsSetSingleton via static_assert.
+    struct vecsSingletonSlot
     {
         uint8_t* data;
         uint32_t size;
@@ -3534,7 +3532,11 @@ inline void vecsEachNoEntity( vecsWorld* w, Fn&& fn )
 template< typename T >
 inline T* vecsSetSingleton( vecsWorld* w, const T& val = {} )
 {
+    static_assert( std::is_trivially_copyable<T>::value,
+        "vecs singletons must be trivially copyable: snapshots deep-copy via memcpy." );
     assert( w );
+    assert( std::atomic_load_explicit(&w->captureInProgress, std::memory_order_acquire) == 0u
+            && "Cannot set singleton during snapshot capture" );
     uint32_t id = vecsTypeId<T>();
     assert( id < VECS_MAX_COMPONENTS );
     if ( !vecsComponentIdValid( id ) )
@@ -3547,11 +3549,8 @@ inline T* vecsSetSingleton( vecsWorld* w, const T& val = {} )
         slot.data = ( uint8_t* )std::malloc( sizeof( T ) );
         assert( slot.data );
         slot.size = sizeof( T );
+        // trivially_copyable ⟹ trivially_destructible (see static_assert above); destructor slot stays null.
         slot.destructor = nullptr;
-        if constexpr ( !std::is_trivially_destructible<T>::value )
-        {
-            slot.destructor = []( void* ptr ) { static_cast<T*>( ptr )->~T(); };
-        }
     }
     else
     {

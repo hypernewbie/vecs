@@ -1987,14 +1987,10 @@ UTEST( world, clear_world )
     // Add observer
     vecsAddObserver( w->observers, vecsTypeId<Position>(), vecs_test_clear_world_dummy_observer, true );
 
-    // Add singleton with custom destructor
+    // Singleton must be trivially copyable; empty destructor is redundant.
     struct TestSingleton
     {
         int value;
-        ~TestSingleton()
-        {
-            // Destructor called when singleton is cleared
-        }
     };
     vecsSetSingleton<TestSingleton>( w, { 42 } );
     ASSERT_TRUE( vecsGetSingleton<TestSingleton>( w ) != nullptr );
@@ -5724,7 +5720,6 @@ struct SoupSingletonLifecycleTracker
 {
     static int destroyed;
     int value = 0;
-    ~SoupSingletonLifecycleTracker() { destroyed++; }
 };
 
 int SoupSingletonLifecycleTracker::destroyed = 0;
@@ -6019,18 +6014,18 @@ UTEST( chaos, instantiate_batch_hierarchy_desync )
 
 UTEST( chaos, singleton_lifecycle_thrash )
 {
+    // Trivially-copyable T only — the slot has no destructor to call.
+    // Singleton slot allocation + free path on clear/destroy is exercised.
     vecsWorld* w = vecsCreateWorld( 128u );
     SoupSingletonLifecycleTracker first = {};
     SoupSingletonLifecycleTracker second = {};
     first.value = 11;
     second.value = 22;
-    SoupSingletonLifecycleTracker::destroyed = 0;
 
     vecsSetSingleton<SoupSingletonLifecycleTracker>( w, first );
     ASSERT_EQ( vecsGetSingleton<SoupSingletonLifecycleTracker>( w )->value, 11 );
 
     vecsClearWorld( w );
-    ASSERT_EQ( SoupSingletonLifecycleTracker::destroyed, 1 );
     ASSERT_TRUE( vecsGetSingleton<SoupSingletonLifecycleTracker>( w ) == nullptr );
     ASSERT_TRUE( vecsValidate( w ) );
 
@@ -6038,7 +6033,6 @@ UTEST( chaos, singleton_lifecycle_thrash )
     ASSERT_EQ( vecsGetSingleton<SoupSingletonLifecycleTracker>( w )->value, 22 );
 
     vecsDestroyWorld( w );
-    ASSERT_EQ( SoupSingletonLifecycleTracker::destroyed, 2 );
 }
 
 UTEST( chaos, query_cache_drift_recreation )
@@ -8492,6 +8486,36 @@ UTEST( gap, double_restore_not_idempotent_singleton )
     vecsSnapshotDestroy( snap );
     vecsDestroyWorld( w );
 }
+
+UTEST( gap, singleton_roundtrip_pod )
+{
+    struct RewindState { uint32_t tick; float dt; uint64_t seed; };
+    vecsWorld* w = vecsCreateWorld( 32u );
+    vecsSetSingleton<RewindState>( w, { 0u, 1.0f / 60.0f, 0xCAFEBABEull } );
+    const RewindState* s = vecsGetSingleton<RewindState>( w );
+    ASSERT_TRUE( s != nullptr );
+    ASSERT_EQ( s->tick, 0u );
+    ASSERT_EQ( s->dt, 1.0f / 60.0f );
+    ASSERT_EQ( s->seed, 0xCAFEBABEull );
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsSetSingleton<RewindState>( w, { 999u, 0.5f, 0xDEADBEEFull } );
+    const RewindState* live = vecsGetSingleton<RewindState>( w );
+    ASSERT_EQ( live->tick, 999u );
+
+    vecsSnapshotRestore( w, snap );
+    const RewindState* restored = vecsGetSingleton<RewindState>( w );
+    ASSERT_TRUE( restored != nullptr );
+    ASSERT_EQ( restored->tick, 0u );
+    ASSERT_EQ( restored->dt, 1.0f / 60.0f );
+    ASSERT_EQ( restored->seed, 0xCAFEBABEull );
+
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+    ASSERT_TRUE( true );
+}
+
+
 
 UTEST( gap, double_destroy_corrupts_under_ndebug )
 {
