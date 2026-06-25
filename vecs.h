@@ -2047,8 +2047,7 @@ inline void invokeQueryCallback( vecsWorld* w, WithTuple& withPools, OptionalTup
     fn( entity, *getData<With>( std::get<I>( withPools ), entityIdx )... );
 }
 
-// Resolves the per-L2 mask for a query: q->withMask is already With-intersected
-// by vecsQueryRefreshWithMask, so this only applies the Without filter.
+// Applies the Without filter to q->withMask.l2Masks[l2Idx].
 inline uint64_t resolveQueryL2( vecsWorld* w, vecsQuery* q, uint32_t l2Idx )
 {
     uint64_t l2 = q->withMask.l2Masks[l2Idx];
@@ -2875,8 +2874,7 @@ inline void vecsQueryEach( vecsWorld* w, vecsQuery* q, Fn&& fn )
     }
 }
 
-// Returns the number of entities matching the query. No callback, no component deref.
-// O(VECS_L2_COUNT) popcount over active L2 masks. Caching the refresh is future work.
+// Returns the number of entities matching the query.
 inline uint32_t vecsQueryCount( vecsWorld* w, vecsQuery* q )
 {
     assert( w );
@@ -2903,8 +2901,7 @@ inline uint32_t vecsQueryCount( vecsWorld* w, vecsQuery* q )
     return total;
 }
 
-// Visits every Nth matching entity (ascending entity index). stride >= 1; stride == 1
-// is equivalent to vecsQueryEach. Scalar walk so determinism is self-evident.
+// Visits every Nth matching entity (ascending entity index).
 template< typename... With, typename Fn >
 inline void vecsQueryEachStrided( vecsWorld* w, vecsQuery* q, uint32_t stride, Fn&& fn )
 {
