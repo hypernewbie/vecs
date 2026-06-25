@@ -3348,6 +3348,7 @@ inline T* vecsEmplace( vecsWorld* w, vecsEntity e, Args&&... args )
         result = ( T* )( pool->denseData + ( size_t )denseIdx * pool->stride );
         new ( result ) T( std::forward<Args>( args )... );
         vecsBitfieldSet( &pool->bitfield, idx );
+        if ( idx + 1u > pool->hiSparse ) pool->hiSparse = idx + 1u;
     }
 
     vecsSetSignatureBit( w, idx, componentId );

@@ -2825,7 +2825,51 @@ UTEST( emplace, non_trivial_type )
     Name* n = vecsEmplace<Name>( w, e, "TestEntity" );
     ASSERT_TRUE( n != nullptr );
     ASSERT_EQ( strcmp( n->data, "TestEntity" ), 0 );
-    
+
+    vecsDestroyWorld( w );
+}
+
+UTEST( emplace, hiSparse_advances )
+{
+    // Regression: vecsEmplace's non-empty branch must bump pool->hiSparse.
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    struct Holder { uint32_t x; Holder() = default; Holder( uint32_t v ) : x( v ) {} };
+    std::vector<vecsEntity> es;
+    for ( uint32_t i = 0; i < 100u; i++ ) es.push_back( vecsCreate( w ) );
+
+    vecsEmplace<Holder>( w, es[50], 50u );
+    ASSERT_EQ( w->pools[vecsTypeId<Holder>()]->hiSparse, 51u );
+
+    vecsEmplace<Holder>( w, es[99], 99u );
+    ASSERT_EQ( w->pools[vecsTypeId<Holder>()]->hiSparse, 100u );
+
+    vecsDestroyWorld( w );
+}
+
+UTEST( emplace, snapshot_captures_emplaced_component )
+{
+    // Emplace a non-trivial component on a high-index entity, capture,
+    // destroy the entity, then restore. The component data must survive.
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    struct Payload { uint32_t a, b, c; Payload() = default; Payload( uint32_t x, uint32_t y, uint32_t z ) : a( x ), b( y ), c( z ) {} };
+    std::vector<vecsEntity> es;
+    for ( uint32_t i = 0; i < 100u; i++ ) es.push_back( vecsCreate( w ) );
+
+    vecsEmplace<Payload>( w, es[99], 7u, 8u, 9u );
+
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    vecsDestroy( w, es[99] );
+    ASSERT_FALSE( vecsAlive( w, es[99] ) );
+
+    vecsSnapshotRestore( w, snap );
+    ASSERT_TRUE( vecsAlive( w, es[99] ) );
+    Payload* p = vecsGet<Payload>( w, es[99] );
+    ASSERT_TRUE( p != nullptr );
+    ASSERT_EQ( p->a, 7u );
+    ASSERT_EQ( p->b, 8u );
+    ASSERT_EQ( p->c, 9u );
+
+    vecsSnapshotDestroy( snap );
     vecsDestroyWorld( w );
 }
 
