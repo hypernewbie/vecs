@@ -5928,26 +5928,39 @@ UTEST( bounded, pool_high_water )
 
 UTEST( bounded, capture_only_touches_live_range )
 {
-    // Skip smallcfg (VECS_MAX_ENTITIES=4096) — sentinel range is out of bounds.
-    if ( VECS_MAX_ENTITIES < 65536u ) { ASSERT_TRUE( true ); return; }
-
+    // Snapshot storage is live-range sized; sentinels above hiCaptured don't
+    // bleed in. We can only inspect sentinels that lie within the captured
+    // buffer (entityCapacity).
     vecsWorld* w = vecsCreateWorld( 65536u );
     for ( uint32_t i = 0; i < 1000; i++ ) vecsCreate( w );
-    for ( uint32_t i = 60000; i < 65000; i++ )
+    // Plant sentinels in [500, 1000) — inside the captured hi range — so we
+    // can verify capture still pulls the real data, not calloc noise.
+    for ( uint32_t i = 500; i < 1000; i++ )
     {
         w->entities->generations[i] = 0xDEADBEEFu;
         w->entities->allocated[i]   = 1u;
         w->entities->signatures[0][i] = 0xCAFEBABEull;
     }
     vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    auto* s = (vecs_snapshot_detail::CapturedSnapshot*)snap->state;
 
-    ASSERT_EQ( ((vecs_snapshot_detail::CapturedSnapshot*)snap->state)->hiCaptured, 1000u );
-    for ( uint32_t i = 60000; i < 65000; i++ )
+    ASSERT_EQ( s->hiCaptured, 1000u );
+    ASSERT_LT( s->entityCapacity, 65536u );
+    ASSERT_GE( s->entityCapacity, 1000u );
+    // Captured hi-range preserves real data (sentinels survive).
+    for ( uint32_t i = 500; i < 1000; i++ )
     {
-        ASSERT_EQ( ((vecs_snapshot_detail::CapturedSnapshot*)snap->state)->generations[i], 0u );
-        ASSERT_EQ( ((vecs_snapshot_detail::CapturedSnapshot*)snap->state)->allocated[i], 0u );
-        ASSERT_EQ( ((vecs_snapshot_detail::CapturedSnapshot*)snap->state)->signatures[0][i], 0ull );
-        ASSERT_EQ( ((vecs_snapshot_detail::CapturedSnapshot*)snap->state)->relParents[i], VECS_INVALID_ENTITY );
+        ASSERT_EQ( s->generations[i], 0xDEADBEEFu );
+        ASSERT_EQ( s->allocated[i], 1u );
+        ASSERT_EQ( s->signatures[0][i], 0xCAFEBABEull );
+    }
+    // Buffer above hiCaptured is zero-init (calloc on first growth).
+    for ( uint32_t i = 1000; i < s->entityCapacity; i++ )
+    {
+        ASSERT_EQ( s->generations[i], 0u );
+        ASSERT_EQ( s->allocated[i], 0u );
+        ASSERT_EQ( s->signatures[0][i], 0ull );
+        ASSERT_EQ( s->relParents[i], VECS_INVALID_ENTITY );
     }
 
     vecsSnapshotDestroy( snap );
