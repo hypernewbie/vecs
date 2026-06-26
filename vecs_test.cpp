@@ -6016,6 +6016,49 @@ UTEST( bench, bounded_capture_at_65536 )
     ASSERT_GT( us, 0.0 );
 }
 
+UTEST( snapshot, storage_sizes_to_live_range )
+{
+    // Storage is sized to max(hiAllocated, freeCount).
+    vecsWorld* w = vecsCreateWorld( 128u );
+    for ( uint32_t i = 0; i < 120u; i++ ) vecsCreate( w );
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    auto* s = (vecs_snapshot_detail::CapturedSnapshot*)snap->state;
+    ASSERT_GE( s->entityCapacity, 120u );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot, roundtrip_grow_shrink_reuse )
+{
+    struct Pod { uint32_t x; };
+    vecsWorld* w = vecsCreateWorld( 4096u );
+    for ( uint32_t i = 0; i < 100u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Pod>( w, e, { i } );
+    }
+    vecsWorldSnapshot* big = vecsSnapshotCreate( w );
+
+    for ( uint32_t i = 0; i < 50u; i++ )
+    {
+        vecsEntity e = vecsCreate( w );
+        vecsSet<Pod>( w, e, { 1000u + i } );
+    }
+    vecsSnapshotRestore( w, big );
+    for ( uint32_t i = 0; i < 100u; i++ )
+    {
+        ASSERT_TRUE( vecsAlive( w, vecsMakeEntity( i, w->entities->generations[i] ) ) );
+        ASSERT_EQ( vecsGet<Pod>( w, vecsMakeEntity( i, w->entities->generations[i] ) )->x, i );
+    }
+    for ( uint32_t i = 100; i < 150; i++ )
+    {
+        ASSERT_FALSE( vecsAlive( w, vecsMakeEntity( i, 0u ) ) );
+    }
+
+    vecsSnapshotDestroy( big );
+    vecsDestroyWorld( w );
+}
+
 UTEST( bounded, restore_onto_larger_world )
 {
     // Architect's critical test: capture at hiCaptured=N, then grow the
