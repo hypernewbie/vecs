@@ -5039,7 +5039,7 @@ UTEST( snapshot, dense_order_preserved )
     vecsDestroyWorld( w );
 }
 
-UTEST( snapshot, free_list_order_preserved )
+UTEST( snapshot, free_list_reconstructed_on_restore )
 {
     vecsWorld* w = vecsCreateWorld( 64u );
     std::vector<vecsEntity> first;
@@ -5047,22 +5047,28 @@ UTEST( snapshot, free_list_order_preserved )
     for ( int i = 0; i < 5; i++ ) vecsDestroy( w, first[i] );
 
     vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    uint32_t expectedFreeCount = 0u;
+    for ( uint32_t i = 0; i < w->maxEntities; i++ )
+    {
+        if ( w->entities->allocated[i] == 0u ) expectedFreeCount++;
+    }
 
     for ( int i = 5; i < 10; i++ ) vecsDestroy( w, first[i] );
-    std::vector<vecsEntity> after;
-    for ( int i = 0; i < 10; i++ ) after.push_back( vecsCreate( w ) );
+    for ( int i = 0; i < 10; i++ ) vecsCreate( w );
 
     vecsSnapshotRestore( w, snap );
 
-    vecsEntityPool* ep = w->entities;
-    ASSERT_EQ( ep->freeCount, snap->state->freeCount );
-    for ( uint32_t i = 0; i < ep->freeCount; i++ )
+    ASSERT_EQ( w->entities->freeCount, expectedFreeCount );
+    std::vector<uint32_t> freeIndices;
+    for ( uint32_t i = 0; i < w->maxEntities; i++ )
     {
-        ASSERT_EQ( ep->freeList[i], snap->state->freeList[i] );
+        if ( w->entities->allocated[i] == 0u ) freeIndices.push_back( i );
     }
-    vecsEntity next = vecsCreate( w );
-    vecsEntity expectedNext = snap->state->freeList[snap->state->freeCount - 1u];
-    ASSERT_EQ( vecsEntityIndex( next ), expectedNext );
+    ASSERT_EQ( freeIndices.size(), w->entities->freeCount );
+    for ( uint32_t i = 0; i < w->entities->freeCount; i++ )
+    {
+        ASSERT_EQ( w->entities->freeList[i], freeIndices[i] );
+    }
     vecsSnapshotDestroy( snap );
     vecsDestroyWorld( w );
 }

@@ -3970,9 +3970,7 @@ namespace vecs_snapshot_detail
     {
         uint32_t* generations;
         uint8_t*  allocated;
-        uint32_t* freeList;
         uint64_t* signatures[VECS_SIGNATURE_WORDS];
-        uint32_t  freeCount;
         uint32_t  alive;
         uint32_t  maxEntities;
         uint32_t  entityCapacity;
@@ -4003,21 +4001,19 @@ namespace vecs_snapshot_detail
         return s;
     }
 
-    // Grows the 7 entity-pool arrays. Mirrors ensureBufCapacity (doubling from 64).
-    inline void ensureEntityCapacity( CapturedSnapshot* s, uint32_t needed, uint32_t freeNeeded )
+    // Grows 6 entity-pool arrays (no freeList — reconstructed on restore).
+    inline void ensureEntityCapacity( CapturedSnapshot* s, uint32_t needed )
     {
-        uint32_t want = needed > freeNeeded ? needed : freeNeeded;
-        if ( want <= s->entityCapacity ) return;
+        if ( needed <= s->entityCapacity ) return;
         const bool firstAlloc = ( s->entityCapacity == 0u );
         uint32_t newCap = firstAlloc ? 64u : s->entityCapacity;
-        while ( newCap < want ) newCap *= 2u;
+        while ( newCap < needed ) newCap *= 2u;
         const size_t bytes = ( size_t )newCap;
 
         if ( firstAlloc )
         {
             s->generations = ( uint32_t* )std::calloc( newCap, sizeof( uint32_t ) );
             s->allocated   = ( uint8_t*  )std::calloc( newCap, sizeof( uint8_t ) );
-            s->freeList    = ( uint32_t* )std::calloc( newCap, sizeof( uint32_t ) );
             s->relParents  = ( vecsEntity* )std::malloc( bytes * sizeof( vecsEntity ) );
             assert( s->relParents );
             for ( uint32_t i = 0; i < newCap; i++ ) s->relParents[i] = VECS_INVALID_ENTITY;
@@ -4035,9 +4031,6 @@ namespace vecs_snapshot_detail
             uint8_t* newAlloc = ( uint8_t* )std::realloc( s->allocated, bytes * sizeof( uint8_t ) );
             assert( newAlloc );
             s->allocated = newAlloc;
-            uint32_t* newFree = ( uint32_t* )std::realloc( s->freeList, bytes * sizeof( uint32_t ) );
-            assert( newFree );
-            s->freeList = newFree;
             vecsEntity* newRel = ( vecsEntity* )std::realloc( s->relParents, bytes * sizeof( vecsEntity ) );
             assert( newRel );
             s->relParents = newRel;
@@ -4060,7 +4053,6 @@ namespace vecs_snapshot_detail
         vecs::detail::PoolScope scope( &s->allocatorPool );
         std::free( s->generations );
         std::free( s->allocated );
-        std::free( s->freeList );
         for ( uint32_t i = 0; i < VECS_SIGNATURE_WORDS; i++ )
         {
             std::free( s->signatures[i] );
@@ -4219,11 +4211,9 @@ inline void vecsSnapshotCaptureInto( vecsWorld* w, vecsWorldSnapshot* snap )
 
     // Entity pool: bulk copy raw integers.
     const uint32_t hiAll = w->entities->hiAllocated;
-    vecs_snapshot_detail::ensureEntityCapacity( s, hiAll, w->entities->freeCount );
+    vecs_snapshot_detail::ensureEntityCapacity( s, hiAll );
     std::memcpy( s->generations, w->entities->generations, hiAll * sizeof( uint32_t ) );
     std::memcpy( s->allocated,   w->entities->allocated,   hiAll * sizeof( uint8_t ) );
-    std::memcpy( s->freeList,    w->entities->freeList,    w->entities->freeCount * sizeof( uint32_t ) );
-    s->freeCount = w->entities->freeCount;
     s->alive     = w->entities->alive;
     s->hiCaptured = hiAll;
     for ( uint32_t word = 0; word < VECS_SIGNATURE_WORDS; word++ )
@@ -4360,7 +4350,7 @@ inline size_t vecsSnapshotBytes( const vecsWorldSnapshot* snap )
     assert( snap->state );
     const vecs_snapshot_detail::CapturedSnapshot* s = snap->state;
     size_t bytes = sizeof( vecs_snapshot_detail::CapturedSnapshot );
-    bytes += s->entityCapacity * ( sizeof( uint32_t ) + sizeof( uint8_t ) + sizeof( uint32_t ) );
+    bytes += s->entityCapacity * ( sizeof( uint32_t ) + sizeof( uint8_t ) );
     bytes += VECS_SIGNATURE_WORDS * s->entityCapacity * sizeof( uint64_t );
     bytes += ( size_t )s->poolCapacity * sizeof( vecs_snapshot_detail::CapturedPoolSlot );
     for ( uint32_t i = 0; i < VECS_MAX_COMPONENTS; i++ )
@@ -4400,8 +4390,16 @@ inline void vecsSnapshotRestore( vecsWorld* w, const vecsWorldSnapshot* snap )
     if ( nClr > n ) std::memset( w->entities->generations + n, 0, ( nClr - n ) * sizeof( uint32_t ) );
     std::memcpy( w->entities->allocated,   s->allocated,   n * sizeof( uint8_t ) );
     if ( nClr > n ) std::memset( w->entities->allocated + n, 0, ( nClr - n ) * sizeof( uint8_t ) );
-    std::memcpy( w->entities->freeList,    s->freeList,    s->freeCount * sizeof( uint32_t ) );
-    w->entities->freeCount = s->freeCount;
+    // Reconstruct freeList from allocated: any index where allocated=0 is free.
+    // Indices >= hiAllocated are guaranteed 0 (never allocated past high-water).
+    w->entities->freeCount = 0u;
+    for ( uint32_t i = 0; i < w->maxEntities; i++ )
+    {
+        if ( w->entities->allocated[i] == 0u )
+        {
+            w->entities->freeList[w->entities->freeCount++] = i;
+        }
+    }
     w->entities->alive     = s->alive;
     w->entities->hiAllocated = n;
     for ( uint32_t word = 0; word < VECS_SIGNATURE_WORDS; word++ )
@@ -4655,11 +4653,12 @@ vecsWorldSnapshot* vecsSnapshotCreate( vecsWorld* w );
 void vecsSnapshotCaptureInto( vecsWorld* w, vecsWorldSnapshot* snap );
 
 // Restore world to the snapshot state.
-//  - entity pool (generations/allocated/freeList/signatures/freeCount/alive)
-//    is bulk-overwritten so entity indices + generations match exactly.
+//  - entity pool (generations/allocated/signatures) is bulk-overwritten so
+//    entity indices + generations match exactly. freeList is reconstructed
+//    from allocated[] — order is not preserved.
 //  - pools present in snapshot but absent from world are recreated.
 //  - pools absent from snapshot but present in world are emptied.
-//  - dense ordering and free-list ordering are preserved exactly.
+//  - dense ordering is preserved exactly.
 //  - observer callbacks are NOT fired.
 void vecsSnapshotRestore( vecsWorld* w, const vecsWorldSnapshot* snap );
 
