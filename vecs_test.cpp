@@ -5991,15 +5991,12 @@ UTEST( bounded, capture_sparse_only_touches_live_range )
     {
         if ( s->poolSlots[i].inUse && s->poolSlots[i].pool.componentId == cid )
         {
+            // Capture storage is deliberately bounded by the pool's live
+            // high-water mark. The injected sentinels start at 500, so a
+            // compact captured sparse buffer cannot contain them. Do not
+            // read beyond sparseCapacity: that would be out of bounds.
             ASSERT_LE( s->poolSlots[i].pool.hiCapturedSparse, 200u );
-            for ( uint32_t j = 500; j < 1000; j++ )
-            {
-                // Sentinel from world must not have been pulled in. The
-                // captured region above hiCapturedSparse is calloc'd zero,
-                // which is also a valid "not captured" sentinel since the
-                // pool's live range never reaches there in this test.
-                ASSERT_NE( s->poolSlots[i].pool.sparse[j], 0xDEADBEEFu );
-            }
+            ASSERT_LE( s->poolSlots[i].pool.sparseCapacity, 256u );
             found = true;
             break;
         }

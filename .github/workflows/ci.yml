@@ -71,3 +71,13 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: ${{ matrix.test_cmd }}
+
+      - name: Stress test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\build\vecs_stress_test.exe
+
+      - name: Stress test (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ./build/vecs_stress_test
