@@ -35,7 +35,7 @@ jobs:
 
       - name: Setup MSVC environment
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v2
+        uses: ilammy/msvc-dev-cmd@v1
 
       - name: Setup Ninja (Windows)
         if: runner.os == 'Windows'
