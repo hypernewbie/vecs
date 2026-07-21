@@ -1170,6 +1170,31 @@ UTEST( world, component_crud )
     vecsDestroyWorld( w );
 }
 
+UTEST( world, component_count )
+{
+    struct Unused {};
+
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    vecsEntity e1 = vecsCreate( w );
+    vecsEntity e2 = vecsCreate( w );
+    vecsEntity e3 = vecsCreate( w );
+
+    ASSERT_EQ( vecsCount<Unused>( w ), 0u );
+    vecsSet<Position>( w, e1, { 1.0f, 2.0f } );
+    vecsSet<Position>( w, e2, { 3.0f, 4.0f } );
+    vecsAddTag<IsEnemy>( w, e1 );
+    vecsAddTag<IsEnemy>( w, e3 );
+    ASSERT_EQ( vecsCount<Position>( w ), 2u );
+    ASSERT_EQ( vecsCount<IsEnemy>( w ), 2u );
+
+    vecsUnset<IsEnemy>( w, e1 );
+    vecsDestroy( w, e3 );
+    ASSERT_EQ( vecsCount<IsEnemy>( w ), 0u );
+    ASSERT_EQ( vecsCount<Position>( w ), 2u );
+
+    vecsDestroyWorld( w );
+}
+
 UTEST( world, destroy_entity_removes_components )
 {
     vecsWorld* w = vecsCreateWorld( 1024u );

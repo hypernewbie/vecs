@@ -64,6 +64,9 @@ Position* p = vecsGet<Position>( w, e );
 // Check if entity has component
 bool has = vecsHas<Position>( w, e );
 
+// Count entities with a component or tag (O(1))
+uint32_t positions = vecsCount<Position>( w );
+
 // Remove component
 vecsUnset<Position>( w, e );
 ```

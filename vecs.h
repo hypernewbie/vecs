@@ -1380,6 +1380,22 @@ inline uint32_t vecsCount( vecsWorld* w )
     return w->entities->alive;
 }
 
+// O(1) count for one component type, including zero-byte tags. Does not
+// create a pool when the component type has not been used in this world.
+template< typename T >
+inline uint32_t vecsCount( vecsWorld* w )
+{
+    assert( w );
+    const uint32_t id = vecsTypeId<T>();
+    assert( id < VECS_MAX_COMPONENTS );
+    if ( !vecsComponentIdValid( id ) )
+    {
+        return 0u;
+    }
+    const vecsPool* pool = w->pools[id];
+    return pool ? pool->count : 0u;
+}
+
 template< typename T >
 inline vecsPool* vecsEnsurePool( vecsWorld* w )
 {
