@@ -14,7 +14,7 @@
   - vecsEntity: Shows index:generation format
   - vecsWorld: Entity count, component pools, relationships, observers, singletons
   - vecsEntityPool: Entity lifecycle state
-  - vecsPool: Component storage (sparse set + bitfield)
+  - vecsPool: Component storage (sparse set or bitfield-only tags)
   - vecsBitfield: Hierarchical bitmask
   - vecsRelationshipData: Parent-child hierarchy
   - vecsObserverList: Event callbacks
@@ -80,7 +80,7 @@
     </Expand>
   </Type>
 
-  <!-- vecsPool - Component storage (sparse set + bitfield) -->
+  <!-- vecsPool - Component storage (sparse set or bitfield-only tags) -->
   <Type Name="vecsPool">
     <DisplayString>{{ComponentPool | {count} entities | stride:{stride} | {noData ? "tag" : "data"}}}</DisplayString>
     <Expand>
@@ -95,7 +95,7 @@
           <Item Name="data">bitfield,nat</Item>
         </Expand>
       </Synthetic>
-      <Synthetic Name="[entities]" Condition="count > 0">
+      <Synthetic Name="[entities]" Condition="!noData &amp;&amp; count > 0">
         <DisplayString>{count} entities with this component</DisplayString>
         <Expand>
           <ArrayItems>
@@ -104,7 +104,7 @@
           </ArrayItems>
         </Expand>
       </Synthetic>
-      <Synthetic Name="[sparse]" ExcludeView="simple">
+      <Synthetic Name="[sparse]" Condition="!noData" ExcludeView="simple">
         <DisplayString>Sparse array (first 100 entries)</DisplayString>
         <Expand>
           <ArrayItems>

@@ -354,6 +354,48 @@ inline uint32_t vecsBitfieldCount( const vecsBitfield* bf )
     return total;
 }
 
+inline uint32_t vecsBitfieldFirst( const vecsBitfield* bf )
+{
+    assert( bf );
+    for ( uint32_t ti = 0; ti < VECS_TOP_COUNT; ti++ )
+    {
+        uint64_t top = bf->topMasks[ti];
+        if ( top )
+        {
+            uint32_t l2Idx = ti * 64u + vecsTzcnt( top );
+            return l2Idx * 64u + vecsTzcnt( bf->l2Masks[l2Idx] );
+        }
+    }
+    return VECS_INVALID_INDEX;
+}
+
+inline uint32_t vecsBitfieldHighWater( const vecsBitfield* bf )
+{
+    assert( bf );
+    for ( uint32_t ti = VECS_TOP_COUNT; ti > 0u; )
+    {
+        ti--;
+        uint64_t top = bf->topMasks[ti];
+        if ( top )
+        {
+            uint32_t l2Bit = 64u;
+            do
+            {
+                l2Bit--;
+            } while ( ( top & ( 1ULL << l2Bit ) ) == 0u );
+            uint32_t l2Idx = ti * 64u + l2Bit;
+            uint64_t l2 = bf->l2Masks[l2Idx];
+            uint32_t bit = 64u;
+            do
+            {
+                bit--;
+            } while ( ( l2 & ( 1ULL << bit ) ) == 0u );
+            return l2Idx * 64u + bit + 1u;
+        }
+    }
+    return 0u;
+}
+
 template< typename Fn >
 inline void vecsBitfieldEach( const vecsBitfield* bf, Fn&& fn )
 {
@@ -405,7 +447,8 @@ inline void vecsBitfieldJoin( const vecsBitfield* a, const vecsBitfield* b, Fn&&
 // Component Pool
 // --------------------------------------------------------------------------
 
-// Hybrid Sparse-Set + Bitfield. SIMD queries use the bitfield; lookups use the sparse set.
+// Data components use a sparse set plus bitfield. Empty-struct tags use only
+// the bitfield and count, avoiding sparse/dense allocations entirely.
 struct vecsPool
 {
     vecsBitfield bitfield;
@@ -430,6 +473,7 @@ struct vecsPool
 inline void vecsPoolGrow( vecsPool* pool )
 {
     assert( pool );
+    assert( !pool->noData );
     uint32_t newCapacity = pool->capacity ? pool->capacity * 2u : 64u;
     if ( newCapacity > VECS_MAX_ENTITIES )
     {
@@ -440,45 +484,42 @@ inline void vecsPoolGrow( vecsPool* pool )
     assert( newDenseEntities );
     pool->denseEntities = newDenseEntities;
 
-    if ( !pool->noData )
+    uint8_t* newDenseData = nullptr;
+    if ( pool->alignment > 8 )
     {
-        uint8_t* newDenseData = nullptr;
-        if ( pool->alignment > 8 )
-        {
-            newDenseData = ( uint8_t* )vecsAlignedAlloc( ( size_t )newCapacity * pool->stride, pool->alignment );
-        }
-        else
-        {
-            newDenseData = ( uint8_t* )std::malloc( ( size_t )newCapacity * pool->stride );
-        }
-        assert( newDenseData );
+        newDenseData = ( uint8_t* )vecsAlignedAlloc( ( size_t )newCapacity * pool->stride, pool->alignment );
+    }
+    else
+    {
+        newDenseData = ( uint8_t* )std::malloc( ( size_t )newCapacity * pool->stride );
+    }
+    assert( newDenseData );
 
-        if ( pool->moveCtor )
+    if ( pool->moveCtor )
+    {
+        for ( uint32_t i = 0; i < pool->count; i++ )
         {
-            for ( uint32_t i = 0; i < pool->count; i++ )
+            pool->moveCtor( newDenseData + ( size_t )i * pool->stride, pool->denseData + ( size_t )i * pool->stride );
+            if ( pool->destructor )
             {
-                pool->moveCtor( newDenseData + ( size_t )i * pool->stride, pool->denseData + ( size_t )i * pool->stride );
-                if ( pool->destructor )
-                {
-                    pool->destructor( pool->denseData + ( size_t )i * pool->stride );
-                }
+                pool->destructor( pool->denseData + ( size_t )i * pool->stride );
             }
         }
-        else
-        {
-            std::memcpy( newDenseData, pool->denseData, ( size_t )pool->count * pool->stride );
-        }
-
-        if ( pool->alignment > 8 )
-        {
-            vecsAlignedFree( pool->denseData );
-        }
-        else
-        {
-            std::free( pool->denseData );
-        }
-        pool->denseData = newDenseData;
     }
+    else
+    {
+        std::memcpy( newDenseData, pool->denseData, ( size_t )pool->count * pool->stride );
+    }
+
+    if ( pool->alignment > 8 )
+    {
+        vecsAlignedFree( pool->denseData );
+    }
+    else
+    {
+        std::free( pool->denseData );
+    }
+    pool->denseData = newDenseData;
     pool->capacity = newCapacity;
 }
 
@@ -486,11 +527,13 @@ inline vecsPool* vecsCreatePool( uint32_t maxEntities, uint32_t stride, uint32_t
 {
     vecsPool* pool = ( vecsPool* )std::malloc( sizeof( vecsPool ) );
     assert( pool );
-    pool->sparse = ( uint32_t* )std::malloc( maxEntities * sizeof( uint32_t ) );
-    pool->denseEntities = ( uint32_t* )std::malloc( 64u * sizeof( uint32_t ) );
+    pool->sparse = nullptr;
+    pool->denseEntities = nullptr;
     pool->denseData = nullptr;
     if ( !noData )
     {
+        pool->sparse = ( uint32_t* )std::malloc( maxEntities * sizeof( uint32_t ) );
+        pool->denseEntities = ( uint32_t* )std::malloc( 64u * sizeof( uint32_t ) );
         if ( alignment > 8 )
         {
             pool->denseData = ( uint8_t* )vecsAlignedAlloc( ( size_t )64u * stride, alignment );
@@ -499,20 +542,17 @@ inline vecsPool* vecsCreatePool( uint32_t maxEntities, uint32_t stride, uint32_t
         {
             pool->denseData = ( uint8_t* )std::malloc( ( size_t )64u * stride );
         }
-    }
-    assert( pool->sparse );
-    assert( pool->denseEntities );
-    if ( !noData )
-    {
+        assert( pool->sparse );
+        assert( pool->denseEntities );
         assert( pool->denseData );
-    }
-    for ( uint32_t i = 0; i < maxEntities; i++ )
-    {
-        pool->sparse[i] = VECS_INVALID_INDEX;
+        for ( uint32_t i = 0; i < maxEntities; i++ )
+        {
+            pool->sparse[i] = VECS_INVALID_INDEX;
+        }
     }
     vecsBitfieldClearAll( &pool->bitfield );
     pool->count = 0;
-    pool->capacity = 64u;
+    pool->capacity = noData ? 0u : 64u;
     pool->stride = stride;
     pool->alignment = alignment;
     pool->noData = noData;
@@ -559,6 +599,13 @@ inline void* vecsPoolSet( vecsPool* pool, uint32_t entityIndex, const void* data
     assert( entityIndex < VECS_MAX_ENTITIES );
     assert( !vecsBitfieldHas( &pool->bitfield, entityIndex ) );
     assert( pool->noData || data != nullptr );
+    if ( pool->noData )
+    {
+        vecsBitfieldSet( &pool->bitfield, entityIndex );
+        pool->count++;
+        if ( entityIndex + 1u > pool->hiSparse ) pool->hiSparse = entityIndex + 1u;
+        return nullptr;
+    }
     if ( pool->count == pool->capacity )
     {
         vecsPoolGrow( pool );
@@ -566,18 +613,14 @@ inline void* vecsPoolSet( vecsPool* pool, uint32_t entityIndex, const void* data
     uint32_t denseIdx = pool->count++;
     pool->sparse[entityIndex] = denseIdx;
     pool->denseEntities[denseIdx] = entityIndex;
-    uint8_t* dst = nullptr;
-    if ( !pool->noData )
+    uint8_t* dst = pool->denseData + ( size_t )denseIdx * pool->stride;
+    if ( pool->copyCtor )
     {
-        dst = pool->denseData + ( size_t )denseIdx * pool->stride;
-        if ( pool->copyCtor )
-        {
-            pool->copyCtor( dst, data );
-        }
-        else
-        {
-            std::memcpy( dst, data, pool->stride );
-        }
+        pool->copyCtor( dst, data );
+    }
+    else
+    {
+        std::memcpy( dst, data, pool->stride );
     }
     vecsBitfieldSet( &pool->bitfield, entityIndex );
     if ( entityIndex + 1u > pool->hiSparse ) pool->hiSparse = entityIndex + 1u;
@@ -589,30 +632,37 @@ inline void vecsPoolUnset( vecsPool* pool, uint32_t entityIndex )
     assert( pool );
     assert( entityIndex < VECS_MAX_ENTITIES );
     assert( vecsBitfieldHas( &pool->bitfield, entityIndex ) );
+    if ( pool->noData )
+    {
+        vecsBitfieldUnset( &pool->bitfield, entityIndex );
+        pool->count--;
+        if ( entityIndex + 1u == pool->hiSparse )
+        {
+            pool->hiSparse = vecsBitfieldHighWater( &pool->bitfield );
+        }
+        return;
+    }
     uint32_t denseIdx = pool->sparse[entityIndex];
     uint32_t lastIdx = pool->count - 1u;
-    if ( !pool->noData )
+    uint8_t* removePtr = pool->denseData + ( size_t )denseIdx * pool->stride;
+    if ( pool->destructor )
     {
-        uint8_t* removePtr = pool->denseData + ( size_t )denseIdx * pool->stride;
-        if ( pool->destructor )
+        pool->destructor( removePtr );
+    }
+    if ( denseIdx != lastIdx )
+    {
+        uint8_t* lastPtr = pool->denseData + ( size_t )lastIdx * pool->stride;
+        if ( pool->moveCtor )
         {
-            pool->destructor( removePtr );
+            pool->moveCtor( removePtr, lastPtr );
+            if ( pool->destructor )
+            {
+                pool->destructor( lastPtr );
+            }
         }
-        if ( denseIdx != lastIdx )
+        else
         {
-            uint8_t* lastPtr = pool->denseData + ( size_t )lastIdx * pool->stride;
-            if ( pool->moveCtor )
-            {
-                pool->moveCtor( removePtr, lastPtr );
-                if ( pool->destructor )
-                {
-                    pool->destructor( lastPtr );
-                }
-            }
-            else
-            {
-                std::memcpy( removePtr, lastPtr, pool->stride );
-            }
+            std::memcpy( removePtr, lastPtr, pool->stride );
         }
     }
     if ( denseIdx != lastIdx )
@@ -1069,11 +1119,22 @@ inline bool vecsValidate( vecsWorld* w )
         vecsPool* pool = w->pools[c];
         if ( !pool ) continue;
 
-        if ( pool->count > pool->capacity ) { printf("Validation failed: pool %u count > capacity\n", c); return false; }
-        if ( pool->capacity > VECS_MAX_ENTITIES ) { printf("Validation failed: pool %u capacity > VECS_MAX_ENTITIES\n", c); return false; }
-
         uint32_t bitcount = vecsBitfieldCount( &pool->bitfield );
         if ( bitcount != pool->count ) { printf("Validation failed: pool %u bitcount != count (%u != %u)\n", c, bitcount, pool->count); return false; }
+
+        if ( pool->noData )
+        {
+            if ( pool->sparse || pool->denseEntities || pool->denseData || pool->capacity != 0u ) { printf("Validation failed: tag pool %u owns dense storage\n", c); return false; }
+            if ( pool->hiSparse != vecsBitfieldHighWater( &pool->bitfield ) ) { printf("Validation failed: tag pool %u hiSparse out of sync\n", c); return false; }
+            for ( uint32_t entityIdx = 0; entityIdx < ep->maxEntities; entityIdx++ )
+            {
+                if ( vecsBitfieldHas( &pool->bitfield, entityIdx ) && !ep->allocated[entityIdx] ) { printf("Validation failed: tag pool %u contains dead entity %u\n", c, entityIdx); return false; }
+            }
+            continue;
+        }
+
+        if ( pool->count > pool->capacity ) { printf("Validation failed: pool %u count > capacity\n", c); return false; }
+        if ( pool->capacity > VECS_MAX_ENTITIES ) { printf("Validation failed: pool %u capacity > VECS_MAX_ENTITIES\n", c); return false; }
 
         for ( uint32_t i = 0; i < pool->count; i++ )
         {
@@ -1245,9 +1306,12 @@ inline void vecsClearWorld( vecsWorld* world )
             }
             pool->count = 0;
             vecsBitfieldClearAll( &pool->bitfield );
-            for ( uint32_t j = 0; j < world->maxEntities; j++ )
+            if ( !pool->noData )
             {
-                pool->sparse[j] = VECS_INVALID_INDEX;
+                for ( uint32_t j = 0; j < world->maxEntities; j++ )
+                {
+                    pool->sparse[j] = VECS_INVALID_INDEX;
+                }
             }
             pool->hiSparse = 0u;
         }
@@ -3224,7 +3288,7 @@ inline vecsEntity vecsFirstMatch( vecsWorld* w )
         vecsPool* pool = vecsDetail::getPool<First>( w );
         if ( pool && pool->count > 0 )
         {
-            uint32_t entityIdx = pool->denseEntities[0];
+            uint32_t entityIdx = pool->noData ? vecsBitfieldFirst( &pool->bitfield ) : pool->denseEntities[0];
             return vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
         }
         return VECS_INVALID_ENTITY;
@@ -3268,6 +3332,16 @@ inline void vecsEach( vecsWorld* w, Fn&& fn )
         vecsPool* pool = vecsDetail::getPool<First>( w );
         if ( !pool )
         {
+            return;
+        }
+        if ( pool->noData )
+        {
+            vecsBitfieldEach( &pool->bitfield, [&]( uint32_t entityIdx )
+            {
+                vecsEntity entity = vecsMakeEntity( entityIdx, w->entities->generations[entityIdx] );
+                First* data = vecsDetail::getData<First>( pool, entityIdx );
+                fn( entity, *data );
+            } );
             return;
         }
         const uint32_t count = pool->count;
@@ -3487,6 +3561,15 @@ inline void vecsEachNoEntity( vecsWorld* w, Fn&& fn )
         vecsPool* pool = vecsDetail::getPool<First>( w );
         if ( !pool )
         {
+            return;
+        }
+        if ( pool->noData )
+        {
+            vecsBitfieldEach( &pool->bitfield, [&]( uint32_t entityIdx )
+            {
+                First* data = vecsDetail::getData<First>( pool, entityIdx );
+                fn( *data );
+            } );
             return;
         }
         for ( uint32_t i = 0; i < pool->count; i++ )
@@ -4274,39 +4357,43 @@ inline void vecsSnapshotCaptureInto( vecsWorld* w, vecsWorldSnapshot* snap )
 
         std::memcpy( &p.bitfield, &pool->bitfield, sizeof( vecsBitfield ) );
 
-        // sparse only allocated for non-empty pools (256KB/pool otherwise)
-        if ( pool->count > 0u )
+        // For tag pools this remains the bitfield's entity high-water mark.
+        p.hiCapturedSparse = pool->hiSparse;
+        if ( !pool->noData )
         {
-            const uint32_t spn = pool->hiSparse;
-            ensureSparseAlloc( p, spn );
-            std::memcpy( p.sparse, pool->sparse, spn * sizeof( uint32_t ) );
-            p.hiCapturedSparse = spn;
-        }
-
-        ensureBufCapacity( p, pool->count, w->maxEntities );
-        std::memcpy( p.denseEntities, pool->denseEntities, pool->count * sizeof( uint32_t ) );
-        if ( !pool->noData && pool->count > 0u )
-        {
-            if ( pool->copyCtor )
+            // Sparse storage is only captured for non-empty data pools.
+            if ( pool->count > 0u )
             {
-                for ( uint32_t k = 0; k < pool->count; k++ )
-                {
-                    pool->copyCtor( p.denseData + ( size_t )k * pool->stride,
-                                    pool->denseData + ( size_t )k * pool->stride );
-                }
+                const uint32_t spn = pool->hiSparse;
+                ensureSparseAlloc( p, spn );
+                std::memcpy( p.sparse, pool->sparse, spn * sizeof( uint32_t ) );
             }
-            else
+
+            ensureBufCapacity( p, pool->count, w->maxEntities );
+            std::memcpy( p.denseEntities, pool->denseEntities, pool->count * sizeof( uint32_t ) );
+            if ( pool->count > 0u )
             {
-                // seqlock read: retry if writer active (gen odd) or gen moved
-                for ( uint32_t spin = 0; ; ++spin )
+                if ( pool->copyCtor )
                 {
-                    uint64_t g1 = std::atomic_load_explicit( &pool->gen, std::memory_order_acquire );
-                    if ( g1 & 1ull ) { std::this_thread::yield(); continue; }
-                    std::memcpy( p.denseData, pool->denseData, ( size_t )pool->count * pool->stride );
-                    std::atomic_thread_fence( std::memory_order_acquire );
-                    uint64_t g2 = std::atomic_load_explicit( &pool->gen, std::memory_order_acquire );
-                    if ( g1 == g2 ) break;
-                    if ( spin > 8 ) std::this_thread::yield();
+                    for ( uint32_t k = 0; k < pool->count; k++ )
+                    {
+                        pool->copyCtor( p.denseData + ( size_t )k * pool->stride,
+                                        pool->denseData + ( size_t )k * pool->stride );
+                    }
+                }
+                else
+                {
+                    // seqlock read: retry if writer active (gen odd) or gen moved
+                    for ( uint32_t spin = 0; ; ++spin )
+                    {
+                        uint64_t g1 = std::atomic_load_explicit( &pool->gen, std::memory_order_acquire );
+                        if ( g1 & 1ull ) { std::this_thread::yield(); continue; }
+                        std::memcpy( p.denseData, pool->denseData, ( size_t )pool->count * pool->stride );
+                        std::atomic_thread_fence( std::memory_order_acquire );
+                        uint64_t g2 = std::atomic_load_explicit( &pool->gen, std::memory_order_acquire );
+                        if ( g1 == g2 ) break;
+                        if ( spin > 8 ) std::this_thread::yield();
+                    }
                 }
             }
         }
@@ -4443,12 +4530,23 @@ inline void vecsSnapshotRestore( vecsWorld* w, const vecsWorldSnapshot* snap )
         // Fire onRemove for entities with this component.
         if ( w->observers )
         {
-            for ( uint32_t j = 0; j < w->maxEntities; j++ )
+            if ( pool->noData )
             {
-                if ( pool->sparse[j] != VECS_INVALID_INDEX )
+                vecsBitfieldEach( &pool->bitfield, [&]( uint32_t idx )
                 {
-                    vecsEntity e = vecsMakeEntity( j, w->entities->generations[j] );
+                    vecsEntity e = vecsMakeEntity( idx, w->entities->generations[idx] );
                     vecsNotifyObservers( w, e, cid, false, nullptr );
+                } );
+            }
+            else
+            {
+                for ( uint32_t j = 0; j < w->maxEntities; j++ )
+                {
+                    if ( pool->sparse[j] != VECS_INVALID_INDEX )
+                    {
+                        vecsEntity e = vecsMakeEntity( j, w->entities->generations[j] );
+                        vecsNotifyObservers( w, e, cid, false, nullptr );
+                    }
                 }
             }
         }
@@ -4461,10 +4559,14 @@ inline void vecsSnapshotRestore( vecsWorld* w, const vecsWorldSnapshot* snap )
         }
         pool->count = 0;
         vecsBitfieldClearAll( &pool->bitfield );
-        for ( uint32_t j = 0; j < w->maxEntities; j++ )
+        if ( !pool->noData )
         {
-            pool->sparse[j] = VECS_INVALID_INDEX;
+            for ( uint32_t j = 0; j < w->maxEntities; j++ )
+            {
+                pool->sparse[j] = VECS_INVALID_INDEX;
+            }
         }
+        pool->hiSparse = 0u;
     }
 
     // Step 2b: for each snapshot pool, ensure pool exists and restore contents.
@@ -4493,7 +4595,7 @@ inline void vecsSnapshotRestore( vecsWorld* w, const vecsWorldSnapshot* snap )
         pool->count = 0;
 
         // Grow dense buffers if needed.
-        if ( sp.count > pool->capacity )
+        if ( !sp.noData && sp.count > pool->capacity )
         {
             uint32_t newCap = sp.count;
             uint32_t* newDenseEntities = ( uint32_t* )std::realloc( pool->denseEntities, ( size_t )newCap * sizeof( uint32_t ) );
@@ -4523,25 +4625,35 @@ inline void vecsSnapshotRestore( vecsWorld* w, const vecsWorldSnapshot* snap )
         }
 
         // Bulk-restore contents.
-        // count==0 may still hold stale sparse from prior capture; don't copy it
-        if ( sp.count > 0u && sp.sparse && pool->sparse )
+        if ( !sp.noData )
         {
-            // Bounded by sp.hiCapturedSparse; clear up to the live range.
-            const uint32_t spn = sp.hiCapturedSparse;
-            std::memcpy( pool->sparse, sp.sparse, spn * sizeof( uint32_t ) );
-            const uint32_t spClr = ( pool->hiSparse > spn ) ? pool->hiSparse : spn;
-            if ( spClr > spn ) std::memset( pool->sparse + spn, 0xFFu, ( spClr - spn ) * sizeof( uint32_t ) );
-            pool->hiSparse = spn;
+            // count==0 may still hold stale sparse from prior capture; don't copy it
+            if ( sp.count > 0u && sp.sparse && pool->sparse )
+            {
+                // Bounded by sp.hiCapturedSparse; clear up to the live range.
+                const uint32_t spn = sp.hiCapturedSparse;
+                std::memcpy( pool->sparse, sp.sparse, spn * sizeof( uint32_t ) );
+                const uint32_t spClr = ( pool->hiSparse > spn ) ? pool->hiSparse : spn;
+                if ( spClr > spn ) std::memset( pool->sparse + spn, 0xFFu, ( spClr - spn ) * sizeof( uint32_t ) );
+                pool->hiSparse = spn;
+            }
+            else
+            {
+                for ( uint32_t j = 0; j < w->maxEntities; j++ )
+                {
+                    pool->sparse[j] = VECS_INVALID_INDEX;
+                }
+            }
         }
         else
         {
-            for ( uint32_t j = 0; j < w->maxEntities; j++ )
-            {
-                pool->sparse[j] = VECS_INVALID_INDEX;
-            }
+            pool->hiSparse = sp.hiCapturedSparse;
         }
         std::memcpy( &pool->bitfield, &sp.bitfield, sizeof( vecsBitfield ) );
-        std::memcpy( pool->denseEntities, sp.denseEntities, sp.count * sizeof( uint32_t ) );
+        if ( !sp.noData )
+        {
+            std::memcpy( pool->denseEntities, sp.denseEntities, sp.count * sizeof( uint32_t ) );
+        }
         if ( !sp.noData && sp.count > 0u )
         {
             if ( sp.copyCtor )
@@ -4561,7 +4673,7 @@ inline void vecsSnapshotRestore( vecsWorld* w, const vecsWorldSnapshot* snap )
         // stride/alignment/noData/fn-ptrs unchanged (identical type -> identical)
 
         // Fire onAdd for restored entities.
-        if ( w->observers )
+        if ( w->observers && !pool->noData )
         {
             for ( uint32_t k = 0; k < sp.count; k++ )
             {

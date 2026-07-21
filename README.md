@@ -80,6 +80,10 @@ vecsAddTag<IsEnemy>( w, e );   // Clean API for tags
 bool isEnemy = vecsHas<IsEnemy>( w, e );
 ```
 
+Tags are bitfield-only: they retain fast O(1) membership and count operations
+and participate in normal queries without allocating component payload or
+sparse-set storage. Use a non-empty component for state.
+
 ### Variadic Helpers
 
 ```cpp

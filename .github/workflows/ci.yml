@@ -81,3 +81,23 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: ./build/vecs_stress_test
+
+      - name: No-SIMD test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\build\vecs_test_no_simd.exe
+
+      - name: No-SIMD test (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ./build/vecs_test_no_simd
+
+      - name: Small-config test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\build\vecs_test_smallcfg.exe
+
+      - name: Small-config test (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ./build/vecs_test_smallcfg

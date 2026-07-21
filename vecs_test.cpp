@@ -1865,11 +1865,53 @@ UTEST( world, tag_component_uses_bitfield_only )
     vecsPool* pool = w->pools[vecsTypeId<IsEnemy>()];
     ASSERT_TRUE( pool != nullptr );
     ASSERT_TRUE( pool->noData );
+    ASSERT_TRUE( pool->sparse == nullptr );
+    ASSERT_TRUE( pool->denseEntities == nullptr );
     ASSERT_TRUE( pool->denseData == nullptr );
+    ASSERT_EQ( pool->capacity, 0u );
+    ASSERT_EQ( pool->count, 1u );
+    ASSERT_EQ( pool->hiSparse, vecsEntityIndex( e ) + 1u );
+    ASSERT_TRUE( vecsValidate( w ) );
 
     vecsUnset<IsEnemy>( w, e );
+    ASSERT_EQ( pool->hiSparse, 0u );
+    ASSERT_TRUE( vecsValidate( w ) );
     ASSERT_FALSE( vecsHas<IsEnemy>( w, e ) );
 
+    vecsDestroyWorld( w );
+}
+
+UTEST( tag, bitfield_iteration_and_first_match )
+{
+    vecsWorld* w = vecsCreateWorld( 1024u );
+    vecsEntity e0 = vecsCreate( w );
+    vecsEntity e1 = vecsCreate( w );
+    vecsEntity e2 = vecsCreate( w );
+
+    vecsAddTag<IsEnemy>( w, e2 );
+    vecsAddTag<IsEnemy>( w, e0 );
+
+    vecsEntity first = vecsFirstMatch<IsEnemy>( w );
+    ASSERT_EQ( first, e0 );
+
+    std::vector<vecsEntity> seen;
+    vecsEach<IsEnemy>( w, [&]( vecsEntity e, IsEnemy& )
+    {
+        seen.push_back( e );
+    } );
+    ASSERT_EQ( seen.size(), ( size_t )2u );
+    ASSERT_EQ( seen[0], e0 );
+    ASSERT_EQ( seen[1], e2 );
+
+    uint32_t noEntityCount = 0u;
+    vecsEachNoEntity<IsEnemy>( w, [&]( IsEnemy& )
+    {
+        noEntityCount++;
+    } );
+    ASSERT_EQ( noEntityCount, 2u );
+    ASSERT_TRUE( vecsValidate( w ) );
+
+    ( void )e1;
     vecsDestroyWorld( w );
 }
 
@@ -5174,6 +5216,34 @@ UTEST( snapshot, tag_pools_captured )
     vecsAddTag<SnapTag3>( w, c );
 
     vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+    auto* state = ( vecs_snapshot_detail::CapturedSnapshot* )snap->state;
+    bool foundTagPool = false;
+    for ( uint32_t i = 0; i < state->poolCount; i++ )
+    {
+        const auto& pool = state->poolSlots[i].pool;
+        if ( state->poolSlots[i].inUse && pool.componentId == vecsTypeId<SnapTag1>() )
+        {
+            ASSERT_TRUE( pool.noData );
+            ASSERT_TRUE( pool.sparse == nullptr );
+            ASSERT_TRUE( pool.denseEntities == nullptr );
+            ASSERT_TRUE( pool.denseData == nullptr );
+            ASSERT_EQ( pool.sparseCapacity, 0u );
+            ASSERT_EQ( pool.bufCapacity, 0u );
+            foundTagPool = true;
+            break;
+        }
+    }
+    ASSERT_TRUE( foundTagPool );
+
+    vecsWorld* restored = vecsCreateWorld( 32u );
+    vecsSnapshotRestore( restored, snap );
+    ASSERT_TRUE( vecsHas<SnapTag1>( restored, a ) );
+    ASSERT_TRUE( vecsHas<SnapTag1>( restored, b ) );
+    ASSERT_TRUE( vecsHas<SnapTag2>( restored, a ) );
+    ASSERT_TRUE( vecsHas<SnapTag3>( restored, c ) );
+    ASSERT_TRUE( vecsValidate( restored ) );
+    vecsDestroyWorld( restored );
+
     vecsUnset<SnapTag1>( w, b );
     vecsAddTag<SnapTag2>( w, c );
 
@@ -5208,6 +5278,22 @@ UTEST( snapshot, lazy_pool_reconciliation_emptied )
     ASSERT_EQ( vecsGet<SnapPodA>( w, e )->a, 1u );
     ASSERT_EQ( vecsGet<SnapPodB>( w, e )->z, 4 );
     ASSERT_TRUE( vecsHas<SnapTag1>( w, e ) );
+    vecsSnapshotDestroy( snap );
+    vecsDestroyWorld( w );
+}
+
+UTEST( snapshot, tag_pool_reconciliation_emptied )
+{
+    vecsWorld* w = vecsCreateWorld( 32u );
+    vecsEntity e = vecsCreate( w );
+    vecsWorldSnapshot* snap = vecsSnapshotCreate( w );
+
+    vecsAddTag<SnapTag1>( w, e );
+    ASSERT_TRUE( vecsHas<SnapTag1>( w, e ) );
+    vecsSnapshotRestore( w, snap );
+    ASSERT_FALSE( vecsHas<SnapTag1>( w, e ) );
+    ASSERT_TRUE( vecsValidate( w ) );
+
     vecsSnapshotDestroy( snap );
     vecsDestroyWorld( w );
 }
