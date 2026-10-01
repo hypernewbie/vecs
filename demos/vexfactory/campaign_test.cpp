@@ -65,6 +65,22 @@ void solution( Simulation& sim, int id )
             put( sim, 11, 3, Tool::Belt, 3 ); put( sim, 11, 2, Tool::Belt ); put( sim, 12, 2, Tool::Belt );
             put( sim, 13, 2, Tool::Belt, 1 );
         }
+        if ( sim.blocked( 8, 8 ) )
+        {
+            put( sim, 7, 8, Tool::Belt, 3 ); put( sim, 7, 7, Tool::Belt ); put( sim, 8, 7, Tool::Belt ); put( sim, 9, 7, Tool::Belt, 1 );
+        }
+        if ( sim.blocked( 17, 3 ) )
+        {
+            put( sim, 16, 3, Tool::Belt, 3 ); put( sim, 16, 2, Tool::Belt ); put( sim, 17, 2, Tool::Belt ); put( sim, 18, 2, Tool::Belt ); put( sim, 19, 2, Tool::Belt, 1 );
+        }
+        if ( sim.blocked( 3, 3 ) )
+        {
+            put( sim, 2, 3, Tool::Belt, 3 ); put( sim, 2, 2, Tool::Belt ); put( sim, 3, 2, Tool::Belt ); put( sim, 4, 2, Tool::Belt, 1 );
+        }
+        if ( sim.blocked( 20, 8 ) )
+        {
+            put( sim, 19, 8, Tool::Belt, 1 ); put( sim, 19, 9, Tool::Belt ); put( sim, 20, 9, Tool::Belt ); put( sim, 21, 9, Tool::Belt, 3 );
+        }
     }
 }
 void conserved( Simulation& sim )
@@ -91,6 +107,7 @@ void allMissions()
         CHECK( progress.reward( id, sim.stars(), sim.stats().elapsed ) >= 3 );
     }
     CHECK( progress.complete() ); CHECK( progress.unlocked() == 9 );
+    for ( int i = 5; i < 9; ++i ) CHECK( scenarioFor( i ).blocked != scenarioFor( i + 1 ).blocked );
 }
 void economyAndPower()
 {
@@ -103,9 +120,9 @@ void economyAndPower()
     CHECK( sim.erase( 1, 3 ) ); CHECK( sim.stats().credits == 45 );
     CHECK( !sim.place( 1, 3, Tool::Miner, 0 ) );
     rules = scenarioFor( 8 ); sim.configure( rules ); put( sim, 0, 0, Tool::Generator );
-    put( sim, 1, 3, Tool::Miner ); put( sim, 2, 3, Tool::Smelter ); put( sim, 3, 3, Tool::Press );
+    put( sim, 1, 3, Tool::Miner ); put( sim, 2, 3, Tool::Smelter ); put( sim, 3, 2, Tool::Press );
     CHECK( !sim.erase( 0, 0 ) ); CHECK( !sim.place( 0, 0, Tool::Belt, 0 ) );
-    CHECK( sim.erase( 1, 3 ) ); CHECK( sim.erase( 2, 3 ) ); CHECK( sim.erase( 3, 3 ) ); CHECK( sim.erase( 0, 0 ) );
+    CHECK( sim.erase( 1, 3 ) ); CHECK( sim.erase( 2, 3 ) ); CHECK( sim.erase( 3, 2 ) ); CHECK( sim.erase( 0, 0 ) );
 }
 void failuresAndDeposits()
 {
@@ -130,6 +147,34 @@ void snapshotContinuation()
     state.parcels.push_back( { Item::Ore, { -1, 0, 0, 0, 0 } } ); const auto before = b.stats().produced;
     CHECK( !b.restore( state ) ); CHECK( b.stats().produced == before );
 }
+void deterministicMerges()
+{
+    Simulation a, b; a.reset( false );
+    put( a, 0, 2, Tool::Miner ); put( a, 1, 2, Tool::Belt ); put( a, 2, 2, Tool::Belt, 1 );
+    put( a, 0, 4, Tool::Miner ); put( a, 1, 4, Tool::Belt ); put( a, 2, 4, Tool::Belt, 3 );
+    for ( int x = 2; x < 8; ++x ) put( a, x, 3, Tool::Belt ); put( a, 8, 3, Tool::Shipping );
+    for ( int i = 0; i < 830; ++i ) a.step(); CHECK( b.restore( a.capture() ) );
+    const auto positions = []( Simulation& sim )
+    {
+        std::array<Transit, Width * Height> result{};
+        sim.parcels( [&]( vecsEntity, Parcel&, Transit& t ) { result[Simulation::index( t.x, t.y )] = t; } ); return result;
+    };
+    for ( int i = 0; i < 2000; ++i )
+    {
+        if ( i == 200 ) { a.erase( 4, 3 ); b.erase( 4, 3 ); }
+        if ( i == 230 ) { a.place( 4, 3, Tool::Belt, 0 ); b.place( 4, 3, Tool::Belt, 0 ); }
+        if ( i == 600 ) { a.erase( 0, 2 ); b.erase( 0, 2 ); }
+        if ( i == 620 ) { a.place( 0, 2, Tool::Miner, 0 ); b.place( 0, 2, Tool::Miner, 0 ); }
+        a.step(); b.step();
+        CHECK( a.stats().delivered == b.stats().delivered ); CHECK( a.stats().produced == b.stats().produced );
+        CHECK( a.stats().scrapped == b.stats().scrapped );
+        const auto pa = positions( a ), pb = positions( b );
+        for ( int cell = 0; cell < Width * Height; ++cell )
+        {
+            CHECK( pa[cell].x == pb[cell].x && pa[cell].y == pb[cell].y && pa[cell].fromX == pb[cell].fromX && pa[cell].fromY == pb[cell].fromY && pa[cell].progress == pb[cell].progress );
+        }
+    }
+}
 void sorterAndRewards()
 {
     Simulation sim; sim.reset( false );
@@ -140,12 +185,12 @@ void sorterAndRewards()
     sim.cycleFilter( 4, 3 ); bool branch = false;
     for ( int i = 0; i < 600; ++i ) { sim.step(); sim.parcels( [&]( vecsEntity, Parcel&, Transit& t ) { branch |= t.x == 4 && t.y == 2; } ); }
     CHECK( branch ); CHECK( Simulation::valid( sim.capture() ) );
-    Progress p; CHECK( p.reward( 0, 1, 25 ) == 3 ); CHECK( p.reward( 0, 1, 26 ) == 0 ); CHECK( p.reward( 0, 3, 20 ) == 2 );
+    Progress p; CHECK( p.reward( 9, 3, 20 ) == 0 ); CHECK( p.reward( 0, 1, 25 ) == 3 ); CHECK( p.reward( 0, 1, 26 ) == 0 ); CHECK( p.reward( 0, 3, 20 ) == 2 );
     CHECK( p.tokens == 5 ); CHECK( p.purchase( 0 ) ); CHECK( p.purchase( 0 ) ); CHECK( !p.purchase( 0 ) ); CHECK( p.upgrades[0] == 2 );
 }
 }
 int main()
 {
-    allMissions(); economyAndPower(); failuresAndDeposits(); snapshotContinuation(); sorterAndRewards();
+    allMissions(); economyAndPower(); failuresAndDeposits(); snapshotContinuation(); deterministicMerges(); sorterAndRewards();
     std::printf( "VexFactory campaign: all ten chapters and systems passed (%d checks).\n", checks );
 }

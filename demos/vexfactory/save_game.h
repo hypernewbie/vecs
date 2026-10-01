@@ -21,7 +21,13 @@ struct SaveGame
 inline std::filesystem::path defaultSaveDirectory()
 {
 #ifdef _WIN32
-    if ( const char* home = std::getenv( "LOCALAPPDATA" ) ) return std::filesystem::path( home ) / "VexFactory";
+    wchar_t* home = nullptr; size_t length = 0;
+    if ( _wdupenv_s( &home, &length, L"LOCALAPPDATA" ) == 0 && home )
+    {
+        const auto directory = std::filesystem::path( home ) / L"VexFactory";
+        std::free( home ); return directory;
+    }
+    std::free( home );
 #elif defined( __APPLE__ )
     if ( const char* home = std::getenv( "HOME" ) ) return std::filesystem::path( home ) / "Library/Application Support/VexFactory";
 #else
@@ -53,6 +59,17 @@ inline bool validSave( const SaveGame& game )
     if ( !validProgress( game.progress ) || !std::isfinite( game.uiScale ) || game.uiScale < 1 || game.uiScale > 1.4f ) return false;
     if ( !game.hasFactory ) return true;
     if ( game.mission < -1 || game.mission >= MissionCount || game.mission > game.progress.unlocked() || game.factory.scenario.campaign != ( game.mission >= 0 ) ) return false;
+    const auto& rules = game.factory.scenario;
+    if ( game.mission >= 0 )
+    {
+        const std::array<int, 3> tiers = { rules.beltTier, rules.processingTier, rules.recoveryTier };
+        for ( int i = 0; i < 3; ++i ) if ( tiers[i] > game.progress.upgrades[i] ) return false;
+        const auto expected = scenarioFor( game.mission, tiers );
+        if ( rules.credits != expected.credits || rules.power != expected.power || rules.unlocked != expected.unlocked || rules.deadline != expected.deadline || rules.parTime != expected.parTime || rules.parCost != expected.parCost || rules.goals != expected.goals || rules.ore != expected.ore || rules.blocked != expected.blocked || rules.docks.size() != expected.docks.size() ) return false;
+        for ( size_t i = 0; i < rules.docks.size(); ++i ) if ( rules.docks[i].x != expected.docks[i].x || rules.docks[i].y != expected.docks[i].y || rules.docks[i].mask != expected.docks[i].mask ) return false;
+        if ( game.factory.phase == Phase::Won && !game.progress.stars[game.mission] ) return false;
+    }
+    else if ( rules.beltTier || rules.processingTier || rules.recoveryTier ) return false;
     return Simulation::valid( game.factory );
 }
 inline std::string encodeSave( const SaveGame& game )

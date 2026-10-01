@@ -56,7 +56,7 @@ inline const std::array<Mission, MissionCount>& missions()
           1900, 8, 160, 70, 1550, { 0, 35, 20, 12 }, { 150, 105, 85 } },
         { "The Last Convoy", "Coastal dispatch siding", "IONA / dispatch",
           "The coast is closing its gates. Twenty engines, twenty-eight plates, and eighteen gears must reach this convoy before its departure. The storm clock does not care that a machine is blocked. Pause, inspect your buffers, and fix the slowest part rather than adding random capacity.",
-          "Your deadline measures simulated production time, not planning time. The lower passage needs a short detour. A dock that has filled its quota rejects surplus; use that backpressure to stop wasting a deposit.",
+          "Your deadline measures simulated production time, not planning time. The upper and lower passages need detours. A dock that has filled its quota rejects surplus; use that backpressure to stop wasting a deposit.",
           "We make the departure by a breath. On the radio, the coastal driver keeps saying thank you to nobody in particular. Iona draws a line through the remaining stations. Only ours is still exposed.",
           2100, 12, 160, 90, 1550, { 0, 28, 18, 20 }, { 180, 100, 80 } },
         { "Keep the Lights On", "Lumen emergency yard", "VALE / maintenance",
@@ -103,8 +103,12 @@ inline Scenario scenarioFor( int id, const std::array<int, 3>& upgrades = {} )
         s.blocked[Simulation::index( 12, 13 )] = true;
         for ( int x = 4; x < 9; ++x ) s.blocked[Simulation::index( x, 5 )] = true;
     }
+    if ( id >= 6 ) s.blocked[Simulation::index( 8, 8 )] = true;
+    if ( id >= 7 ) { s.blocked[Simulation::index( 17, 3 )] = true; s.blocked[Simulation::index( 18, 3 )] = true; }
+    if ( id >= 8 ) for ( int y = 3; y <= 5; ++y ) s.blocked[Simulation::index( 3, y )] = true;
     if ( id == 9 )
     {
+        s.blocked[Simulation::index( 20, 8 )] = true;
         s.blocked[Simulation::index( 12, 2 )] = false;
         s.blocked[Simulation::index( 12, 3 )] = true;
     }
@@ -126,7 +130,7 @@ struct Progress
     bool complete() const { return stars[MissionCount - 1] > 0; }
     int reward( int id, int earned, double seconds )
     {
-        if ( id < 0 || id >= MissionCount || earned < 1 || earned > 3 || !std::isfinite( seconds ) || seconds <= 0 ) return 0;
+        if ( id < 0 || id >= MissionCount || id > unlocked() || earned < 1 || earned > 3 || !std::isfinite( seconds ) || seconds <= 0 ) return 0;
         const int gained = ( stars[id] == 0 ? 2 : 0 ) + std::max( 0, earned - stars[id] );
         tokens += gained; stars[id] = std::max( stars[id], earned );
         if ( bestTime[id] == 0 || seconds < bestTime[id] ) bestTime[id] = seconds;

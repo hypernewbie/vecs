@@ -6,6 +6,8 @@
 #include <cmath>
 #include <deque>
 #include <string>
+#include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -35,6 +37,7 @@ inline Item inputFor( Tool t ) { return t == Tool::Smelter ? Item::Ore : t == To
 inline Item outputFor( Tool t ) { return static_cast<Item>( static_cast<int>( inputFor( t ) ) + 1 ); }
 inline float durationFor( Tool t ) { return t == Tool::Smelter ? 1.1f : t == Tool::Press ? 1.5f : 2.0f; }
 inline int costFor( Tool t ) { constexpr int costs[] = { 6, 65, 90, 125, 170, 0, 0, 50, 65, 130 }; return costs[static_cast<int>( t )]; }
+inline int priceFor( Item i ) { constexpr int prices[] = { 1, 4, 10, 28 }; return prices[static_cast<int>( i )]; }
 inline int powerFor( Tool t ) { return t == Tool::Miner ? 2 : t == Tool::Smelter ? 3 : t == Tool::Press ? 4 : t == Tool::Assembler ? 5 : 0; }
 inline uint32_t toolBit( Tool t ) { return 1u << static_cast<int>( t ); }
 inline uint32_t itemBit( Item i ) { return 1u << static_cast<int>( i ); }
@@ -237,7 +240,7 @@ public:
         std::array<bool, Width * Height> reserved{};
         parcels( [&]( vecsEntity, Parcel&, Transit& t ) { reserved[index( t.x, t.y )] = true; } );
         m_deaths.clear(); m_births.clear(); m_states.clear();
-        parcels( [&]( vecsEntity e, Parcel& parcel, Transit& t )
+        orderedEach<Parcel, Transit>( m_parcels, [&]( vecsEntity e, Parcel& parcel, Transit& t )
         {
             const vecsEntity current = at( t.x, t.y );
             const Conveyor* belt = vecsGet<Conveyor>( m_world, current ); assert( belt );
@@ -260,7 +263,7 @@ public:
                         if ( ( !dock || ( dock->mask & itemBit( parcel.kind ) ) ) && ( !m_rules.campaign || m_stats.delivered[kind] < m_rules.goals[kind] ) )
                         {
                             ++m_stats.delivered[kind]; m_shipments.push_back( m_stats.elapsed ); accepted = true;
-                            if ( m_rules.campaign ) { constexpr int prices[] = { 1, 4, 10, 28 }; m_stats.credits += prices[kind]; }
+                            if ( m_rules.campaign ) m_stats.credits += priceFor( parcel.kind );
                         }
                     }
                     else if ( Processor* processor = vecsGet<Processor>( m_world, target ) )
@@ -280,7 +283,7 @@ public:
             }
             ++m_stats.waiting;
         } );
-        vecsQueryEach<Cell, Producer>( m_world, m_producers, [&]( vecsEntity, Cell& cell, Producer& producer )
+        orderedEach<Cell, Producer>( m_producers, [&]( vecsEntity, Cell& cell, Producer& producer )
         {
             producer.cooldown = std::max( 0.0f, producer.cooldown - FixedStep );
             if ( producer.cooldown <= 0 && ( !m_rules.campaign || m_ore[index( cell.x, cell.y )] ) && emit( cell, Item::Ore, reserved ) )
@@ -289,7 +292,7 @@ public:
                 if ( m_rules.campaign ) --m_ore[index( cell.x, cell.y )];
             }
         } );
-        vecsQueryEach<Cell, Processor, Inventory>( m_world, m_processors, [&]( vecsEntity e, Cell& cell, Processor& p, Inventory& inv )
+        orderedEach<Cell, Processor, Inventory>( m_processors, [&]( vecsEntity e, Cell& cell, Processor& p, Inventory& inv )
         {
             if ( p.ready && emit( cell, outputFor( p.recipe ), reserved ) ) p.ready = false;
             const uint32_t primary = m_rules.campaign && p.recipe != Tool::Smelter ? 2u : 1u;
@@ -347,6 +350,10 @@ public:
     static bool valid( const FactoryState& state )
     {
         const auto& rules = state.scenario;
+        if ( rules.credits < 0 || rules.credits > 10000000 || rules.power < 0 || rules.power > 100000 || !std::isfinite( rules.deadline ) || rules.deadline <= 0 || rules.deadline > 1e8 || !std::isfinite( rules.parTime ) || rules.parTime < 0 || rules.parTime > 1e8 || rules.parCost < 0 || rules.parCost > 10000000 ) return false;
+        for ( int tier : { rules.beltTier, rules.processingTier, rules.recoveryTier } ) if ( tier < 0 || tier > 3 ) return false;
+        uint64_t requested = 0; for ( uint32_t goal : rules.goals ) { if ( goal > 100000 ) return false; requested += goal; }
+        if ( rules.campaign && !requested ) return false;
         if ( state.buildings.size() > Width * Height || state.parcels.size() > Width * Height || state.shipments.size() > 40000 ) return false;
         if ( !std::isfinite( state.stats.elapsed ) || state.stats.elapsed < 0 || state.stats.elapsed > 1e8 || state.stats.credits < 0 || state.stats.spent < 0 || state.stats.refunds < 0 || state.stats.refunds > state.stats.spent ) return false;
         const int phase = static_cast<int>( state.phase );
@@ -368,6 +375,12 @@ public:
             power += powerFor( b.building.tool ); if ( b.building.tool == Tool::Generator ) capacity += 12;
         }
         if ( rules.campaign && power > capacity ) return false;
+        for ( const auto& dock : rules.docks )
+        {
+            if ( !inside( dock.x, dock.y ) ) return false;
+            const auto* b = cells[index( dock.x, dock.y )];
+            if ( !b || b->building.tool != Tool::Shipping || !b->building.locked || b->dockMask != dock.mask ) return false;
+        }
         for ( const auto& p : state.parcels )
         {
             const auto& t = p.transit; const int kind = static_cast<int>( p.kind );
@@ -375,8 +388,26 @@ public:
             const int ix = index( t.x, t.y ); if ( items[ix] || !cells[ix] || !isTransport( cells[ix]->building.tool ) ) return false;
             items[ix] = true; material += weight( p.kind );
         }
-        for ( int i = 0; i < Width * Height; ++i ) { initial += rules.ore[i]; remaining += state.remainingOre[i]; if ( state.remainingOre[i] > rules.ore[i] ) return false; }
+        for ( int i = 0; i < Width * Height; ++i ) { if ( rules.ore[i] > 1000000 ) return false; initial += rules.ore[i]; remaining += state.remainingOre[i]; if ( state.remainingOre[i] > rules.ore[i] ) return false; }
         if ( material != state.stats.produced || ( rules.campaign && initial != remaining + state.stats.produced ) ) return false;
+        if ( rules.campaign )
+        {
+            int64_t credits = static_cast<int64_t>( rules.credits ) - state.stats.spent + state.stats.refunds;
+            bool complete = true; uint64_t needed = 0;
+            for ( int i = 0; i < ItemCount; ++i )
+            {
+                if ( state.stats.delivered[i] > rules.goals[i] ) return false;
+                credits += static_cast<int64_t>( state.stats.delivered[i] ) * priceFor( static_cast<Item>( i ) );
+                complete &= state.stats.delivered[i] == rules.goals[i];
+                needed += static_cast<uint64_t>( rules.goals[i] - state.stats.delivered[i] ) * weight( static_cast<Item>( i ) );
+            }
+            if ( credits != state.stats.credits ) return false;
+            if ( state.phase == Phase::Won && ( !complete || state.stats.elapsed <= 0 ) ) return false;
+            if ( state.phase == Phase::Running && ( complete || state.stats.elapsed >= rules.deadline ) ) return false;
+            if ( state.phase == Phase::Planning && ( state.stats.elapsed != 0 || state.stats.produced != 0 ) ) return false;
+            const uint64_t inFactory = material - state.stats.scrapped - [&]() { uint64_t shipped = 0; for ( int i = 0; i < ItemCount; ++i ) shipped += static_cast<uint64_t>( state.stats.delivered[i] ) * weight( static_cast<Item>( i ) ); return shipped; }();
+            if ( state.phase == Phase::Lost && state.stats.elapsed < rules.deadline && needed <= remaining + inFactory ) return false;
+        }
         double previous = -1;
         for ( double shipment : state.shipments ) { if ( !std::isfinite( shipment ) || shipment < 0 || shipment > state.stats.elapsed || shipment < previous ) return false; previous = shipment; }
         return true;
@@ -411,6 +442,24 @@ private:
     Scenario m_rules; Stats m_stats; Phase m_phase = Phase::Sandbox; std::string m_failure;
     bool m_initializing = false;
     std::deque<double> m_shipments; std::vector<Birth> m_births; std::vector<vecsEntity> m_deaths; std::vector<State> m_states;
+    template<typename... Components, typename Fn>
+    void orderedEach( vecsQuery* query, Fn&& callback )
+    {
+        // Game priority is spatial, not an implementation detail of entity IDs.
+        // Recycled handles after save/load must not change merge winners.
+        struct Hit { vecsEntity entity = 0; std::tuple<Components*...> parts{}; bool live = false; };
+        std::array<Hit, Width * Height> ordered{};
+        vecsQueryEach<Components...>( m_world, query, [&]( vecsEntity e, Components&... components )
+        {
+            const auto parts = std::tuple<Components*...>{ &components... };
+            int ix = 0;
+            if constexpr ( ( std::is_same_v<Components, Transit> || ... ) )
+            { const auto* t = std::get<Transit*>( parts ); ix = index( t->x, t->y ); }
+            else { const auto* c = std::get<Cell*>( parts ); ix = index( c->x, c->y ); }
+            ordered[ix] = { e, parts, true };
+        } );
+        for ( const auto& hit : ordered ) if ( hit.live ) std::apply( [&]( auto*... components ) { callback( hit.entity, *components... ); }, hit.parts );
+    }
     bool emit( const Cell& cell, Item kind, std::array<bool, Width * Height>& reserved )
     {
         const int x = cell.x + DX[cell.direction], y = cell.y + DY[cell.direction]; const auto target = at( x, y );

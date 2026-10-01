@@ -43,6 +43,9 @@ int main()
     CHECK( loadGame( directory, loaded, message ) ); CHECK( loaded.uiScale == second.uiScale );
     bad = game; bad.factory.parcels[0].transit.x = Width; CHECK( !decodeSave( encodeSave( bad ), loaded, message ) );
     bad = game; bad.factory.stats.credits = -1; CHECK( !decodeSave( encodeSave( bad ), loaded, message ) );
+    bad = game; bad.factory.stats.credits++; CHECK( !decodeSave( encodeSave( bad ), loaded, message ) );
+    bad = game; bad.factory.buildings[0].building.locked = false; CHECK( !decodeSave( encodeSave( bad ), loaded, message ) );
+    bad = game; bad.factory.phase = Phase::Won; bad.progress.reward( 0, 3, 20 ); CHECK( !decodeSave( encodeSave( bad ), loaded, message ) );
     bad = game; bad.progress.tokens = 100; CHECK( !decodeSave( encodeSave( bad ), loaded, message ) );
     bad = game; bad.uiScale = 0.1f; CHECK( !decodeSave( encodeSave( bad ), loaded, message ) );
     bad = game; bad.factory.stats.produced++; CHECK( !decodeSave( encodeSave( bad ), loaded, message ) );
