@@ -64,3 +64,17 @@ target_link_libraries( vex_factory PRIVATE raylib glfw )
 target_compile_definitions( vex_factory PRIVATE
     VEX_FACTORY_DEFAULT_ASSET_DIR="${VEX_FACTORY_ASSET_DIR}" )
 # Do not depend on vex_factory_assets: compiling must not fetch artwork.
+add_custom_target( vex_factory_package
+    COMMAND "${CMAKE_COMMAND}"
+        "-DVEX_FACTORY_BINARY=$<TARGET_FILE:vex_factory>"
+        "-DVEX_FACTORY_ASSET_DIR=${VEX_FACTORY_ASSET_DIR}"
+        "-DVEX_FACTORY_DIST_DIR=${CMAKE_BINARY_DIR}/vexfactory-dist"
+        "-DVEX_FACTORY_PLATFORM=${CMAKE_SYSTEM_NAME}"
+        "-DVEX_FACTORY_CONFIG=$<CONFIG>"
+        "-DRAYLIB_LICENSE=${raylib_SOURCE_DIR}/LICENSE"
+        "-DGLFW_LICENSE=${glfw3_SOURCE_DIR}/LICENSE.md"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/package_game.cmake"
+    DEPENDS vex_factory vex_factory_assets
+    COMMENT "Package VexFactory with its opt-in CC0 artwork and license notices"
+    VERBATIM
+)

@@ -14,7 +14,7 @@ using namespace vexfactory;
 namespace
 {
 enum class Screen { Title, Campaign, Briefing, Playing, Pause, Workshop, Help, Result, Ending, Confirm };
-enum class Action { Restart, Sandbox, Begin, FreshSave };
+enum class Action { Restart, Sandbox, EmptySandbox, Begin };
 struct App
 {
     Simulation sim;
@@ -56,9 +56,9 @@ struct App
         if ( game.hasFactory && sim.restore( game.factory ) ) { active = true; mission = game.mission; paused = true; }
         if ( !status.empty() ) message( status );
     }
-    void start( int id )
+    void start( int id, bool emptySandbox = false )
     {
-        if ( id < 0 ) sim.reset( true ); else beginMission( sim, id, progress.upgrades );
+        if ( id < 0 ) sim.reset( !emptySandbox ); else beginMission( sim, id, progress.upgrades );
         mission = id; selected = std::max( 0, id ); active = true; paused = true; fit = true; page = 0;
         tool = Tool::Belt; direction = 0; undo.clear(); panelScroll = 0; saveBlocked = false;
         change( Screen::Playing ); save();
@@ -69,6 +69,7 @@ struct App
     {
         if ( confirmation == Action::Restart ) start( mission );
         else if ( confirmation == Action::Sandbox ) start( -1 );
+        else if ( confirmation == Action::EmptySandbox ) start( -1, true );
         else { if ( saveBlocked ) { progress = {}; active = false; } start( selected ); }
     }
     void toggleRun()
@@ -95,6 +96,7 @@ void globalInput( App& app )
     if ( command && IsKeyPressed( KEY_S ) ) app.save( true );
     if ( command && ( IsKeyPressed( KEY_EQUAL ) || IsKeyPressed( KEY_KP_ADD ) ) ) app.scale = std::min( 1.4f, app.scale + .1f );
     if ( command && ( IsKeyPressed( KEY_MINUS ) || IsKeyPressed( KEY_KP_SUBTRACT ) ) ) app.scale = std::max( 1.0f, app.scale - .1f );
+    if ( IsKeyPressed( KEY_F11 ) ) { ToggleBorderlessWindowed(); app.fit = true; }
     if ( IsKeyPressed( KEY_M ) ) { app.muted = !app.muted; app.message( app.muted ? "Sound muted." : "Sound enabled." ); }
     if ( IsKeyPressed( KEY_F1 ) ) { if ( app.screen == Screen::Help ) app.change( app.previous ); else { app.previous = app.screen; app.change( Screen::Help ); } }
     if ( IsKeyPressed( KEY_ESCAPE ) )
@@ -126,7 +128,7 @@ void worldInput( App& app, const Layout& layout )
     if ( IsKeyPressed( KEY_SPACE ) ) app.toggleRun();
     if ( IsKeyPressed( KEY_TAB ) ) app.speed = app.speed == 4 ? 1 : app.speed * 2;
     if ( IsKeyPressed( KEY_HOME ) ) app.fit = true;
-    if ( IsKeyPressed( KEY_N ) && app.mission < 0 ) app.request( Action::Sandbox );
+    if ( IsKeyPressed( KEY_N ) && app.mission < 0 ) { app.request( Action::EmptySandbox ); return; }
     const bool command = IsKeyDown( KEY_LEFT_CONTROL ) || IsKeyDown( KEY_RIGHT_CONTROL ) || IsKeyDown( KEY_LEFT_SUPER ) || IsKeyDown( KEY_RIGHT_SUPER );
     if ( command && IsKeyPressed( KEY_Z ) && !app.undo.empty() && app.sim.phase() == Phase::Planning )
     { app.sim.restore( app.undo.back() ); app.undo.pop_back(); app.message( "Planning edit undone." ); }
@@ -319,6 +321,7 @@ void drawHud( App& app, Ui& ui, const Layout& l, Texture2D atlas )
             sprite( atlas, ItemTiles[i], { x, y, 30 * app.scale, 30 * app.scale } );
             ui.text( itemName( static_cast<Item>( i ) ), x + 42 * app.scale, y, ui.body(), ProductColors[i], width - 42 * app.scale );
             ui.text( app.mission < 0 ? TextFormat( "%u shipped", stats.delivered[i] ) : TextFormat( "%u / %u", stats.delivered[i], app.sim.scenario().goals[i] ), x + 42 * app.scale, y + 27 * app.scale, ui.small(), Ink );
+            if ( app.mission >= 0 ) ui.text( TextFormat( "+$%d each", priceFor( static_cast<Item>( i ) ) ), x + width - 105 * app.scale, y + 27 * app.scale, ui.small(), Gold, 105 * app.scale );
             if ( app.mission >= 0 ) { ui.box( { x, y + 56 * app.scale, width, 8 * app.scale }, Background ); DrawRectangleRec( { x, y + 56 * app.scale, width * std::min( 1.0f, static_cast<float>( stats.delivered[i] ) / app.sim.scenario().goals[i] ), 8 * app.scale }, ProductColors[i] ); }
             y += 80 * app.scale;
         }
@@ -455,6 +458,8 @@ void drawMenus( App& app, Ui& ui, const Layout& l, Texture2D atlas )
         y += paragraph( ui, TextFormat( "Budget %d credits  /  Base power %d  /  Dispatch allowance %d seconds", mission.credits, mission.power, mission.deadline ), body.x, y, width, Gold );
         std::string order = "Required: "; for ( int i = 0; i < ItemCount; ++i ) if ( mission.goals[i] ) order += std::to_string( mission.goals[i] ) + " " + itemName( static_cast<Item>( i ) ) + "  ";
         y += paragraph( ui, order, body.x, y, width, Mint );
+        int income = 0; for ( int i = 0; i < ItemCount; ++i ) income += mission.goals[i] * priceFor( static_cast<Item>( i ) );
+        y += paragraph( ui, TextFormat( "Order revenue: %d credits, paid as required cargo arrives. Surplus earns nothing.", income ), body.x, y, width, Gold );
         y += paragraph( ui, mission.hint, body.x, y, width, Muted );
         y += paragraph( ui, TextFormat( "Bonus stars: finish within %d seconds; no scrap and net construction cost at most %d credits. You can plan and pause without spending dispatch time.", mission.parTime, mission.parCost ), body.x, y, width, Muted );
         endScroll( app, ui, body, y );
@@ -518,9 +523,9 @@ void drawMenus( App& app, Ui& ui, const Layout& l, Texture2D atlas )
     }
     else if ( app.screen == Screen::Confirm )
     {
-        menuHeading( ui, l, "CHECK YOUR MANIFEST", app.saveBlocked ? "Create a new save?" : "Replace the current factory?" );
+        menuHeading( ui, l, "CHECK YOUR MANIFEST", app.saveBlocked ? "Create a new save?" : app.confirmation == Action::EmptySandbox ? "Clear the sandbox floor?" : "Replace the current factory?" );
         Rectangle body = menuBody( l );
-        ui.wrap( app.saveBlocked ? "The previous save could not be read. Starting this dispatch will preserve that file as campaign.sav.corrupt and create a new profile. Cancel keeps all files untouched." : "This discards the current factory, its cargo, and its dispatch timer. Your campaign medals and workshop upgrades remain. A restart restores the chapter's original budget and deposits.", body.x, body.y, body.width, ui.body(), Gold );
+        ui.wrap( app.saveBlocked ? "The previous save could not be read. Starting this dispatch will preserve that file as campaign.sav.corrupt and create a new profile. Cancel keeps all files untouched." : app.confirmation == Action::EmptySandbox ? "This discards the sandbox layout and its cargo, then opens an empty floor paused. Your campaign progress remains unchanged." : "This discards the current factory, its cargo, and its dispatch timer. Your campaign medals and workshop upgrades remain. A restart restores the chapter's original budget and deposits.", body.x, body.y, body.width, ui.body(), Gold );
         if ( ui.button( { 28, bottom, 210 * app.scale, buttonHeight }, "Cancel [Esc]" ) ) app.change( app.previous );
         if ( ui.button( { l.width - 270 * app.scale - 28, bottom, 270 * app.scale, buttonHeight }, "Confirm [Enter]", true ) ) app.confirm();
     }
@@ -561,7 +566,7 @@ struct Options
     std::filesystem::path directory = defaultSaveDirectory();
     int frames = 0, mission = -1, width = 1440, height = 900;
     float scale = 0;
-    bool smoke = false, noSave = false, noAudio = false;
+    bool smoke = false, noSave = false, noAudio = false, explicitAssets = false;
 };
 bool integer( const char* text, int& value, int minimum, int maximum )
 {
@@ -581,8 +586,8 @@ int parse( int argc, char** argv, Options& o )
         if ( argument == "--smoke-test" ) o.smoke = true;
         else if ( argument == "--no-save" ) o.noSave = true;
         else if ( argument == "--no-audio" ) o.noAudio = true;
-        else if ( argument == "--assets" && i + 1 < argc ) o.assets = argv[++i];
-        else if ( argument == "--save-dir" && i + 1 < argc ) o.directory = argv[++i];
+        else if ( argument == "--assets" && i + 1 < argc ) { o.assets = argv[++i]; o.explicitAssets = true; }
+        else if ( argument == "--save-dir" && i + 1 < argc ) { o.directory = argv[++i]; if ( o.directory.empty() ) return -1; }
         else if ( argument == "--font" && i + 1 < argc ) o.font = argv[++i];
         else if ( argument == "--screen" && i + 1 < argc ) o.scene = argv[++i];
         else if ( argument == "--screenshot" && i + 1 < argc ) { o.screenshot = argv[++i]; o.smoke = true; }
@@ -600,6 +605,11 @@ int parse( int argc, char** argv, Options& o )
 int main( int argc, char** argv )
 {
     Options options; const int parsed = parse( argc, argv, options ); if ( parsed ) { if ( parsed < 0 ) std::fprintf( stderr, "Invalid arguments. Use --help.\n" ); return parsed < 0 ? 1 : 0; }
+    if ( !options.explicitAssets )
+    {
+        const std::string portable = std::string( GetApplicationDirectory() ) + "assets";
+        if ( FileExists( ( portable + "/Tilemap/tilemap_packed.png" ).c_str() ) ) options.assets = portable;
+    }
     const std::string tilemap = options.assets + "/Tilemap/tilemap_packed.png";
     if ( !FileExists( tilemap.c_str() ) ) { std::fprintf( stderr, "VexFactory artwork is missing: %s\nRun: cmake -P demos/vexfactory/fetch_assets.cmake\nOr build the explicit vex_factory_assets target.\n", tilemap.c_str() ); return 1; }
     Image image = LoadImage( tilemap.c_str() );
@@ -626,7 +636,11 @@ int main( int argc, char** argv )
     }
     if ( options.smoke )
     {
-        if ( options.mission >= 0 ) { app.start( options.mission ); }
+        if ( options.mission >= 0 )
+        {
+            for ( int i = 0; i < options.mission; ++i ) app.progress.reward( i, 2, 60 );
+            app.start( options.mission );
+        }
         else { app.start( -1 ); for ( int i = 0; i < 60 * 35; ++i ) app.sim.step(); }
         if ( options.scene == "title" ) app.change( Screen::Title );
         if ( options.scene == "campaign" ) app.change( Screen::Campaign );

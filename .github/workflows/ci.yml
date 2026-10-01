@@ -62,7 +62,7 @@ jobs:
       - name: Build
         run: cmake --build build
 
-      - name: VexFactory simulation tests (no assets or graphics dependencies)
+      - name: VexFactory campaign, persistence, and layout tests (no graphics downloads)
         run: ctest --test-dir build --output-on-failure
 
       - name: Test (Windows)
@@ -74,3 +74,36 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: ${{ matrix.test_cmd }}
+
+      - name: Compile macOS graphical game (Cocoa and high-DPI code)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cmake -S . -B temp/vexfactory-macos -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DBUILD_VEX_FACTORY=ON
+          cmake --build temp/vexfactory-macos --target vex_factory
+
+  vexfactory-graphics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      - name: Install desktop build and smoke-test dependencies
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang libc++-dev libc++abi-dev libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev libasound2-dev xvfb xauth libxtst6
+      - name: Build the graphical game and all asset-free tests
+        run: |
+          cmake -S . -B temp/vexfactory-ci -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DBUILD_VEX_FACTORY=ON
+          cmake --build temp/vexfactory-ci --target vex_factory vex_factory_assets vex_factory_test vex_factory_campaign_test vex_factory_save_test vex_factory_layout_test
+          ctest --test-dir temp/vexfactory-ci --output-on-failure
+      - name: Play, save, reload, resize, clear a chapter, and buy research
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s '-screen 0 1600x1000x24' python3 demos/vexfactory/graphical_test.py temp/vexfactory-ci/demos/vexfactory/vex_factory
+      - name: Check small-window large-text story and game screens
+        run: |
+          for screen in title campaign briefing play ending; do
+            LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a temp/vexfactory-ci/demos/vexfactory/vex_factory --size 960 640 --ui-scale 1.4 --mission 5 --screen "$screen" --screenshot "temp/vexfactory/graphical-tests/$screen.png"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vexfactory-graphics-evidence
+          path: temp/vexfactory/graphical-tests
+          retention-days: 7

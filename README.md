@@ -236,12 +236,16 @@ cmake --build build
 ./build/vecs_test
 ```
 
-## VexFactory Demo
+## VexFactory: The Last Freight
 
-[VexFactory](demos/vexfactory/README.md) is a graphical factory sandbox with conveyors, three recipes, and shipping contracts.
-It uses Vecs, raylib, and Kenney's CC0 Tiny Factory pack.
-The demo is opt-in. A normal Vecs build does not download its dependencies or artwork.
-Assets and scratch builds stay in the gitignored `temp/` directory.
+[VexFactory](demos/vexfactory/README.md) is a factory game with a ten-chapter campaign, story, and a free-build sandbox.
+Plan around credits, finite ore, power, mixed-input recipes, and dispatch deadlines.
+The game includes splitters, sorters, generators, research, medals, and saved factories.
+Its native-resolution interface supports high-DPI displays and adjustable text size.
+
+The game is opt-in. A normal Vecs build does not download graphics libraries or artwork.
+It uses raylib, GLFW, and Kenney's CC0 Tiny Factory pack.
+Assets, packages, and scratch builds stay in the gitignored `temp/` directory.
 
 ## Debugger Visualizations
 
