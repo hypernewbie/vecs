@@ -1,5 +1,6 @@
 #pragma once
 #include "campaign.h"
+#include "layout.h"
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -56,7 +57,7 @@ inline bool validProgress( const Progress& progress )
 }
 inline bool validSave( const SaveGame& game )
 {
-    if ( !validProgress( game.progress ) || !std::isfinite( game.uiScale ) || game.uiScale < 1 || game.uiScale > 1.4f ) return false;
+    if ( !validProgress( game.progress ) || !std::isfinite( game.uiScale ) || game.uiScale < MinUiScale || game.uiScale > MaxUiScale ) return false;
     if ( !game.hasFactory ) return true;
     if ( game.mission < -1 || game.mission >= MissionCount || game.mission > game.progress.unlocked() || game.factory.scenario.campaign != ( game.mission >= 0 ) ) return false;
     const auto& rules = game.factory.scenario;

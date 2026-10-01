@@ -13,6 +13,7 @@ import time
 parser = argparse.ArgumentParser()
 parser.add_argument("binary", type=Path)
 parser.add_argument("--output", type=Path, default=Path("temp/vexfactory/graphical-tests"))
+parser.add_argument("--density", type=int, choices=(1, 2), default=1, help="X11 desktop DPI multiplier")
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=True)
 output = Path(tempfile.mkdtemp(prefix="campaign-ui-", dir=args.output))
@@ -51,6 +52,8 @@ x.XGetWindowAttributes.argtypes = [c.c_void_p, c.c_ulong, c.POINTER(WindowAttrib
 display = x.XOpenDisplay(None)
 assert display, "An X11 display is required. Run this test through xvfb-run."
 root = x.XDefaultRootWindow(display)
+if args.density == 2:
+    subprocess.run(["xrdb", "-merge"], input="Xft.dpi: 192\n", text=True, check=True)
 process = None
 logs = []
 
@@ -74,7 +77,7 @@ def key(name, command=False):
 
 
 def move(px, py):
-    t.XTestFakeMotionEvent(display, -1, int(px), int(py), 0)
+    t.XTestFakeMotionEvent(display, -1, int(px * args.density), int(py * args.density), 0)
     x.XFlush(display)
     time.sleep(.08)
 
@@ -183,6 +186,7 @@ x.XDestroyImage.argtypes = [c.POINTER(XImage)]
 
 
 def capture(name, width, height):
+    width, height = width * args.density, height * args.density
     image = x.XGetImage(display, root, 0, 0, width, height, c.c_ulong(-1), 2)
     assert image
     im = image.contents
@@ -197,6 +201,14 @@ def capture(name, width, height):
     x.XDestroyImage(image)
 
 
+def pixel(px, py):
+    image = x.XGetImage(display, root, int(px * args.density), int(py * args.density), 1, 1, c.c_ulong(-1), 2)
+    assert image and image.contents.bits_per_pixel == 32
+    blue, green, red, _ = c.string_at(image.contents.data, 4)
+    x.XDestroyImage(image)
+    return red, green, blue
+
+
 try:
     window = start(1)
     key("Return")  # New campaign briefing.
@@ -205,13 +217,18 @@ try:
     assert before["mission"] == 0 and before["phase"] == 1 and before["credits"] == 240
     assert before["elapsed"] == 0
     key("1")
-    # Native 960x640 layout fits the world at 22 logical pixels per cell.
+    # The full-width viewport uses readable 40-point cells, not a shrunken map.
+    # Same logical positions at 1x and 2x DPI; native input is scaled above.
     def paint_route():
-        move(28 + 4.5 * 22, 168 + 3.5 * 22)
+        move(4.5 * 40, -8 + 3.5 * 40)
         button(True)
-        move(28 + 21.5 * 22, 168 + 3.5 * 22)
+        move(21.5 * 40, -8 + 3.5 * 40)
         button(False)
+    floor_pixel = pixel(12.5 * 40, -8 + 3.5 * 40)
     paint_route()
+    belt_pixel = pixel(12.5 * 40, -8 + 3.5 * 40)
+    assert belt_pixel != floor_pixel and belt_pixel[2] > floor_pixel[2], "The rendered belt does not match the clicked logical tile."
+    capture("minimal-hud-%dx" % args.density, 960, 640)
     painted = snapshot()
     assert (21, 3) in painted["buildings"] and painted["credits"] == 132
     key("z", command=True)
@@ -233,7 +250,14 @@ try:
     loaded = snapshot()
     assert loaded["paused"] and loaded["produced"] >= running["produced"]
     elapsed = loaded["elapsed"]
-    x.XResizeWindow(display, window, 1280, 720)
+    key("F11")  # Borderless mode must not switch the UI into framebuffer pixels.
+    time.sleep(.25)
+    fullscreen = snapshot()
+    assert fullscreen["elapsed"] == elapsed and fullscreen["scale"] == loaded["scale"]
+    capture("borderless-%dx" % args.density, 1600, 1000)
+    key("F11")
+    time.sleep(.25)
+    x.XResizeWindow(display, window, 1280 * args.density, 720 * args.density)
     x.XFlush(display)
     time.sleep(.3)
     key("equal", command=True)
@@ -243,7 +267,19 @@ try:
     assert abs(scaled["scale"] - 1.2) < .001 and scaled["elapsed"] == elapsed
     move(313, 257)
     key("e")
+    inspected = snapshot()
+    assert inspected["elapsed"] == elapsed
     capture("native-large-text", 1280, 720)
+    key("Escape")  # Close the optional inspector, not the production scene.
+    key("o")
+    capture("optional-orders", 1280, 720)
+    # Clicks through a details overlay must not place or demolish floor parts.
+    before_overlay = snapshot()
+    click(1050, 310)
+    after_overlay = snapshot()
+    assert after_overlay["buildings"] == before_overlay["buildings"] and after_overlay["credits"] == before_overlay["credits"]
+    key("Escape")
+    move(313, 257)
     # World zoom is independent of text size and never advances a paused factory.
     button(True, 4)
     button(False, 4)
@@ -276,7 +312,7 @@ try:
     key("Escape")  # Back to pause.
     click(1036, 673)  # Save and quit at 1280x720 / 120% text.
     assert process.wait(timeout=5) == 0
-    print("Graphical campaign test passed: planning, fast paint, undo, production, atomic save/reload, resize, large text, zoom, victory, next chapter, confirmation and research.")
+    print("Graphical campaign test passed at %dx DPI: minimal HUD, rendered/clicked tile alignment, planning, fast paint, undo, production, atomic save/reload, resize, large text, zoom, victory, next chapter, confirmation and research." % args.density)
     print("Artifacts:", output)
 finally:
     if process is not None and process.poll() is None:

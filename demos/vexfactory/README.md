@@ -86,15 +86,20 @@ cmake --build temp/vexfactory-build --target vex_factory vex_factory_assets
 
 ## Readable interface
 
-The interface draws at native window resolution.
-It does not shrink a fixed 1440-pixel canvas into your window.
-Body text starts at 20 logical pixels. Secondary text starts at 18.
-Paragraphs wrap, and long panels scroll.
-World zoom does not change interface text size.
+The factory uses the full width of the window.
+A compact status strip and a single-row toolbar replace the permanent sidebar and large status cards.
+Part information, orders, and inspection open only on request. Esc closes them without opening the pause menu.
+
+Rendering and mouse input share logical window coordinates, including Retina and borderless mode.
+The framebuffer resolution determines sharpness, not interface size.
+Body text starts at 24 logical pixels. Secondary text starts at 20.
+Default factory tiles are at least 40 logical pixels wide.
+Home or the Fit button fits the entire floor. The wheel changes factory zoom without changing text size.
+Paragraphs wrap, and long menus scroll.
 
 Use the text-size button on the title or pause menu.
-You can also use `Ctrl/Cmd` with `+` or `-`, or start with `--ui-scale 1.3`.
-The supported text scale is 100-140%.
+You can also use `Ctrl/Cmd` with `+` or `-`, or start with `--ui-scale 1.5`.
+The supported text scale is 100-200%. Existing campaign saves remain readable.
 
 The game uses Segoe UI on Windows, Arial on macOS, and DejaVu Sans or Liberation Sans on Linux.
 It does not copy or distribute these fonts.
@@ -115,7 +120,9 @@ Use `--font FILE.ttf` to select a different installed font.
 | Shift + left mouse | Replace a different part |
 | Right mouse | Demolish a tile |
 | `R` | Rotate the selected output direction clockwise |
-| `E` | Pick and inspect the tile under the pointer |
+| `E` | Pick the tile under the pointer and toggle its inspector |
+| `B` | Toggle information for the selected part |
+| `O` | Toggle the orders panel |
 | Alt + left mouse | Inspect without construction |
 | `F` | Change the sorter filter under the pointer |
 | `Space` | Launch, pause, or resume production |
@@ -131,7 +138,7 @@ Use `--font FILE.ttf` to select a different installed font.
 | `F11` | Toggle borderless full-window mode |
 | `N` in the sandbox | Clear the floor after confirmation |
 | `F1` | Open the field notes |
-| `Esc` | Open the pause menu or return from a menu |
+| `Esc` | Close details, open the pause menu, or return from a menu |
 
 The title menu includes the campaign, workshop, field notes, and classic sandbox.
 The pause menu includes save, restart, research, and return to the campaign board.
@@ -248,7 +255,7 @@ The graphical build includes these test targets too.
 The tests retain the original sandbox checks and cover all campaign systems.
 Test-only layouts purchase and complete all ten chapters with no upgrades.
 Persistence tests cover deterministic continuation, malformed states, truncated files, and backup recovery.
-Layout tests cover small windows and large text without shrinking interface fonts.
+Layout tests cover small windows, 100-200% text, and logical-to-framebuffer mapping at 1x, 1.5x, 2x, and 3x DPI.
 
 Graphical smoke examples:
 
@@ -265,6 +272,9 @@ LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s '-screen 0 1600x1000x24' python3 demos/ve
 ```
 
 This test plays the first chapter through real input, saves and reloads, changes text size and zoom, advances the campaign, and buys research.
+It also checks that a rendered conveyor appears on the tile clicked by the pointer.
+For a 2x DPI desktop, use `-s '-screen 0 3200x2000x24 -noreset'` with `xvfb-run`, and add `--density 2` to the script.
+The 2x test also needs `xrdb`, usually in the `x11-xserver-utils` package.
 Its profiles and images stay under gitignored `temp/`.
 CI includes asset-free tests on Windows, Linux, and macOS, macOS graphical compilation, and Linux graphical/input tests.
 

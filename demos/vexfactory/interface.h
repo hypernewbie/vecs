@@ -1,6 +1,7 @@
 #pragma once
 #include "layout.h"
 #include "raylib.h"
+#include "rlgl.h"
 #include <cmath>
 #include <string>
 #include <vector>
@@ -26,11 +27,30 @@ inline void arrow( Vector2 center, int direction, Color color, float size )
     DrawLineEx( { center.x - d.x * size + side.x * size, center.y - d.y * size + side.y * size }, tip, size * .3f, color );
     DrawLineEx( { center.x - d.x * size - side.x * size, center.y - d.y * size - side.y * size }, tip, size * .3f, color );
 }
+// Set a logical projection explicitly. BeginMode2D() discards raylib's DPI
+// model-view scaling; sharing this projection keeps UI, world and input aligned.
+inline void beginCanvas( const Surface& surface )
+{
+    rlDrawRenderBatchActive(); rlViewport( 0, 0, static_cast<int>( surface.framebufferWidth ), static_cast<int>( surface.framebufferHeight ) );
+    rlMatrixMode( RL_PROJECTION ); rlPushMatrix(); rlLoadIdentity(); rlOrtho( 0, surface.width, surface.height, 0, 0, 1 );
+    rlMatrixMode( RL_MODELVIEW ); rlLoadIdentity();
+}
+inline void endCanvas()
+{
+    rlDrawRenderBatchActive(); rlMatrixMode( RL_PROJECTION ); rlPopMatrix(); rlMatrixMode( RL_MODELVIEW ); EndMode2D();
+}
+inline void beginClip( Rectangle r, const Surface& surface )
+{
+    const Box p = surface.pixels( { r.x, r.y, r.width, r.height } );
+    const int left = static_cast<int>( std::floor( p.x ) ), bottom = static_cast<int>( std::floor( surface.framebufferHeight - p.y - p.height ) );
+    rlDrawRenderBatchActive(); rlEnableScissorTest();
+    rlScissor( left, bottom, static_cast<int>( std::ceil( p.x + p.width ) ) - left, static_cast<int>( std::ceil( surface.framebufferHeight - p.y ) ) - bottom );
+}
 class FontFace
 {
 public:
     Font font{}; bool owned = false; float density = 0; std::string source;
-    void choose( const std::string& overridePath )
+    void choose( const std::string& overridePath, float dpi )
     {
         if ( !overridePath.empty() && FileExists( overridePath.c_str() ) ) source = overridePath;
         if ( source.empty() ) for ( const char* path : {
@@ -42,11 +62,11 @@ public:
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
 #endif
             "" } ) if ( *path && FileExists( path ) ) { source = path; break; }
-        update();
+        update( dpi );
     }
-    void update()
+    void update( float dpi )
     {
-        const float dpi = std::max( 1.0f, static_cast<float>( GetRenderWidth() ) / std::max( 1, GetScreenWidth() ) );
+        dpi = std::max( 1.0f, dpi );
         if ( font.texture.id && std::abs( density - dpi ) < .05f ) return;
         if ( owned ) UnloadFont( font ); owned = false; density = dpi;
         if ( !source.empty() )
@@ -62,9 +82,9 @@ public:
 };
 struct Ui
 {
-    Font font; float scale; Vector2 mouse; bool input = true, clipped = false; Rectangle clip{};
-    float body() const { return 20 * scale; }
-    float small() const { return 18 * scale; }
+    Font font; float scale; Vector2 mouse; bool input = true, clipped = false; Rectangle clip{}; Surface surface{};
+    float body() const { return 24 * scale; }
+    float small() const { return 20 * scale; }
     float measure( const std::string& text, float size ) const { return MeasureTextEx( font, text.c_str(), size, .3f ).x; }
     void box( Rectangle r, Color color = Panel ) const { DrawRectangleRec( r, color ); DrawRectangleLinesEx( r, 1, Border ); }
     bool hit( Rectangle r ) const { return input && CheckCollisionPointRec( mouse, r ) && ( !clipped || CheckCollisionPointRec( mouse, clip ) ); }
@@ -108,7 +128,7 @@ struct Ui
         text( title, r.x + ( r.width - w ) / 2, r.y + ( r.height - size ) / 2, size, enabled ? ( active ? Mint : Ink ) : Muted, r.width - 20 );
         return hover && IsMouseButtonPressed( MOUSE_BUTTON_LEFT );
     }
-    void beginClip( Rectangle r ) { clipped = true; clip = r; BeginScissorMode( static_cast<int>( r.x ), static_cast<int>( r.y ), static_cast<int>( r.width ), static_cast<int>( r.height ) ); }
+    void beginClip( Rectangle r ) { clipped = true; clip = r; vexfactory::beginClip( r, surface ); }
     void endClip() { EndScissorMode(); clipped = false; }
 };
 class Audio

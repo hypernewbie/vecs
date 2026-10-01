@@ -15,21 +15,34 @@ namespace
 {
 enum class Screen { Title, Campaign, Briefing, Playing, Pause, Workshop, Help, Result, Ending, Confirm };
 enum class Action { Restart, Sandbox, EmptySandbox, Begin };
+Surface windowSurface()
+{
+    auto* window = glfwGetCurrentContext(); int w = 0, h = 0, fw = 0, fh = 0; float sx = 1, sy = 1;
+    glfwGetWindowSize( window, &w, &h ); glfwGetFramebufferSize( window, &fw, &fh ); glfwGetWindowContentScale( window, &sx, &sy );
+    return Surface::make( static_cast<float>( w ), static_cast<float>( h ), static_cast<float>( fw ), static_cast<float>( fh ), sx, sy );
+}
+Vector2 logicalMouse( const Surface& surface )
+{
+    double x = 0, y = 0; glfwGetCursorPos( glfwGetCurrentContext(), &x, &y );
+    return { surface.mouseX( static_cast<float>( x ) ), surface.mouseY( static_cast<float>( y ) ) };
+}
+float nextTextScale( float scale ) { return scale < 1.24f ? 1.25f : scale < 1.49f ? 1.5f : scale < 1.74f ? 1.75f : scale < 1.99f ? 2.0f : 1.0f; }
 struct App
 {
     Simulation sim;
     Progress progress;
     Screen screen = Screen::Title, previous = Screen::Title;
     Action confirmation = Action::Restart;
-    int mission = -1, selected = 0, speed = 1, page = 0, direction = 0;
+    int mission = -1, selected = 0, speed = 1, page = 1, direction = 0;
     int hoverX = -1, hoverY = -1, lastX = -1, lastY = -1;
     Tool tool = Tool::Belt;
-    bool active = false, paused = true, quit = false, muted = false, noSave = false, saveBlocked = false, fit = true, strokeSaved = false;
+    bool active = false, paused = true, quit = false, muted = false, noSave = false, saveBlocked = false, fit = true, fitAll = false, details = false, strokeSaved = false;
     float scale = 1, accumulator = 0, scroll = 0, panelScroll = 0, toastTime = 0;
     double saveClock = 0;
     std::string toast;
     std::filesystem::path saveDirectory = defaultSaveDirectory();
     Camera2D camera{};
+    Surface surface{}; Vector2 mouse{};
     std::vector<FactoryState> undo;
     Audio audio;
     void message( const std::string& text ) { toast = text; toastTime = 6; }
@@ -59,7 +72,7 @@ struct App
     void start( int id, bool emptySandbox = false )
     {
         if ( id < 0 ) sim.reset( !emptySandbox ); else beginMission( sim, id, progress.upgrades );
-        mission = id; selected = std::max( 0, id ); active = true; paused = true; fit = true; page = 0;
+        mission = id; selected = std::max( 0, id ); active = true; paused = true; fit = true; fitAll = false; details = false; page = 1;
         tool = Tool::Belt; direction = 0; undo.clear(); panelScroll = 0; saveBlocked = false;
         change( Screen::Playing ); save();
     }
@@ -88,20 +101,21 @@ struct App
 void fitCamera( App& app, const Layout& layout )
 {
     app.camera.offset = { layout.world.x + layout.world.width / 2, layout.world.y + layout.world.height / 2 };
-    if ( app.fit ) { app.camera.target = { Width / 2.0f, Height / 2.0f }; app.camera.zoom = std::min( ( layout.world.width - 24 ) / Width, ( layout.world.height - 24 ) / Height ); }
+    if ( app.fit ) { app.camera.target = { Width / 2.0f, Height / 2.0f }; app.camera.zoom = layout.tileSize( Width, Height, app.fitAll ); }
 }
 void globalInput( App& app )
 {
     const bool command = IsKeyDown( KEY_LEFT_CONTROL ) || IsKeyDown( KEY_RIGHT_CONTROL ) || IsKeyDown( KEY_LEFT_SUPER ) || IsKeyDown( KEY_RIGHT_SUPER );
     if ( command && IsKeyPressed( KEY_S ) ) app.save( true );
-    if ( command && ( IsKeyPressed( KEY_EQUAL ) || IsKeyPressed( KEY_KP_ADD ) ) ) app.scale = std::min( 1.4f, app.scale + .1f );
-    if ( command && ( IsKeyPressed( KEY_MINUS ) || IsKeyPressed( KEY_KP_SUBTRACT ) ) ) app.scale = std::max( 1.0f, app.scale - .1f );
+    if ( command && ( IsKeyPressed( KEY_EQUAL ) || IsKeyPressed( KEY_KP_ADD ) ) ) app.scale = std::min( MaxUiScale, std::round( ( app.scale + .1f ) * 10 ) / 10 );
+    if ( command && ( IsKeyPressed( KEY_MINUS ) || IsKeyPressed( KEY_KP_SUBTRACT ) ) ) app.scale = std::max( MinUiScale, std::round( ( app.scale - .1f ) * 10 ) / 10 );
     if ( IsKeyPressed( KEY_F11 ) ) { ToggleBorderlessWindowed(); app.fit = true; }
     if ( IsKeyPressed( KEY_M ) ) { app.muted = !app.muted; app.message( app.muted ? "Sound muted." : "Sound enabled." ); }
     if ( IsKeyPressed( KEY_F1 ) ) { if ( app.screen == Screen::Help ) app.change( app.previous ); else { app.previous = app.screen; app.change( Screen::Help ); } }
     if ( IsKeyPressed( KEY_ESCAPE ) )
     {
-        if ( app.screen == Screen::Playing ) { app.change( Screen::Pause ); app.save(); }
+        if ( app.screen == Screen::Playing && app.details ) app.details = false;
+        else if ( app.screen == Screen::Playing ) { app.change( Screen::Pause ); app.save(); }
         else if ( app.screen == Screen::Pause ) app.change( Screen::Playing );
         else if ( app.screen == Screen::Confirm || app.screen == Screen::Help || app.screen == Screen::Workshop ) app.change( app.previous );
         else if ( app.screen == Screen::Briefing ) app.change( Screen::Campaign );
@@ -120,14 +134,19 @@ void globalInput( App& app )
 void worldInput( App& app, const Layout& layout )
 {
     if ( app.screen != Screen::Playing ) return;
-    const Vector2 mouse = GetMousePosition(); const bool inWorld = CheckCollisionPointRec( mouse, rect( layout.world ) );
+    const Vector2 mouse = app.mouse;
+    const bool inWorld = CheckCollisionPointRec( mouse, rect( layout.world ) ) && !( app.details && CheckCollisionPointRec( mouse, rect( layout.panel ) ) );
     constexpr Tool shortcuts[] = { Tool::Belt, Tool::Miner, Tool::Smelter, Tool::Press, Tool::Assembler, Tool::Shipping, Tool::Splitter, Tool::Sorter, Tool::Generator };
     for ( int i = 0; i < 9; ++i ) if ( IsKeyPressed( KEY_ONE + i ) ) { app.tool = shortcuts[i]; app.page = 0; }
     if ( IsKeyPressed( KEY_ZERO ) ) app.tool = Tool::Erase;
     if ( IsKeyPressed( KEY_R ) ) app.direction = ( app.direction + 1 ) % 4;
     if ( IsKeyPressed( KEY_SPACE ) ) app.toggleRun();
     if ( IsKeyPressed( KEY_TAB ) ) app.speed = app.speed == 4 ? 1 : app.speed * 2;
-    if ( IsKeyPressed( KEY_HOME ) ) app.fit = true;
+    if ( IsKeyPressed( KEY_HOME ) ) { app.fit = true; app.fitAll = true; }
+    if ( IsKeyPressed( KEY_B ) || IsKeyPressed( KEY_O ) )
+    {
+        const int page = IsKeyPressed( KEY_B ) ? 0 : 1; app.details = !( app.details && app.page == page ); app.page = page; app.panelScroll = 0;
+    }
     if ( IsKeyPressed( KEY_N ) && app.mission < 0 ) { app.request( Action::EmptySandbox ); return; }
     const bool command = IsKeyDown( KEY_LEFT_CONTROL ) || IsKeyDown( KEY_RIGHT_CONTROL ) || IsKeyDown( KEY_LEFT_SUPER ) || IsKeyDown( KEY_RIGHT_SUPER );
     if ( command && IsKeyPressed( KEY_Z ) && !app.undo.empty() && app.sim.phase() == Phase::Planning )
@@ -142,22 +161,22 @@ void worldInput( App& app, const Layout& layout )
             const Vector2 after = GetScreenToWorld2D( mouse, app.camera ); app.camera.target.x += before.x - after.x; app.camera.target.y += before.y - after.y;
         }
         if ( IsMouseButtonDown( MOUSE_BUTTON_MIDDLE ) )
-        { app.fit = false; const auto delta = GetMouseDelta(); app.camera.target.x -= delta.x / app.camera.zoom; app.camera.target.y -= delta.y / app.camera.zoom; }
+        { app.fit = false; const auto delta = GetMouseDelta(); app.camera.target.x -= app.surface.mouseX( delta.x ) / app.camera.zoom; app.camera.target.y -= app.surface.mouseY( delta.y ) / app.camera.zoom; }
         Vector2 point = GetScreenToWorld2D( mouse, app.camera ); app.hoverX = static_cast<int>( std::floor( point.x ) ); app.hoverY = static_cast<int>( std::floor( point.y ) );
     }
     float panX = ( IsKeyDown( KEY_D ) ? 1.0f : 0 ) - ( IsKeyDown( KEY_A ) ? 1.0f : 0 );
     float panY = ( IsKeyDown( KEY_S ) && !command ? 1.0f : 0 ) - ( IsKeyDown( KEY_W ) ? 1.0f : 0 );
     if ( panX || panY ) { app.fit = false; app.camera.target.x += panX * GetFrameTime() * 12; app.camera.target.y += panY * GetFrameTime() * 12; }
-    if ( IsKeyPressed( KEY_E ) && Simulation::inside( app.hoverX, app.hoverY ) )
+    if ( IsKeyPressed( KEY_E ) && inWorld && Simulation::inside( app.hoverX, app.hoverY ) )
     {
         const auto e = app.sim.at( app.hoverX, app.hoverY );
         if ( e != VECS_INVALID_ENTITY ) { app.tool = vecsGet<Building>( app.sim.world(), e )->tool; app.direction = vecsGet<Cell>( app.sim.world(), e )->direction; }
-        app.page = 2; app.panelScroll = 0;
+        app.details = !( app.details && app.page == 2 ); app.page = 2; app.panelScroll = 0;
     }
-    if ( IsKeyPressed( KEY_F ) ) app.sim.cycleFilter( app.hoverX, app.hoverY );
+    if ( IsKeyPressed( KEY_F ) && inWorld ) app.sim.cycleFilter( app.hoverX, app.hoverY );
     if ( !IsMouseButtonDown( MOUSE_BUTTON_LEFT ) && !IsMouseButtonDown( MOUSE_BUTTON_RIGHT ) ) { app.lastX = app.lastY = -1; app.strokeSaved = false; }
     if ( !inWorld || !Simulation::inside( app.hoverX, app.hoverY ) || IsMouseButtonDown( MOUSE_BUTTON_MIDDLE ) ) return;
-    if ( ( IsKeyDown( KEY_LEFT_ALT ) || IsKeyDown( KEY_RIGHT_ALT ) ) && IsMouseButtonPressed( MOUSE_BUTTON_LEFT ) ) { app.page = 2; app.panelScroll = 0; return; }
+    if ( ( IsKeyDown( KEY_LEFT_ALT ) || IsKeyDown( KEY_RIGHT_ALT ) ) && IsMouseButtonPressed( MOUSE_BUTTON_LEFT ) ) { app.details = true; app.page = 2; app.panelScroll = 0; return; }
     const bool erase = IsMouseButtonDown( MOUSE_BUTTON_RIGHT );
     const bool paint = IsMouseButtonPressed( MOUSE_BUTTON_LEFT ) || ( IsMouseButtonDown( MOUSE_BUTTON_LEFT ) && ( app.tool == Tool::Belt || app.tool == Tool::Erase ) );
     if ( !erase && !paint ) return;
@@ -192,7 +211,7 @@ void worldInput( App& app, const Layout& layout )
 void drawFactory( App& app, const Layout& layout, Texture2D atlas )
 {
     Rectangle viewport = rect( layout.world ); DrawRectangleRec( viewport, { 36, 41, 45, 255 } );
-    BeginScissorMode( static_cast<int>( viewport.x ), static_cast<int>( viewport.y ), static_cast<int>( viewport.width ), static_cast<int>( viewport.height ) );
+    beginClip( viewport, app.surface );
     BeginMode2D( app.camera );
     for ( int y = 0; y < Height; ++y ) for ( int x = 0; x < Width; ++x )
     {
@@ -257,57 +276,69 @@ void drawFactory( App& app, const Layout& layout, Texture2D atlas )
         sprite( atlas, ItemTiles[static_cast<int>( parcel.kind )], { x - .31f, y - .31f, .62f, .62f } );
         if ( t.progress >= 1 ) DrawRectangleLinesEx( { x - .34f, y - .34f, .68f, .68f }, .035f, Coral );
     } );
-    if ( app.screen == Screen::Playing && Simulation::inside( app.hoverX, app.hoverY ) && CheckCollisionPointRec( GetMousePosition(), viewport ) )
+    if ( app.screen == Screen::Playing && Simulation::inside( app.hoverX, app.hoverY ) && CheckCollisionPointRec( app.mouse, viewport ) && !( app.details && CheckCollisionPointRec( app.mouse, rect( layout.panel ) ) ) )
     {
         const bool legal = app.sim.canPlace( app.hoverX, app.hoverY, app.tool ); const Color color = legal ? Mint : Coral;
         Rectangle cell{ static_cast<float>( app.hoverX ), static_cast<float>( app.hoverY ), 1, 1 };
         DrawRectangleRec( cell, Fade( color, .22f ) ); DrawRectangleLinesEx( cell, .06f, color );
         sprite( atlas, ToolTiles[static_cast<int>( app.tool )], cell, app.tool == Tool::Belt ? app.direction * 90.0f : 0, Fade( WHITE, .4f ) );
     }
-    EndMode2D(); EndScissorMode(); DrawRectangleLinesEx( viewport, 1, Border );
-}
-void statCard( Ui& ui, Rectangle r, const char* name, const std::string& value, Color color )
-{
-    ui.box( r ); ui.text( name, r.x + 12, r.y + 8, ui.small(), Muted, r.width - 24 );
-    ui.text( value, r.x + 12, r.y + 31 * ui.scale, 30 * ui.scale, color, r.width - 24 );
+    EndMode2D(); rlLoadIdentity(); EndScissorMode(); DrawRectangleLinesEx( viewport, 1, Border );
 }
 float paragraph( Ui& ui, const std::string& text, float x, float y, float width, Color color = Ink ) { return ui.wrap( text, x, y, width, ui.body(), color ) + 14 * ui.scale; }
 void drawHud( App& app, Ui& ui, const Layout& l, Texture2D atlas )
 {
     const auto& stats = app.sim.stats();
-    ui.text( app.mission < 0 ? "VexFactory / Free build" : TextFormat( "Chapter %02d / The Last Freight", app.mission + 1 ), 20, 10, ui.small(), Mint, l.width * .47f - 40 );
-    ui.text( app.mission < 0 ? "Sandbox" : missions()[app.mission].title, 20, 36 * app.scale, 27 * app.scale, Ink, l.width * .47f - 40 );
-    const char* state = app.sim.phase() == Phase::Planning ? "PLANNING / clock stopped" : app.paused ? "PAUSED / clock stopped" : "PRODUCTION LIVE";
-    ui.text( state, 20, 77 * app.scale, ui.small(), app.paused ? Gold : Mint, l.width * .47f - 40 );
-    const float start = l.width * .48f, cardWidth = ( l.width - start - 36 ) / 3;
-    const float height = 88 * app.scale;
-    statCard( ui, { start, 10, cardWidth, height }, app.mission < 0 ? "Freight/min" : "Credits", app.mission < 0 ? TextFormat( "%.1f", stats.perMinute ) : TextFormat( "%d", stats.credits ), Mint );
-    statCard( ui, { start + cardWidth + 10, 10, cardWidth, height }, "Power", app.mission < 0 ? "Free" : TextFormat( "%d/%d", stats.powerUsed, stats.powerLimit ), Gold );
-    const int seconds = std::max( 0, static_cast<int>( std::ceil( app.sim.scenario().deadline - stats.elapsed ) ) );
-    statCard( ui, { start + ( cardWidth + 10 ) * 2, 10, cardWidth, height }, app.mission < 0 ? "Sim time" : "Departure", TextFormat( "%d:%02d", app.mission < 0 ? static_cast<int>( stats.elapsed ) / 60 : seconds / 60, app.mission < 0 ? static_cast<int>( stats.elapsed ) % 60 : seconds % 60 ), app.mission >= 0 && seconds < 30 ? Coral : Ink );
+    DrawRectangleRec( rect( l.header ), Background ); DrawRectangleRec( rect( l.footer ), Background );
+    ui.text( app.mission < 0 ? "VexFactory / Sandbox" : TextFormat( "%02d / %s", app.mission + 1, missions()[app.mission].title ), 16, 8, ui.body(), Ink, l.width - 212 * app.scale - 40 );
+    if ( ui.button( { l.width - 202 * app.scale - 16, 4, 112 * app.scale, 36 * app.scale }, app.sim.phase() == Phase::Planning ? "Launch" : app.paused ? "Resume" : "Pause", !app.paused ) ) app.toggleRun();
+    if ( ui.button( { l.width - 82 * app.scale - 16, 4, 82 * app.scale, 36 * app.scale }, "Menu" ) ) { app.change( Screen::Pause ); app.save(); }
+    const float row = 8 + 40 * app.scale; float metricX = 16;
+    const int seconds = app.mission < 0 ? static_cast<int>( stats.elapsed ) : std::max( 0, static_cast<int>( std::ceil( app.sim.scenario().deadline - stats.elapsed ) ) );
+    const std::string values[] = { app.mission < 0 ? TextFormat( "%.1f/min", stats.perMinute ) : TextFormat( "$%d", stats.credits ), app.mission < 0 ? "Free build" : TextFormat( "%d/%d P", stats.powerUsed, stats.powerLimit ), TextFormat( "%d:%02d  %dx", seconds / 60, seconds % 60, app.speed ) };
+    const Color colors[] = { Mint, Gold, app.mission >= 0 && seconds < 30 ? Coral : Muted };
+    for ( int i = 0; i < 3; ++i ) { ui.text( values[i], metricX, row, ui.small(), colors[i] ); metricX += ui.measure( values[i], ui.small() ) + 20 * app.scale; }
+    std::string counts[ItemCount]; float ordersWidth = 0;
+    for ( int i = 0; i < ItemCount; ++i ) if ( app.mission < 0 || app.sim.scenario().goals[i] )
+    { counts[i] = app.mission < 0 ? TextFormat( "%u", stats.delivered[i] ) : TextFormat( "%u/%u", stats.delivered[i], app.sim.scenario().goals[i] ); ordersWidth += 38 * app.scale + ui.measure( counts[i], ui.small() ); }
+    const bool extraRow = l.header.height > 8 + 68 * app.scale + 1;
+    float ox = extraRow ? 16 : l.width - ordersWidth - 16, oy = extraRow ? row + 28 * app.scale : row;
+    for ( int i = 0; i < ItemCount; ++i ) if ( !counts[i].empty() )
+    { sprite( atlas, ItemTiles[i], { ox, oy, 22 * app.scale, 22 * app.scale } ); ui.text( counts[i], ox + 28 * app.scale, oy, ui.small(), ProductColors[i] ); ox += 38 * app.scale + ui.measure( counts[i], ui.small() ); }
+    constexpr Tool tools[] = { Tool::Belt, Tool::Miner, Tool::Smelter, Tool::Press, Tool::Assembler, Tool::Shipping, Tool::Splitter, Tool::Sorter, Tool::Generator, Tool::Erase };
+    const float hotbarWidth = 10 * 56 + 9 * 6, start = ( l.width - hotbarWidth ) / 2;
+    Tool shown = app.tool;
+    for ( int i = 0; i < 10; ++i )
+    {
+        const Tool t = tools[i]; const bool enabled = app.mission < 0 || ( ( app.sim.scenario().unlocked & toolBit( t ) ) && t != Tool::Shipping );
+        Rectangle button{ start + i * 62, l.footer.y + 4, 56, 52 };
+        const bool hover = ui.hit( button ); ui.box( button, app.tool == t ? Color{ 38, 73, 65, 255 } : hover && enabled ? Color{ 46, 60, 72, 255 } : Panel );
+        sprite( atlas, ToolTiles[static_cast<int>( t )], { button.x + 22, button.y + 18, 28, 28 }, t == Tool::Belt ? app.direction * 90.0f : 0, enabled ? WHITE : Color{ 100, 100, 100, 255 } );
+        ui.text( std::to_string( ( i + 1 ) % 10 ), button.x + 5, button.y + 2, std::min( 26.0f, 18 * app.scale ), enabled ? Ink : Muted );
+        if ( hover ) shown = t;
+        if ( hover && enabled && IsMouseButtonPressed( MOUSE_BUTTON_LEFT ) ) { app.tool = t; app.audio.play( 0, app.muted ); }
+    }
+    constexpr const char* directions[] = { "East", "South", "West", "North" };
+    const bool unlocked = app.mission < 0 || ( ( app.sim.scenario().unlocked & toolBit( shown ) ) && shown != Tool::Shipping );
+    const std::string selection = !unlocked ? std::string( toolName( shown ) ) + " / locked" : app.mission < 0 ? std::string( toolName( shown ) ) + " / " + directions[app.direction] : TextFormat( "%s / $%d / %dP / %s", toolName( shown ), costFor( shown ), powerFor( shown ), directions[app.direction] );
+    const float infoY = l.footer.y + 60, buttonWidth = 86 * app.scale, actions = 3 * ( buttonWidth + 6 );
+    ui.text( selection, 16, infoY + 2, ui.small(), unlocked ? Mint : Muted, l.width - actions - 48 );
+    Rectangle action{ l.width - actions - 16, infoY, buttonWidth, 28 * app.scale };
+    if ( ui.button( action, "Info", app.details && app.page == 0 ) ) { app.details = !( app.details && app.page == 0 ); app.page = 0; app.panelScroll = 0; } action.x += buttonWidth + 6;
+    if ( ui.button( action, "Orders", app.details && app.page == 1 ) ) { app.details = !( app.details && app.page == 1 ); app.page = 1; app.panelScroll = 0; } action.x += buttonWidth + 6;
+    if ( ui.button( action, "Fit" ) ) { app.fit = true; app.fitAll = true; }
+    if ( !app.details ) return;
     ui.box( rect( l.panel ) );
-    const char* tabs[] = { "Build", "Orders", "Inspect" };
-    for ( int i = 0; i < 3; ++i ) if ( ui.button( { l.panelTabs.x + i * l.panelTabs.width / 3, l.panelTabs.y, l.panelTabs.width / 3 - 4, l.panelTabs.height }, tabs[i], app.page == i ) ) { app.page = i; app.panelScroll = 0; }
+    const char* tabs[] = { "Info", "Orders", "Inspect" }; const float tabWidth = ( l.panelTabs.width - 42 * app.scale ) / 3;
+    for ( int i = 0; i < 3; ++i ) if ( ui.button( { l.panelTabs.x + i * tabWidth, l.panelTabs.y, tabWidth - 4, l.panelTabs.height }, tabs[i], app.page == i ) ) { app.page = i; app.panelScroll = 0; }
+    if ( ui.button( { l.panelTabs.x + l.panelTabs.width - 38 * app.scale, l.panelTabs.y, 38 * app.scale, l.panelTabs.height }, "X" ) ) app.details = false;
     const Rectangle body = rect( l.panelBody );
     if ( CheckCollisionPointRec( ui.mouse, body ) ) app.panelScroll = std::max( 0.0f, app.panelScroll - GetMouseWheelMove() * 46 * app.scale );
     ui.beginClip( body ); float y = body.y + 4 - app.panelScroll, x = body.x, width = body.width - 10;
     if ( app.page == 0 )
     {
-        constexpr Tool tools[] = { Tool::Belt, Tool::Miner, Tool::Smelter, Tool::Press, Tool::Assembler, Tool::Shipping, Tool::Splitter, Tool::Sorter, Tool::Generator, Tool::Erase };
-        constexpr const char* keys[] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "0" };
-        const float gap = 8, cw = ( width - gap ) / 2, rowHeight = 72 * app.scale;
-        for ( int i = 0; i < 10; ++i )
-        {
-            const Tool t = tools[i]; const bool enabled = app.mission < 0 || ( ( app.sim.scenario().unlocked & toolBit( t ) ) && t != Tool::Shipping );
-            Rectangle button{ x + ( i % 2 ) * ( cw + gap ), y + ( i / 2 ) * ( rowHeight + gap ), cw, rowHeight };
-            const bool hover = ui.hit( button ); ui.box( button, app.tool == t ? Color{ 38, 73, 65, 255 } : hover && enabled ? Color{ 46, 60, 72, 255 } : Background );
-            sprite( atlas, ToolTiles[static_cast<int>( t )], { button.x + 8, button.y + 9, 28 * app.scale, 28 * app.scale }, t == Tool::Belt ? app.direction * 90.0f : 0, enabled ? WHITE : Color{ 140, 140, 140, 255 } );
-            ui.text( toolName( t ), button.x + 42 * app.scale, button.y + 8, ui.small(), enabled ? Ink : Muted, cw - 48 * app.scale );
-            ui.text( app.mission < 0 ? std::string( keys[i] ) + " / free" : !enabled ? "Locked" : TextFormat( "%s / $%d  %dP", keys[i], costFor( t ), powerFor( t ) ), button.x + 10, button.y + 42 * app.scale, ui.small(), app.tool == t ? Mint : Muted, cw - 18 );
-            if ( hover && enabled && IsMouseButtonPressed( MOUSE_BUTTON_LEFT ) ) { app.tool = t; app.audio.play( 0, app.muted ); }
-        }
-        y += 5 * ( rowHeight + gap ) + 8;
-        constexpr const char* directions[] = { "East", "South", "West", "North" };
+        y += paragraph( ui, toolName( app.tool ), x, y, width, Mint );
+        if ( app.mission >= 0 ) y += paragraph( ui, TextFormat( "%d credits / %d power", costFor( app.tool ), powerFor( app.tool ) ), x, y, width, Gold );
         y += paragraph( ui, std::string( "Output: " ) + directions[app.direction] + ". R rotates the brush.", x, y, width, Gold );
         std::string recipe = app.tool == Tool::Miner ? "Miners need ore deposits. Their output needs a conveyor." : app.tool == Tool::Smelter ? "1 ore -> 1 plate" : app.tool == Tool::Press ? ( app.mission < 0 ? "1 plate -> 1 gear" : "2 plates -> 1 gear" ) : app.tool == Tool::Assembler ? ( app.mission < 0 ? "1 gear -> 1 engine" : "2 gears + 1 plate -> 1 engine. Feed both inputs from different sides." ) : app.tool == Tool::Splitter ? "Forward and left outputs alternate. A blocked exit sends cargo through the other exit." : app.tool == Tool::Sorter ? "Selected cargo goes forward; other cargo goes left. F changes the filter under the pointer." : app.tool == Tool::Generator ? "+12 power. You cannot remove power committed to machines." : app.tool == Tool::Erase ? "Demolition scraps cargo. Purchased parts refund 70-85%; free prefabs refund nothing." : "Drag straight conveyor runs. Items follow arrows. Right-click demolishes; Shift-click replaces.";
         y += paragraph( ui, recipe, x, y, width );
@@ -371,22 +402,6 @@ void drawHud( App& app, Ui& ui, const Layout& l, Texture2D atlas )
         const float thumb = std::max( 28.0f, body.height * body.height / content );
         DrawRectangleRec( { l.panel.x + l.panel.width - 6, body.y + ( body.height - thumb ) * app.panelScroll / std::max( 1.0f, content - body.height + 12 ), 3, thumb }, Mint );
     }
-    const float gap = 10, bw = ( l.width - 32 - gap * 4 ) / 5;
-    Rectangle b{ 16, l.footer.y + 8, bw, l.footer.height - 16 };
-    if ( ui.button( b, app.sim.phase() == Phase::Planning ? "Launch [Space]" : app.paused ? "Resume [Space]" : "Pause [Space]", !app.paused ) ) app.toggleRun(); b.x += bw + gap;
-    if ( ui.button( b, TextFormat( "Speed %dx [Tab]", app.speed ) ) ) app.speed = app.speed == 4 ? 1 : app.speed * 2; b.x += bw + gap;
-    if ( ui.button( b, "Fit [Home]" ) ) app.fit = true; b.x += bw + gap;
-    if ( ui.button( b, "Save" ) ) app.save( true ); b.x += bw + gap;
-    if ( ui.button( b, "Menu [Esc]" ) ) { app.change( Screen::Pause ); app.save(); }
-}
-void menuBackground( Texture2D atlas, const Layout& l )
-{
-    for ( int row = 0; row < 4; ++row )
-    {
-        const float y = l.height * .28f + row * 100;
-        for ( int x = static_cast<int>( l.width * .45f ); x < l.width + 40; x += 48 ) sprite( atlas, 26, { static_cast<float>( x ), y, 48, 48 }, 0, { 100, 120, 130, 50 } );
-        sprite( atlas, ItemTiles[row], { l.width * .7f + static_cast<float>( std::sin( GetTime() * .5 + row ) * 65 ), y + 7, 34, 34 }, 0, { 180, 200, 210, 100 } );
-    }
 }
 void menuHeading( Ui& ui, const Layout& l, const char* eyebrow, const char* title )
 {
@@ -404,17 +419,20 @@ void endScroll( App& app, Ui& ui, Rectangle body, float endY )
         ui.text( "Scroll for more", body.x + body.width - 150 * app.scale, body.y + body.height - 28 * app.scale, ui.small(), Mint, 150 * app.scale );
     }
 }
-void drawMenus( App& app, Ui& ui, const Layout& l, Texture2D atlas )
+Rectangle footerButton( const Layout& l, float preferredWidth, bool right = false )
 {
-    menuBackground( atlas, l );
+    const float width = std::min( preferredWidth * l.scale, ( l.width - 72 ) / 2 );
+    return { right ? l.width - width - 28 : 28, l.height - 62 * l.scale, width, 46 * l.scale };
+}
+void drawMenus( App& app, Ui& ui, const Layout& l )
+{
     const float bottom = l.height - 62 * app.scale, buttonHeight = 46 * app.scale;
     if ( app.screen == Screen::Title )
     {
         menuHeading( ui, l, "THE LAST FREIGHT", "VexFactory" );
-        ui.wrap( "The line is broken. The settlements are waiting. Build the factory that brings everyone home.", 28, 112 * app.scale, std::min( l.width - 56, 640 * app.scale ), ui.body(), Muted );
-        const float cw = std::min( 310 * app.scale, ( l.width - 76 ) / 2 ), gap = 16;
-        const float top = std::min( std::max( 210 * app.scale, l.height * .39f ), bottom - 3 * ( buttonHeight + 12 ) - 26 - ui.small() );
-        const char* titles[] = { "Continue factory [Enter]", "Campaign", "Sandbox", "Workshop", "How to play", "Quit" };
+        const Rectangle body = menuBody( l ); scrollInput( app, ui, body );
+        const float cw = std::min( 310 * app.scale, ( body.width - 16 ) / 2 ), gap = 16, top = body.y - app.scroll;
+        const char* titles[] = { "Continue factory", "Campaign", "Sandbox", "Workshop", "How to play", "Quit" };
         for ( int i = 0; i < 6; ++i )
         {
             Rectangle r{ 28 + ( i % 2 ) * ( cw + gap ), top + ( i / 2 ) * ( buttonHeight + 12 ), cw, buttonHeight };
@@ -428,10 +446,12 @@ void drawMenus( App& app, Ui& ui, const Layout& l, Texture2D atlas )
                 if ( i == 5 ) app.quit = true;
             }
         }
-        ui.text( TextFormat( "%d / 30 stars  |  %d workshop tokens", app.progress.totalStars(), app.progress.tokens ), 28, top + 3 * ( buttonHeight + 12 ) + 10, ui.small(), Gold, l.width - 56 );
-        if ( ui.button( { 28, bottom, 210 * app.scale, buttonHeight }, TextFormat( "Text %d%%", static_cast<int>( app.scale * 100 + .5f ) ) ) ) app.scale = app.scale < 1.1f ? 1.15f : app.scale < 1.25f ? 1.3f : 1;
-        if ( ui.button( { 248 * app.scale, bottom, 180 * app.scale, buttonHeight }, app.muted ? "Sound: off" : "Sound: on" ) ) app.muted = !app.muted;
-        ui.text( "Native UI / Retina support / Ctrl or Cmd +/- changes text", 28, l.height - 20, 18, Muted, l.width - 56 );
+        float y = top + 3 * ( buttonHeight + 12 ) + 10;
+        y += paragraph( ui, TextFormat( "%d / 30 stars  |  %d workshop tokens", app.progress.totalStars(), app.progress.tokens ), body.x, y, body.width, Gold );
+        y += paragraph( ui, "The line is broken. The settlements are waiting. Build the factory that brings everyone home.", body.x, y, body.width, Muted );
+        endScroll( app, ui, body, y );
+        if ( ui.button( footerButton( l, 210 ), TextFormat( "Text %d%%", static_cast<int>( app.scale * 100 + .5f ) ) ) ) app.scale = nextTextScale( app.scale );
+        if ( ui.button( footerButton( l, 180, true ), app.muted ? "Sound: off" : "Sound: on" ) ) app.muted = !app.muted;
     }
     else if ( app.screen == Screen::Campaign )
     {
@@ -464,7 +484,7 @@ void drawMenus( App& app, Ui& ui, const Layout& l, Texture2D atlas )
         y += paragraph( ui, TextFormat( "Bonus stars: finish within %d seconds; no scrap and net construction cost at most %d credits. You can plan and pause without spending dispatch time.", mission.parTime, mission.parCost ), body.x, y, width, Muted );
         endScroll( app, ui, body, y );
         if ( ui.button( { 28, bottom, 180 * app.scale, buttonHeight }, "Back" ) ) app.change( Screen::Campaign );
-        if ( ui.button( { l.width - 300 * app.scale - 28, bottom, 300 * app.scale, buttonHeight }, "Begin dispatch [Enter]", true ) ) { if ( app.active || app.saveBlocked ) app.request( Action::Begin ); else app.start( app.selected ); }
+        if ( ui.button( footerButton( l, 300, true ), "Begin dispatch", true ) ) { if ( app.active || app.saveBlocked ) app.request( Action::Begin ); else app.start( app.selected ); }
     }
     else if ( app.screen == Screen::Workshop )
     {
@@ -495,8 +515,8 @@ void drawMenus( App& app, Ui& ui, const Layout& l, Texture2D atlas )
             "Splitters alternate forward and left, using the other port when one is blocked. Sorters send their selected product forward and other cargo left. Point at a sorter and press F to change its filter.",
             "Docks are protected. Their cargo icon shows the requested product. Wrong cargo or a filled quota blocks incoming belts. Only needed deliveries pay credits; there is no surplus-income exploit.",
             "1-9 selects parts. 0 demolishes. R rotates the brush. E picks and inspects a tile. Alt-click inspects without building. Right-click demolishes. Shift-click replaces a different part. Drag to paint conveyors.",
-            "Space launches or pauses. Tab cycles production speed. Wheel over the floor zooms; middle-drag or WASD pans. Home fits the floor. Wheel over a panel scrolls its contents. The interface never shrinks with world zoom.",
-            "Ctrl/Cmd+Z undoes planning edits. Undo ends at launch. Ctrl/Cmd+S saves. Ctrl/Cmd +/- changes text size. M mutes sound. Esc opens the menu. F1 opens these notes.",
+            "Space launches or pauses. Tab cycles production speed. Wheel over the floor zooms; middle-drag or WASD pans. Home fits the floor. Wheel over a panel scrolls its contents. B opens part info. O opens orders. Esc closes details. The factory view stays full-width.",
+            "Ctrl/Cmd+Z undoes planning edits. Undo ends at launch. Ctrl/Cmd+S saves. Ctrl/Cmd +/- changes text size. M mutes sound. Esc closes details or opens the menu. F1 opens these notes.",
             "Demolition refunds 70% of the price you actually paid, rising to 85% with research. Ore in conveyors and machine buffers is scrapped. A failed dispatch can always be retried; campaign rewards and completed chapters remain.",
             "Saves live in your operating system's user-data directory, not the checkout. The game writes a backup, resumes a saved factory paused, and reports unreadable saves without discarding your running factory. Assets are still opt-in and stay outside Git."
         };
@@ -506,7 +526,8 @@ void drawMenus( App& app, Ui& ui, const Layout& l, Texture2D atlas )
     else if ( app.screen == Screen::Pause )
     {
         menuHeading( ui, l, "DISPATCH CLOCK STOPPED", "Factory menu" );
-        const float w = std::min( 360 * app.scale, ( l.width - 76 ) / 2 ), top = 128 * app.scale;
+        const Rectangle body = menuBody( l ); scrollInput( app, ui, body );
+        const float w = std::min( 360 * app.scale, ( body.width - 16 ) / 2 ), top = body.y - app.scroll;
         const char* names[] = { "Resume factory", "Save game", "Workshop", "Restart dispatch", "Campaign board", "How to play" };
         for ( int i = 0; i < 6; ++i ) if ( ui.button( { 28 + ( i % 2 ) * ( w + 16 ), top + ( i / 2 ) * ( buttonHeight + 14 ), w, buttonHeight }, names[i], i == 0 ) )
         {
@@ -516,18 +537,20 @@ void drawMenus( App& app, Ui& ui, const Layout& l, Texture2D atlas )
             if ( i == 5 ) { app.previous = Screen::Pause; app.change( Screen::Help ); }
         }
         const float settings = top + 3 * ( buttonHeight + 14 ) + 18;
-        if ( ui.button( { 28, settings, w, buttonHeight }, TextFormat( "Text size / %d%%", static_cast<int>( app.scale * 100 + .5f ) ) ) ) app.scale = app.scale < 1.1f ? 1.15f : app.scale < 1.25f ? 1.3f : 1;
+        if ( ui.button( { 28, settings, w, buttonHeight }, TextFormat( "Text size / %d%%", static_cast<int>( app.scale * 100 + .5f ) ) ) ) app.scale = nextTextScale( app.scale );
         if ( ui.button( { 44 + w, settings, w, buttonHeight }, app.muted ? "Sound / off" : "Sound / on" ) ) app.muted = !app.muted;
-        if ( ui.button( { 28, bottom, w, buttonHeight }, "Title menu" ) ) { app.save(); app.change( Screen::Title ); }
-        if ( ui.button( { l.width - w - 28, bottom, w, buttonHeight }, "Save and quit" ) ) { app.save(); app.quit = true; }
+        endScroll( app, ui, body, settings + buttonHeight + 16 );
+        if ( ui.button( footerButton( l, 360 ), "Title menu" ) ) { app.save(); app.change( Screen::Title ); }
+        if ( ui.button( footerButton( l, 360, true ), "Save and quit" ) ) { app.save(); app.quit = true; }
     }
     else if ( app.screen == Screen::Confirm )
     {
         menuHeading( ui, l, "CHECK YOUR MANIFEST", app.saveBlocked ? "Create a new save?" : app.confirmation == Action::EmptySandbox ? "Clear the sandbox floor?" : "Replace the current factory?" );
-        Rectangle body = menuBody( l );
-        ui.wrap( app.saveBlocked ? "The previous save could not be read. Starting this dispatch will preserve that file as campaign.sav.corrupt and create a new profile. Cancel keeps all files untouched." : app.confirmation == Action::EmptySandbox ? "This discards the sandbox layout and its cargo, then opens an empty floor paused. Your campaign progress remains unchanged." : "This discards the current factory, its cargo, and its dispatch timer. Your campaign medals and workshop upgrades remain. A restart restores the chapter's original budget and deposits.", body.x, body.y, body.width, ui.body(), Gold );
-        if ( ui.button( { 28, bottom, 210 * app.scale, buttonHeight }, "Cancel [Esc]" ) ) app.change( app.previous );
-        if ( ui.button( { l.width - 270 * app.scale - 28, bottom, 270 * app.scale, buttonHeight }, "Confirm [Enter]", true ) ) app.confirm();
+        Rectangle body = menuBody( l ); scrollInput( app, ui, body );
+        const float y = body.y - app.scroll; const float textHeight = ui.wrap( app.saveBlocked ? "The previous save could not be read. Starting this dispatch will preserve that file as campaign.sav.corrupt and create a new profile. Cancel keeps all files untouched." : app.confirmation == Action::EmptySandbox ? "This discards the sandbox layout and its cargo, then opens an empty floor paused. Your campaign progress remains unchanged." : "This discards the current factory, its cargo, and its dispatch timer. Your campaign medals and workshop upgrades remain. A restart restores the chapter's original budget and deposits.", body.x, y, body.width, ui.body(), Gold );
+        endScroll( app, ui, body, y + textHeight + 16 );
+        if ( ui.button( footerButton( l, 210 ), "Cancel [Esc]" ) ) app.change( app.previous );
+        if ( ui.button( footerButton( l, 270, true ), "Confirm [Enter]", true ) ) app.confirm();
     }
     else if ( app.screen == Screen::Result )
     {
@@ -544,8 +567,8 @@ void drawMenus( App& app, Ui& ui, const Layout& l, Texture2D atlas )
         }
         else y += paragraph( ui, "Your campaign progress is safe. Retry with a fresh budget and the same deposits. Plan before launch, then inspect buffers and dock requests when a route stops.", body.x, y, body.width, Muted );
         endScroll( app, ui, body, y );
-        if ( ui.button( { 28, bottom, 210 * app.scale, buttonHeight }, "Campaign board" ) ) app.change( Screen::Campaign );
-        if ( ui.button( { l.width - 300 * app.scale - 28, bottom, 300 * app.scale, buttonHeight }, won ? ( app.mission == 9 ? "Finish the story" : "Next dispatch" ) : "Retry dispatch", true ) )
+        if ( ui.button( footerButton( l, 210 ), "Campaign board" ) ) app.change( Screen::Campaign );
+        if ( ui.button( footerButton( l, 300, true ), won ? ( app.mission == 9 ? "Finish the story" : "Next dispatch" ) : "Retry dispatch", true ) )
         { if ( !won ) app.start( app.mission ); else if ( app.mission == 9 ) app.change( Screen::Ending ); else { app.selected = app.mission + 1; app.change( Screen::Briefing ); } }
     }
     else if ( app.screen == Screen::Ending )
@@ -556,8 +579,8 @@ void drawMenus( App& app, Ui& ui, const Layout& l, Texture2D atlas )
         y += paragraph( ui, TextFormat( "All ten dispatches cleared. %d of 30 stars earned.", app.progress.totalStars() ), body.x, y, body.width, Gold );
         if ( app.progress.totalStars() >= 27 ) y += paragraph( ui, "You leave a clean set of plans for the engineers who will rebuild Lumen. In the margins, someone has drawn a little sun.", body.x, y, body.width );
         y += paragraph( ui, "VexFactory: The Last Freight\nBuilt with Vecs, raylib and GLFW. Art: Kenney Tiny Factory, CC0. Interface font: your system's font. Music is the noise you made along the way.", body.x, y, body.width, Muted );
-        endScroll( app, ui, body, y ); if ( ui.button( { 28, bottom, 230 * app.scale, buttonHeight }, "Replay the campaign" ) ) app.change( Screen::Campaign );
-        if ( ui.button( { l.width - 230 * app.scale - 28, bottom, 230 * app.scale, buttonHeight }, "Title menu", true ) ) app.change( Screen::Title );
+        endScroll( app, ui, body, y ); if ( ui.button( footerButton( l, 230 ), "Replay campaign" ) ) app.change( Screen::Campaign );
+        if ( ui.button( footerButton( l, 230, true ), "Title menu", true ) ) app.change( Screen::Title );
     }
 }
 struct Options
@@ -581,7 +604,7 @@ int parse( int argc, char** argv, Options& o )
         {
             int major = 0, minor = 0, revision = 0; glfwGetVersion( &major, &minor, &revision );
             std::printf( "VexFactory: The Last Freight / raylib %s / GLFW %d.%d.%d\n", RAYLIB_VERSION, major, minor, revision );
-            std::puts( "--assets DIR  --save-dir DIR  --font FILE.ttf  --ui-scale 1.0..1.4\n--no-save  --no-audio  --mission 1..10  --size WIDTH HEIGHT  --frames N\n--smoke-test  --screenshot FILE.png  --screen title|campaign|briefing|play|ending\nSpace: launch/pause; 1-9: parts; R: rotate; F: sorter filter; E: inspect; Tab: speed.\nWheel: zoom/scroll; middle mouse/WASD: pan; Home: fit; Esc: menu; F1: help.\nCtrl/Cmd+S: save; Ctrl/Cmd+Z: planning undo; Ctrl/Cmd +/-: text size; M: mute.\nFetch artwork: cmake -P demos/vexfactory/fetch_assets.cmake" ); return 1;
+            std::puts( "--assets DIR  --save-dir DIR  --font FILE.ttf  --ui-scale 1.0..2.0\n--no-save  --no-audio  --mission 1..10  --size WIDTH HEIGHT  --frames N\n--smoke-test  --screenshot FILE.png  --screen title|campaign|briefing|play|ending\nSpace: launch/pause; 1-9: parts; R: rotate; F: sorter filter; E: inspect; Tab: speed.\nWheel: zoom/scroll; middle mouse/WASD: pan; Home: fit; B: info; O: orders; Esc: close/menu; F1: help.\nCtrl/Cmd+S: save; Ctrl/Cmd+Z: planning undo; Ctrl/Cmd +/-: text size; M: mute.\nFetch artwork: cmake -P demos/vexfactory/fetch_assets.cmake" ); return 1;
         }
         if ( argument == "--smoke-test" ) o.smoke = true;
         else if ( argument == "--no-save" ) o.noSave = true;
@@ -594,7 +617,7 @@ int parse( int argc, char** argv, Options& o )
         else if ( argument == "--frames" && i + 1 < argc ) { if ( !integer( argv[++i], o.frames, 1, 1000000 ) ) return -1; }
         else if ( argument == "--mission" && i + 1 < argc ) { if ( !integer( argv[++i], o.mission, 1, 10 ) ) return -1; --o.mission; }
         else if ( argument == "--size" && i + 2 < argc ) { if ( !integer( argv[++i], o.width, 960, 7680 ) || !integer( argv[++i], o.height, 640, 4320 ) ) return -1; }
-        else if ( argument == "--ui-scale" && i + 1 < argc ) { char* end = nullptr; o.scale = std::strtof( argv[++i], &end ); if ( *end || !std::isfinite( o.scale ) || o.scale < 1 || o.scale > 1.4f ) return -1; }
+        else if ( argument == "--ui-scale" && i + 1 < argc ) { char* end = nullptr; o.scale = std::strtof( argv[++i], &end ); if ( *end || !std::isfinite( o.scale ) || o.scale < MinUiScale || o.scale > MaxUiScale ) return -1; }
         else { std::fprintf( stderr, "Unknown or incomplete argument: %s\n", argv[i] ); return -1; }
     }
     if ( !o.scene.empty() && o.scene != "title" && o.scene != "campaign" && o.scene != "briefing" && o.scene != "play" && o.scene != "ending" ) return -1;
@@ -617,15 +640,23 @@ int main( int argc, char** argv )
     if ( !glfwInit() ) { const char* error = nullptr; glfwGetError( &error ); std::fprintf( stderr, "A desktop display is required: %s\n", error ? error : "GLFW initialization failed" ); UnloadImage( image ); return 1; }
     int count = 0; GLFWmonitor** monitors = glfwGetMonitors( &count );
     if ( !count ) { std::fprintf( stderr, "No desktop monitors found. Simulation tests need no display; Linux graphical tests can use Xvfb.\n" ); UnloadImage( image ); glfwTerminate(); return 1; }
-    const GLFWvidmode* mode = glfwGetVideoMode( monitors[0] );
-    if ( mode ) { options.width = std::min( options.width, std::max( 960, mode->width - 80 ) ); options.height = std::min( options.height, std::max( 640, mode->height - 100 ) ); }
+    int workX = 0, workY = 0, workWidth = 0, workHeight = 0; float contentX = 1, contentY = 1;
+    glfwGetMonitorWorkarea( monitors[0], &workX, &workY, &workWidth, &workHeight ); glfwGetMonitorContentScale( monitors[0], &contentX, &contentY );
+#if defined( __APPLE__ )
+    contentX = contentY = 1; // Cocoa's work area already uses logical points.
+#else
+    if ( glfwGetPlatform() == GLFW_PLATFORM_WAYLAND ) contentX = contentY = 1;
+#endif
+    if ( workWidth && workHeight ) { options.width = std::min( options.width, std::max( 960, static_cast<int>( workWidth / contentX ) - 80 ) ); options.height = std::min( options.height, std::max( 640, static_cast<int>( workHeight / contentY ) - 100 ) ); }
     SetConfigFlags( FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_VSYNC_HINT );
     InitWindow( options.width, options.height, "VexFactory: The Last Freight" );
     if ( !IsWindowReady() ) { UnloadImage( image ); return 1; }
     SetWindowMinSize( 960, 640 ); SetExitKey( KEY_NULL ); SetTargetFPS( 60 );
     Texture2D atlas = LoadTextureFromImage( image ); UnloadImage( image );
     if ( !IsTextureValid( atlas ) ) { CloseWindow(); return 1; } SetTextureFilter( atlas, TEXTURE_FILTER_POINT );
-    FontFace font; font.choose( options.font );
+    const Surface initialSurface = windowSurface();
+    SetWindowMinSize( static_cast<int>( 960 * initialSurface.windowWidth / initialSurface.width ), static_cast<int>( 640 * initialSurface.windowHeight / initialSurface.height ) );
+    FontFace font; font.choose( options.font, std::max( initialSurface.densityX(), initialSurface.densityY() ) );
     App app; app.noSave = options.noSave; app.saveDirectory = options.directory; app.load();
     if ( options.scale ) app.scale = options.scale;
     app.audio.initialize( options.noAudio || options.smoke ); app.saveClock = GetTime();
@@ -650,13 +681,15 @@ int main( int argc, char** argv )
     int frames = 0; bool screenshotWritten = options.screenshot.empty();
     while ( !WindowShouldClose() && !app.quit && ( !options.frames || frames < options.frames ) )
     {
-        font.update(); const float delta = std::min( GetFrameTime(), .15f );
+        app.surface = windowSurface(); app.mouse = logicalMouse( app.surface );
+        font.update( std::max( app.surface.densityX(), app.surface.densityY() ) ); const float delta = std::min( GetFrameTime(), .15f );
         app.toastTime = std::max( 0.0f, app.toastTime - delta );
-        Layout layout = Layout::make( static_cast<float>( GetScreenWidth() ), static_cast<float>( GetScreenHeight() ), app.scale ); fitCamera( app, layout );
+        Layout layout = Layout::make( app.surface.width, app.surface.height, app.scale ); fitCamera( app, layout );
         if ( !options.smoke )
         {
             globalInput( app );
-            layout = Layout::make( static_cast<float>( GetScreenWidth() ), static_cast<float>( GetScreenHeight() ), app.scale );
+            app.surface = windowSurface(); app.mouse = logicalMouse( app.surface );
+            layout = Layout::make( app.surface.width, app.surface.height, app.scale );
             fitCamera( app, layout ); worldInput( app, layout );
         }
         if ( app.screen == Screen::Playing && !app.paused && !options.smoke )
@@ -666,18 +699,18 @@ int main( int argc, char** argv )
             app.finish();
         }
         if ( GetTime() - app.saveClock > 20 ) app.save();
-        BeginDrawing(); ClearBackground( Background );
-        Ui ui{ font.font, app.scale, options.smoke ? Vector2{ -100, -100 } : GetMousePosition(), !options.smoke };
+        BeginDrawing(); ClearBackground( Background ); beginCanvas( app.surface );
+        Ui ui{ font.font, app.scale, options.smoke ? Vector2{ -100, -100 } : app.mouse, !options.smoke }; ui.surface = app.surface;
         if ( app.screen == Screen::Playing ) { drawFactory( app, layout, atlas ); drawHud( app, ui, layout, atlas ); }
-        else drawMenus( app, ui, layout, atlas );
+        else drawMenus( app, ui, layout );
         if ( app.toastTime > 0 )
         {
             const float width = std::min( layout.width - 32, 760.0f * app.scale );
             const float height = ui.wrap( app.toast, 0, 0, width - 28, ui.body(), Ink, false ) + 24;
             Rectangle r{ 16, layout.height - layout.footer.height - height - 12, width, height }; ui.box( r, { 34, 56, 64, 250 } ); ui.wrap( app.toast, r.x + 14, r.y + 12, width - 28, ui.body(), Ink );
         }
-        EndDrawing(); ++frames;
-        if ( frames == 1 ) { std::puts( "GAME: Ready" ); std::fflush( stdout ); }
+        endCanvas(); EndDrawing(); ++frames;
+        if ( frames == 1 ) { std::printf( "VIEW: logical %.0fx%.0f / window %.0fx%.0f / framebuffer %.0fx%.0f\nGAME: Ready\n", app.surface.width, app.surface.height, app.surface.windowWidth, app.surface.windowHeight, app.surface.framebufferWidth, app.surface.framebufferHeight ); std::fflush( stdout ); }
         if ( !options.screenshot.empty() && frames == options.frames ) { Image shot = LoadImageFromScreen(); screenshotWritten = ExportImage( shot, options.screenshot.c_str() ); UnloadImage( shot ); }
     }
     app.save(); app.audio.release(); font.release(); UnloadTexture( atlas ); CloseWindow();

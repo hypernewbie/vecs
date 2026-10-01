@@ -13,8 +13,11 @@ The implementation passed these local checks:
 - Persistence checks reject corrupt checksums, truncated files, invalid geometry, forged credit ledgers, and unprotected campaign docks.
 - Backup recovery preserves the previous valid profile.
 - X11 input testing completes the first chapter through actual mouse and keyboard input, reloads its factory, advances the campaign, and purchases research.
-- Native-resolution layout checks cover 960x640 through 1920x1080 with 100-140% text settings.
-- Software-rendered title, campaign, briefing, game, and ending screens render at 960x640 with 140% text.
+- Native-resolution layout checks cover 960x640 through 1920x1080 with 100-200% text settings.
+- Software-rendered title, campaign, briefing, game, and ending screens render at 960x640 with 200% text.
+- X11 input tests pass at 1x and 2x DPI, including borderless mode and clicks through optional detail panels.
+- Pixel probes check that conveyor placement changes the rendered tile under the pointer, not a smaller or offset map.
+- Coordinate tests cover Retina/Wayland points and Windows/X11 pixels at 1x, 1.5x, 2x, and 3x DPI.
 - The Windows Release ZIP includes the executable, CC0 tilemap, instructions, and library license notices.
 - The packaged Linux executable finds its nearby artwork and passes the graphical smoke check.
 - A default Vecs configuration and the asset-free test configuration do not download graphics dependencies.
@@ -28,9 +31,12 @@ The CI workflow includes macOS simulation, campaign, persistence, and layout tes
 It also compiles the graphical Cocoa/high-DPI game on macOS.
 A native Retina playtest is not replaced by those checks.
 
-The interface no longer uses the downscaled render-texture canvas from the demo.
-It draws in native logical coordinates, bakes the system font at framebuffer density, and keeps interface size independent of factory zoom.
+The factory view now uses the full window width, without a permanent sidebar or large status cards.
+Rendering and mouse input share an explicit logical projection.
+This corrects the earlier 2D-camera bug: raylib discarded DPI scaling during factory rendering, but input still used logical coordinates.
+The font atlas uses framebuffer density. Factory zoom does not change text size.
 macOS uses the system Arial font when available and accepts `--font FILE.ttf` as an override.
+Campaign data, production rules, and the existing version-1 save format remain unchanged.
 
 ## Deliberate limits
 

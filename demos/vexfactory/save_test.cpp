@@ -35,6 +35,9 @@ int main()
     CHECK( loadGame( directory, loaded, message ) ); CHECK( message.find( "backup" ) != std::string::npos ); CHECK( loaded.uiScale == game.uiScale );
     CHECK( saveGame( directory, second, message ) ); CHECK( loadGame( directory, loaded, message ) ); CHECK( loaded.uiScale == second.uiScale );
     CHECK( std::filesystem::exists( directory / "campaign.sav.corrupt" ) );
+    SaveGame largeText = game; largeText.uiScale = 2;
+    CHECK( decodeSave( encodeSave( largeText ), loaded, message ) ); CHECK( loaded.uiScale == 2 );
+    CHECK( decodeSave( bytes, loaded, message ) ); CHECK( loaded.uiScale == game.uiScale ); // Existing v1 profiles remain readable.
     const float before = loaded.uiScale;
     CHECK( !decodeSave( bytes.substr( 0, bytes.size() / 2 ), loaded, message ) ); CHECK( loaded.uiScale == before );
     std::string tampered = bytes; tampered.back() ^= 1; CHECK( !decodeSave( tampered, loaded, message ) );
@@ -48,6 +51,7 @@ int main()
     bad = game; bad.factory.phase = Phase::Won; bad.progress.reward( 0, 3, 20 ); CHECK( !decodeSave( encodeSave( bad ), loaded, message ) );
     bad = game; bad.progress.tokens = 100; CHECK( !decodeSave( encodeSave( bad ), loaded, message ) );
     bad = game; bad.uiScale = 0.1f; CHECK( !decodeSave( encodeSave( bad ), loaded, message ) );
+    bad = game; bad.uiScale = 2.1f; CHECK( !decodeSave( encodeSave( bad ), loaded, message ) );
     bad = game; bad.factory.stats.produced++; CHECK( !decodeSave( encodeSave( bad ), loaded, message ) );
     bad = game; bad.factory.buildings[0].cell.direction = 99; CHECK( !decodeSave( encodeSave( bad ), loaded, message ) );
     // Free tutorial parts cannot be demolished for cash or invalidate the save ledger.
