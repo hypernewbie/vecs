@@ -52,15 +52,18 @@ jobs:
       - name: Configure (Windows clang-cl)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: cmake -G Ninja -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} -B build .
+        run: cmake -G Ninja -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} -DBUILD_VEX_FACTORY_TESTS=ON -B build .
 
       - name: Configure (Linux/macOS clang)
         if: runner.os != 'Windows'
         shell: bash
-        run: cmake -G Ninja -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} -B build .
+        run: cmake -G Ninja -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} -DBUILD_VEX_FACTORY_TESTS=ON -B build .
 
       - name: Build
         run: cmake --build build
+
+      - name: VexFactory simulation tests (no assets or graphics dependencies)
+        run: ctest --test-dir build --output-on-failure
 
       - name: Test (Windows)
         if: runner.os == 'Windows'

@@ -1,3 +1,6 @@
+# Local demo assets, dependencies, and scratch builds
+temp/
+
 # Build outputs
 build/
 build_release/

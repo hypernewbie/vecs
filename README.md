@@ -236,6 +236,13 @@ cmake --build build
 ./build/vecs_test
 ```
 
+## VexFactory Demo
+
+[VexFactory](demos/vexfactory/README.md) is a graphical factory sandbox with conveyors, three recipes, and shipping contracts.
+It uses Vecs, raylib, and Kenney's CC0 Tiny Factory pack.
+The demo is opt-in. A normal Vecs build does not download its dependencies or artwork.
+Assets and scratch builds stay in the gitignored `temp/` directory.
+
 ## Debugger Visualizations
 
 Vecs includes a `.natvis` file for enhanced debugging in Visual Studio. The visualizers provide human‑readable views of entity IDs, component pools, relationships, queries, and command buffers.
