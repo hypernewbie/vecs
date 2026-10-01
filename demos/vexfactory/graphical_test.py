@@ -44,6 +44,10 @@ for name, types in {
 }.items():
     getattr(t, name).argtypes = types
 
+class WindowAttributes(c.Structure):
+    _fields_ = [("x", c.c_int), ("y", c.c_int), ("width", c.c_int), ("height", c.c_int), ("border_width", c.c_int), ("depth", c.c_int), ("visual", c.c_void_p), ("root", c.c_ulong), ("window_class", c.c_int), ("bit_gravity", c.c_int), ("win_gravity", c.c_int), ("backing_store", c.c_int), ("backing_planes", c.c_ulong), ("backing_pixel", c.c_ulong), ("save_under", c.c_int), ("colormap", c.c_ulong), ("map_installed", c.c_int), ("map_state", c.c_int), ("all_event_masks", c.c_long), ("your_event_mask", c.c_long), ("do_not_propagate_mask", c.c_long), ("override_redirect", c.c_int), ("screen", c.c_void_p)]
+
+x.XGetWindowAttributes.argtypes = [c.c_void_p, c.c_ulong, c.POINTER(WindowAttributes)]
 display = x.XOpenDisplay(None)
 assert display, "An X11 display is required. Run this test through xvfb-run."
 root = x.XDefaultRootWindow(display)
@@ -89,11 +93,12 @@ def click(px, py):
 
 def start(number):
     global process
-    log = (output / ("run-%d.log" % number)).open("w")
+    log_path = output / ("run-%d.log" % number)
+    log = log_path.open("w")
     logs.append(log)
     process = subprocess.Popen([str(args.binary.resolve()), "--size", "960", "640", "--save-dir", str(profile), "--no-audio", "--frames", "3600"], stdout=log, stderr=subprocess.STDOUT)
     window = 0
-    deadline = time.monotonic() + 12
+    deadline = time.monotonic() + 45
     while time.monotonic() < deadline:
         children = c.POINTER(c.c_ulong)()
         count, rr, parent = c.c_uint(), c.c_ulong(), c.c_ulong()
@@ -111,7 +116,18 @@ def start(number):
         assert process.poll() is None, "The game exited before opening its window."
         time.sleep(.05)
     assert window, "No game window found."
-    time.sleep(.7)
+    # GLFW assigns the title before it has created the GL context and mapped
+    # the window. A fixed delay races cold llvmpipe initialization on CI.
+    ready = False
+    while time.monotonic() < deadline:
+        assert process.poll() is None, "The game exited during initialization."
+        attributes = WindowAttributes()
+        mapped = x.XGetWindowAttributes(display, window, c.byref(attributes)) and attributes.map_state == 2
+        if mapped and b"GAME: Ready" in log_path.read_bytes():
+            ready = True
+            break
+        time.sleep(.05)
+    assert ready, "The window or renderer did not become ready within 45 seconds."
     x.XMoveWindow(display, window, 0, 0)
     x.XSetInputFocus(display, window, 1, 0)
     x.XFlush(display)

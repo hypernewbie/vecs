@@ -677,6 +677,7 @@ int main( int argc, char** argv )
             Rectangle r{ 16, layout.height - layout.footer.height - height - 12, width, height }; ui.box( r, { 34, 56, 64, 250 } ); ui.wrap( app.toast, r.x + 14, r.y + 12, width - 28, ui.body(), Ink );
         }
         EndDrawing(); ++frames;
+        if ( frames == 1 ) { std::puts( "GAME: Ready" ); std::fflush( stdout ); }
         if ( !options.screenshot.empty() && frames == options.frames ) { Image shot = LoadImageFromScreen(); screenshotWritten = ExportImage( shot, options.screenshot.c_str() ); UnloadImage( shot ); }
     }
     app.save(); app.audio.release(); font.release(); UnloadTexture( atlas ); CloseWindow();
