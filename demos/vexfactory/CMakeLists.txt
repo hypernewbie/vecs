@@ -1,6 +1,12 @@
 add_executable( vex_factory_test simulation_test.cpp )
 target_include_directories( vex_factory_test PRIVATE "${PROJECT_SOURCE_DIR}" )
 add_test( NAME vex_factory_simulation COMMAND vex_factory_test )
+add_executable( vex_factory_campaign_test campaign_test.cpp )
+target_include_directories( vex_factory_campaign_test PRIVATE "${PROJECT_SOURCE_DIR}" )
+add_test( NAME vex_factory_campaign COMMAND vex_factory_campaign_test )
+add_executable( vex_factory_save_test save_test.cpp )
+target_include_directories( vex_factory_save_test PRIVATE "${PROJECT_SOURCE_DIR}" )
+add_test( NAME vex_factory_persistence COMMAND vex_factory_save_test )
 
 if ( NOT BUILD_VEX_FACTORY )
     return()
