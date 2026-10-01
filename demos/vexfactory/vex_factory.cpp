@@ -343,6 +343,9 @@ int main( int argc, char** argv )
         }
         else if ( std::strcmp( argv[i], "--help" ) == 0 )
         {
+            int major = 0, minor = 0, revision = 0;
+            glfwGetVersion( &major, &minor, &revision );
+            std::printf( "VexFactory / raylib %s / GLFW %d.%d.%d\n", RAYLIB_VERSION, major, minor, revision );
             std::puts( "VexFactory [--assets DIR] [--smoke-test] [--screenshot FILE.png] [--frames N]\n"
                 "1-6: parts; 0: erase; R: rotate output; E: pick hovered part; space: pause; tab: speed.\n"
                 "L: reload starter; N: empty floor; right mouse: erase; escape: close/cancel.\n"
@@ -367,8 +370,8 @@ int main( int argc, char** argv )
         if ( image.data ) UnloadImage( image );
         return 1;
     }
-    // raylib 5.5 can continue into GL setup after platform initialization fails.
-    // Reject monitor-less desktops first rather than crash inside the library.
+    // Check for an available desktop before starting the graphics context.
+    // Monitor-less hosts can still run the asset-free simulation tests.
     if ( !glfwInit() )
     {
         const char* error = nullptr;
@@ -446,7 +449,7 @@ int main( int argc, char** argv )
         ++frames;
         if ( !screenshot.empty() && frames == frameLimit )
         {
-            // TakeScreenshot strips directory components in raylib 5.5.
+            // Export directly so the requested directory and error result survive.
             Image shot = LoadImageFromScreen();
             screenshotWritten = ExportImage( shot, screenshot.c_str() );
             UnloadImage( shot );

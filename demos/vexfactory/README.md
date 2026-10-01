@@ -12,7 +12,7 @@ Parts are unlimited. Miners do not need deposits, power, or fuel.
 ## Build and run
 
 Run these commands from the Vecs repository root.
-The graphical build needs CMake 3.20+, Ninja, a C/C++ compiler, and desktop OpenGL 3.3.
+The graphical build needs CMake 3.25+, Ninja, a C/C++ compiler, and desktop OpenGL 3.3.
 
 ### Windows
 
@@ -39,9 +39,11 @@ cmake --build temp/vexfactory-build --target vex_factory vex_factory_assets
 ## Downloads and assets
 
 Both VexFactory build flags default to `OFF`.
-A normal Vecs configure or build does not fetch raylib or artwork.
-The graphical flag fetches raylib 5.5 with a pinned SHA-256 checksum.
-CMake stores raylib inside the build directory.
+A normal Vecs configure or build does not fetch graphics libraries or artwork.
+The graphical flag fetches raylib 6.0 and GLFW 3.5.1 with pinned SHA-256 checksums.
+Raylib uses this GLFW target instead of its older bundled copy.
+CMake stores both libraries inside the build directory.
+On Linux, X11 is the default backend. You can also enable Wayland with `-DGLFW_BUILD_WAYLAND=ON`.
 
 The artwork download is separate from compilation.
 Only the explicit `vex_factory_assets` target downloads the artwork.
@@ -123,7 +125,8 @@ Vecs currently has no command-buffer API despite the older examples in the main 
 The demo queues creation, destruction, and tag changes until query callbacks return.
 No component pointers survive a structural change.
 
-Build the simulation tests without any demo downloads:
+The asset-free simulation tests retain the Vecs minimum of CMake 3.20.
+Build these tests without any demo downloads:
 
 ```sh
 cmake -S . -B temp/vexfactory-tests -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=clang++ -DBUILD_VEX_FACTORY_TESTS=ON
