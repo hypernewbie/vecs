@@ -100,7 +100,7 @@ jobs:
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s '-screen 0 3200x2000x24 -noreset' python3 demos/vexfactory/graphical_test.py temp/vexfactory-ci/demos/vexfactory/vex_factory --density 2
       - name: Check small-window large-text story and game screens
         run: |
-          for screen in title campaign briefing play ending; do
+          for screen in title campaign briefing play pause settings workshop help ending; do
             LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a temp/vexfactory-ci/demos/vexfactory/vex_factory --size 960 640 --ui-scale 2 --mission 5 --screen "$screen" --screenshot "temp/vexfactory/graphical-tests/$screen.png"
           done
       - uses: actions/upload-artifact@v4

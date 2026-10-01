@@ -69,7 +69,7 @@ cmake --build temp/vexfactory-build --target vex_factory vex_factory_assets
 
 GLFW uses Cocoa on macOS.
 The window enables high-DPI support.
-The interface uses a system font, baked at the current framebuffer density.
+The interface uses the downloaded Kenney pixel fonts, with glyphs aligned to framebuffer pixels.
 A native Retina playtest is still separate from compilation and software-rendered layout tests.
 
 ### Linux
@@ -97,20 +97,23 @@ Default factory tiles are at least 40 logical pixels wide.
 Home or the Fit button fits the entire floor. The wheel changes factory zoom without changing text size.
 Paragraphs wrap, and long menus scroll.
 
-Use the text-size button on the title or pause menu.
+Open Settings from the title or pause menu to change text size.
 You can also use `Ctrl/Cmd` with `+` or `-`, or start with `--ui-scale 1.5`.
 The supported text scale is 100-200%. Existing campaign saves remain readable.
 
-The game uses Segoe UI on Windows, Arial on macOS, and DejaVu Sans or Liberation Sans on Linux.
-It does not copy or distribute these fonts.
-If no suitable system font is present, the game uses raylib's default font.
-Use `--font FILE.ttf` to select a different installed font.
+The game uses **Kenney Pixel** for text and **Kenney Pixel Square** for the logo.
+Both fonts have a CC0 license and come from the optional asset download.
+Glyphs use nearest-neighbor sampling and align to physical pixels, including on Retina displays.
+The menus use cream text, an amber arrow selector, and a vertical list, without filled cards.
+Up and Down select a menu entry. Enter activates it. The mouse also works.
+Use `--font FILE.ttf` to select a different font for body text.
 
 ## Controls
 
 | Control | Action |
 | --- | --- |
-| `Enter` | Continue, begin a briefing, or confirm the current dispatch action |
+| Up / Down in menus | Select a menu entry |
+| `Enter` | Activate the selected entry, begin a briefing, or confirm a dispatch action |
 | `1`-`5` | Conveyor, miner, smelter, gear press, assembler |
 | `6` | Freight dock in the sandbox. Campaign docks are protected. |
 | `7`-`9` | Splitter, sorter, generator |
@@ -140,7 +143,8 @@ Use `--font FILE.ttf` to select a different installed font.
 | `F1` | Open the field notes |
 | `Esc` | Close details, open the pause menu, or return from a menu |
 
-The title menu includes the campaign, workshop, field notes, and classic sandbox.
+The title menu includes Continue, Play campaign, Sandbox, Settings, and Quit.
+Settings includes text size, sound, and the field notes.
 The pause menu includes save, restart, research, and return to the campaign board.
 Restart and replacement actions require confirmation.
 
@@ -219,6 +223,9 @@ cmake -P demos/vexfactory/fetch_assets.cmake
 The script downloads [Kenney Tiny Factory 1.0](https://kenney.nl/assets/tiny-factory), checks its SHA-256 checksum, and extracts the pack.
 The ZIP is about 90 KB and has a CC0 license.
 The script keeps its original `License.txt`.
+It also downloads [Kenney Fonts](https://kenney.nl/assets/kenney-fonts), with a pinned SHA-256 checksum.
+That ZIP is about 58 KB. The script extracts only the two pixel fonts and their CC0 license into `Fonts/`.
+If you already downloaded the older artwork-only pack, run the command again to get the fonts.
 
 The default asset directory is `temp/vexfactory/assets`.
 Git ignores `temp/`, including builds, packages, and screenshots.
@@ -231,9 +238,9 @@ To create a platform-specific ZIP from a Release build:
 cmake --build temp/vexfactory-build --target vex_factory_package
 ```
 
-This explicit target also fetches the artwork.
+This explicit target also fetches the artwork and pixel fonts.
 The archive contains the executable, its nearby `assets/` folder, instructions, and license notices.
-It does not contain system fonts or player saves.
+It contains the two CC0 pixel fonts and their original license. It does not contain player saves.
 The output is in the build directory's `vexfactory-dist/` folder.
 This is an archive, not an installer or a notarized macOS application.
 Linux recipients also need the libc++ runtime and desktop OpenGL.

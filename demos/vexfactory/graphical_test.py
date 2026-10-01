@@ -211,6 +211,16 @@ def pixel(px, py):
 
 try:
     window = start(1)
+    capture("pixel-title-%dx" % args.density, 960, 640)
+    key("Down")
+    key("Down")
+    key("Return")  # Settings via the vertical title menu.
+    capture("pixel-settings", 960, 640)
+    key("Down")
+    key("Down")
+    key("Return")  # Field notes from settings.
+    key("Escape")  # Back to settings.
+    key("Escape")  # Back to title, without changing the active profile.
     key("Return")  # New campaign briefing.
     key("Return")  # Planning phase, with the free miner and two prefabricated belts.
     before = snapshot()
@@ -305,14 +315,15 @@ try:
     assert next_chapter["credits"] == 420 and next_chapter["stars"][0] == 3
     key("Escape")
     click(244, 250)  # Workshop from pause menu at 120% text.
-    click(1095, 197)  # Buy tier one conveyor bearings.
+    capture("pixel-workshop", 1280, 720)
+    click(1200, 197)  # Buy tier one conveyor bearings; the font determines label width.
     upgraded = snapshot()
     assert upgraded["tokens"] == 3 and upgraded["upgrades"][0] == 1
     assert upgraded["factory_tiers"][0] == 0  # Upgrades apply to the next dispatch.
     key("Escape")  # Back to pause.
     click(1036, 673)  # Save and quit at 1280x720 / 120% text.
     assert process.wait(timeout=5) == 0
-    print("Graphical campaign test passed at %dx DPI: minimal HUD, rendered/clicked tile alignment, planning, fast paint, undo, production, atomic save/reload, resize, large text, zoom, victory, next chapter, confirmation and research." % args.density)
+    print("Graphical campaign test passed at %dx DPI: pixel menus, keyboard navigation, minimal HUD, rendered/clicked tile alignment, planning, fast paint, undo, production, atomic save/reload, resize, large text, zoom, victory, next chapter, confirmation and research." % args.density)
     print("Artifacts:", output)
 finally:
     if process is not None and process.poll() is None:

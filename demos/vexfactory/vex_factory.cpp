@@ -13,7 +13,7 @@
 using namespace vexfactory;
 namespace
 {
-enum class Screen { Title, Campaign, Briefing, Playing, Pause, Workshop, Help, Result, Ending, Confirm };
+enum class Screen { Title, Campaign, Briefing, Playing, Pause, Workshop, Help, Result, Ending, Confirm, Settings };
 enum class Action { Restart, Sandbox, EmptySandbox, Begin };
 Surface windowSurface()
 {
@@ -31,9 +31,9 @@ struct App
 {
     Simulation sim;
     Progress progress;
-    Screen screen = Screen::Title, previous = Screen::Title;
+    Screen screen = Screen::Title, previous = Screen::Title, settingsFrom = Screen::Title;
     Action confirmation = Action::Restart;
-    int mission = -1, selected = 0, speed = 1, page = 1, direction = 0;
+    int mission = -1, selected = 0, speed = 1, page = 1, direction = 0, menuIndex = 1;
     int hoverX = -1, hoverY = -1, lastX = -1, lastY = -1;
     Tool tool = Tool::Belt;
     bool active = false, paused = true, quit = false, muted = false, noSave = false, saveBlocked = false, fit = true, fitAll = false, details = false, strokeSaved = false;
@@ -46,7 +46,7 @@ struct App
     std::vector<FactoryState> undo;
     Audio audio;
     void message( const std::string& text ) { toast = text; toastTime = 6; }
-    void change( Screen next ) { screen = next; scroll = 0; accumulator = 0; lastX = lastY = -1; }
+    void change( Screen next ) { screen = next; scroll = 0; accumulator = 0; lastX = lastY = -1; menuIndex = next == Screen::Title && !active ? 1 : 0; }
     SaveGame capture()
     {
         SaveGame game; game.progress = progress; game.hasFactory = active; game.mission = mission;
@@ -66,7 +66,7 @@ struct App
         SaveGame game; std::string status;
         if ( !loadGame( saveDirectory, game, status ) ) { saveBlocked = true; message( "Previous save cannot be read. Its files remain untouched." ); return; }
         progress = game.progress; muted = game.muted; scale = game.uiScale;
-        if ( game.hasFactory && sim.restore( game.factory ) ) { active = true; mission = game.mission; paused = true; }
+        if ( game.hasFactory && sim.restore( game.factory ) ) { active = true; mission = game.mission; paused = true; menuIndex = 0; }
         if ( !status.empty() ) message( status );
     }
     void start( int id, bool emptySandbox = false )
@@ -98,10 +98,39 @@ struct App
         else if ( sim.phase() == Phase::Lost ) { audio.play( 2, muted ); paused = true; change( Screen::Result ); save(); }
     }
 };
+int orderKinds( const App& app )
+{
+    if ( app.mission < 0 ) return ItemCount;
+    int count = 0; for ( uint32_t goal : app.sim.scenario().goals ) count += goal != 0; return count;
+}
 void fitCamera( App& app, const Layout& layout )
 {
     app.camera.offset = { layout.world.x + layout.world.width / 2, layout.world.y + layout.world.height / 2 };
     if ( app.fit ) { app.camera.target = { Width / 2.0f, Height / 2.0f }; app.camera.zoom = layout.tileSize( Width, Height, app.fitAll ); }
+}
+void titleAction( App& app, int item )
+{
+    if ( item == 0 && app.active ) app.resume();
+    if ( item == 1 ) { app.selected = app.progress.unlocked(); app.change( app.active ? Screen::Campaign : Screen::Briefing ); }
+    if ( item == 2 ) { if ( app.active ) app.request( Action::Sandbox ); else app.start( -1 ); }
+    if ( item == 3 ) { app.settingsFrom = Screen::Title; app.change( Screen::Settings ); }
+    if ( item == 4 ) app.quit = true;
+}
+void pauseAction( App& app, int item )
+{
+    if ( item == 0 ) app.change( Screen::Playing ); if ( item == 1 ) app.save( true );
+    if ( item == 2 ) { app.previous = Screen::Pause; app.change( Screen::Workshop ); }
+    if ( item == 3 ) app.request( Action::Restart );
+    if ( item == 4 ) { app.save(); app.change( Screen::Campaign ); }
+    if ( item == 5 ) { app.previous = Screen::Pause; app.change( Screen::Help ); }
+    if ( item == 6 ) { app.settingsFrom = Screen::Pause; app.change( Screen::Settings ); }
+}
+void settingsAction( App& app, int item )
+{
+    if ( item == 0 ) app.scale = nextTextScale( app.scale );
+    if ( item == 1 ) app.muted = !app.muted;
+    if ( item == 2 ) { app.previous = Screen::Settings; app.change( Screen::Help ); }
+    if ( item == 3 ) { app.save(); app.change( app.settingsFrom ); }
 }
 void globalInput( App& app )
 {
@@ -117,14 +146,24 @@ void globalInput( App& app )
         if ( app.screen == Screen::Playing && app.details ) app.details = false;
         else if ( app.screen == Screen::Playing ) { app.change( Screen::Pause ); app.save(); }
         else if ( app.screen == Screen::Pause ) app.change( Screen::Playing );
+        else if ( app.screen == Screen::Settings ) { app.save(); app.change( app.settingsFrom ); }
         else if ( app.screen == Screen::Confirm || app.screen == Screen::Help || app.screen == Screen::Workshop ) app.change( app.previous );
         else if ( app.screen == Screen::Briefing ) app.change( Screen::Campaign );
         else if ( app.screen == Screen::Title ) app.quit = true;
         else app.change( Screen::Title );
     }
+    if ( IsKeyPressed( KEY_UP ) || IsKeyPressed( KEY_DOWN ) )
+    {
+        const int step = IsKeyPressed( KEY_UP ) ? -1 : 1;
+        const int count = app.screen == Screen::Title ? 5 : app.screen == Screen::Pause ? 7 : app.screen == Screen::Settings ? 4 : 0;
+        if ( count ) { app.menuIndex = ( app.menuIndex + count + step ) % count; if ( app.screen == Screen::Title && !app.active && app.menuIndex == 0 ) app.menuIndex = step > 0 ? 1 : count - 1; }
+        if ( app.screen == Screen::Campaign ) app.selected = std::clamp( app.selected + step, 0, app.progress.unlocked() );
+    }
     if ( IsKeyPressed( KEY_ENTER ) )
     {
-        if ( app.screen == Screen::Title ) { if ( app.active ) app.resume(); else { app.selected = app.progress.unlocked(); app.change( Screen::Briefing ); } }
+        if ( app.screen == Screen::Title ) titleAction( app, app.menuIndex );
+        else if ( app.screen == Screen::Pause ) pauseAction( app, app.menuIndex );
+        else if ( app.screen == Screen::Settings ) settingsAction( app, app.menuIndex );
         else if ( app.screen == Screen::Campaign ) app.change( Screen::Briefing );
         else if ( app.screen == Screen::Briefing ) { if ( app.active || app.saveBlocked ) app.request( Action::Begin ); else app.start( app.selected ); }
         else if ( app.screen == Screen::Confirm ) app.confirm();
@@ -290,13 +329,15 @@ void drawHud( App& app, Ui& ui, const Layout& l, Texture2D atlas )
 {
     const auto& stats = app.sim.stats();
     DrawRectangleRec( rect( l.header ), Background ); DrawRectangleRec( rect( l.footer ), Background );
-    ui.text( app.mission < 0 ? "VexFactory / Sandbox" : TextFormat( "%02d / %s", app.mission + 1, missions()[app.mission].title ), 16, 8, ui.body(), Ink, l.width - 212 * app.scale - 40 );
-    if ( ui.button( { l.width - 202 * app.scale - 16, 4, 112 * app.scale, 36 * app.scale }, app.sim.phase() == Phase::Planning ? "Launch" : app.paused ? "Resume" : "Pause", !app.paused ) ) app.toggleRun();
-    if ( ui.button( { l.width - 82 * app.scale - 16, 4, 82 * app.scale, 36 * app.scale }, "Menu" ) ) { app.change( Screen::Pause ); app.save(); }
+    const std::string run = app.sim.phase() == Phase::Planning ? "Launch" : app.paused ? "Resume" : "Pause";
+    const float menuWidth = ui.measure( "Menu", ui.small() ) + 24 * app.scale, runWidth = ui.measure( run, ui.small() ) + 24 * app.scale;
+    ui.text( app.mission < 0 ? "VexFactory / Sandbox" : TextFormat( "%02d / %s", app.mission + 1, missions()[app.mission].title ), 16, 8, ui.body(), Ink, l.width - menuWidth - runWidth - 48 );
+    if ( ui.button( { l.width - menuWidth - runWidth - 24, 4, runWidth, 36 * app.scale }, run, !app.paused ) ) app.toggleRun();
+    if ( ui.button( { l.width - menuWidth - 16, 4, menuWidth, 36 * app.scale }, "Menu" ) ) { app.change( Screen::Pause ); app.save(); }
     const float row = 8 + 40 * app.scale; float metricX = 16;
     const int seconds = app.mission < 0 ? static_cast<int>( stats.elapsed ) : std::max( 0, static_cast<int>( std::ceil( app.sim.scenario().deadline - stats.elapsed ) ) );
     const std::string values[] = { app.mission < 0 ? TextFormat( "%.1f/min", stats.perMinute ) : TextFormat( "$%d", stats.credits ), app.mission < 0 ? "Free build" : TextFormat( "%d/%d P", stats.powerUsed, stats.powerLimit ), TextFormat( "%d:%02d  %dx", seconds / 60, seconds % 60, app.speed ) };
-    const Color colors[] = { Mint, Gold, app.mission >= 0 && seconds < 30 ? Coral : Muted };
+    const Color colors[] = { Ink, Gold, app.mission >= 0 && seconds < 30 ? Coral : Muted };
     for ( int i = 0; i < 3; ++i ) { ui.text( values[i], metricX, row, ui.small(), colors[i] ); metricX += ui.measure( values[i], ui.small() ) + 20 * app.scale; }
     std::string counts[ItemCount]; float ordersWidth = 0;
     for ( int i = 0; i < ItemCount; ++i ) if ( app.mission < 0 || app.sim.scenario().goals[i] )
@@ -312,7 +353,7 @@ void drawHud( App& app, Ui& ui, const Layout& l, Texture2D atlas )
     {
         const Tool t = tools[i]; const bool enabled = app.mission < 0 || ( ( app.sim.scenario().unlocked & toolBit( t ) ) && t != Tool::Shipping );
         Rectangle button{ start + i * 62, l.footer.y + 4, 56, 52 };
-        const bool hover = ui.hit( button ); ui.box( button, app.tool == t ? Color{ 38, 73, 65, 255 } : hover && enabled ? Color{ 46, 60, 72, 255 } : Panel );
+        const bool hover = ui.hit( button ); ui.box( button, app.tool == t ? Color{ 65, 49, 39, 255 } : hover && enabled ? Color{ 49, 43, 39, 255 } : Panel );
         sprite( atlas, ToolTiles[static_cast<int>( t )], { button.x + 22, button.y + 18, 28, 28 }, t == Tool::Belt ? app.direction * 90.0f : 0, enabled ? WHITE : Color{ 100, 100, 100, 255 } );
         ui.text( std::to_string( ( i + 1 ) % 10 ), button.x + 5, button.y + 2, std::min( 26.0f, 18 * app.scale ), enabled ? Ink : Muted );
         if ( hover ) shown = t;
@@ -321,16 +362,17 @@ void drawHud( App& app, Ui& ui, const Layout& l, Texture2D atlas )
     constexpr const char* directions[] = { "East", "South", "West", "North" };
     const bool unlocked = app.mission < 0 || ( ( app.sim.scenario().unlocked & toolBit( shown ) ) && shown != Tool::Shipping );
     const std::string selection = !unlocked ? std::string( toolName( shown ) ) + " / locked" : app.mission < 0 ? std::string( toolName( shown ) ) + " / " + directions[app.direction] : TextFormat( "%s / $%d / %dP / %s", toolName( shown ), costFor( shown ), powerFor( shown ), directions[app.direction] );
-    const float infoY = l.footer.y + 60, buttonWidth = 86 * app.scale, actions = 3 * ( buttonWidth + 6 );
-    ui.text( selection, 16, infoY + 2, ui.small(), unlocked ? Mint : Muted, l.width - actions - 48 );
-    Rectangle action{ l.width - actions - 16, infoY, buttonWidth, 28 * app.scale };
-    if ( ui.button( action, "Info", app.details && app.page == 0 ) ) { app.details = !( app.details && app.page == 0 ); app.page = 0; app.panelScroll = 0; } action.x += buttonWidth + 6;
-    if ( ui.button( action, "Orders", app.details && app.page == 1 ) ) { app.details = !( app.details && app.page == 1 ); app.page = 1; app.panelScroll = 0; } action.x += buttonWidth + 6;
+    const float infoY = l.footer.y + 60, infoWidth = ui.measure( "Info", ui.small() ) + 24 * app.scale, ordersWidthButton = ui.measure( "Orders", ui.small() ) + 24 * app.scale, fitWidth = ui.measure( "Fit", ui.small() ) + 24 * app.scale;
+    const float actions = infoWidth + ordersWidthButton + fitWidth + 12;
+    ui.text( selection, 16, infoY + 2, ui.small(), unlocked ? Gold : Muted, l.width - actions - 48 );
+    Rectangle action{ l.width - actions - 16, infoY, infoWidth, 28 * app.scale };
+    if ( ui.button( action, "Info", app.details && app.page == 0 ) ) { app.details = !( app.details && app.page == 0 ); app.page = 0; app.panelScroll = 0; } action.x += infoWidth + 6; action.width = ordersWidthButton;
+    if ( ui.button( action, "Orders", app.details && app.page == 1 ) ) { app.details = !( app.details && app.page == 1 ); app.page = 1; app.panelScroll = 0; } action.x += ordersWidthButton + 6; action.width = fitWidth;
     if ( ui.button( action, "Fit" ) ) { app.fit = true; app.fitAll = true; }
     if ( !app.details ) return;
     ui.box( rect( l.panel ) );
-    const char* tabs[] = { "Info", "Orders", "Inspect" }; const float tabWidth = ( l.panelTabs.width - 42 * app.scale ) / 3;
-    for ( int i = 0; i < 3; ++i ) if ( ui.button( { l.panelTabs.x + i * tabWidth, l.panelTabs.y, tabWidth - 4, l.panelTabs.height }, tabs[i], app.page == i ) ) { app.page = i; app.panelScroll = 0; }
+    const char* tabs[] = { "Info [B]", "Orders [O]", "Inspect [E]" };
+    ui.text( tabs[app.page], l.panelTabs.x, l.panelTabs.y + 5, ui.small(), Gold, l.panelTabs.width - 48 * app.scale );
     if ( ui.button( { l.panelTabs.x + l.panelTabs.width - 38 * app.scale, l.panelTabs.y, 38 * app.scale, l.panelTabs.height }, "X" ) ) app.details = false;
     const Rectangle body = rect( l.panelBody );
     if ( CheckCollisionPointRec( ui.mouse, body ) ) app.panelScroll = std::max( 0.0f, app.panelScroll - GetMouseWheelMove() * 46 * app.scale );
@@ -403,9 +445,26 @@ void drawHud( App& app, Ui& ui, const Layout& l, Texture2D atlas )
         DrawRectangleRec( { l.panel.x + l.panel.width - 6, body.y + ( body.height - thumb ) * app.panelScroll / std::max( 1.0f, content - body.height + 12 ), 3, thumb }, Mint );
     }
 }
+void titleBackdrop( Texture2D atlas, const Layout& l )
+{
+    const float tile = 48, x = l.width * .59f, y = l.height * .42f;
+    for ( int row : { 1, 4 } ) for ( int col = 0; col < 9; ++col )
+        sprite( atlas, col % 3 == 0 ? 1 : 0, { x + col * tile, y + row * tile, tile, tile }, 0, { 100, 82, 72, 115 } );
+    for ( int row : { 1, 4 } )
+    {
+        for ( int col = 1; col < 8; ++col ) sprite( atlas, 26, { x + col * tile, y + row * tile, tile, tile }, 0, { 175, 157, 137, 160 } );
+        for ( int col : { 0, 3, 5, 8 } )
+        {
+            const int index = col == 0 ? 1 : col == 3 ? 2 : col == 5 ? 3 : 5;
+            sprite( atlas, ToolTiles[index], { x + col * tile + 4, y + row * tile + 4, tile - 8, tile - 8 }, 0, { 180, 163, 141, 185 } );
+        }
+        const float travel = static_cast<float>( std::fmod( GetTime() * .45 + row, 4.0 ) );
+        sprite( atlas, ItemTiles[row == 1 ? 1 : 2], { x + ( 1 + travel ) * tile + 10, y + row * tile + 10, 28, 28 }, 0, { 190, 170, 145, 170 } );
+    }
+}
 void menuHeading( Ui& ui, const Layout& l, const char* eyebrow, const char* title )
 {
-    ui.text( eyebrow, 28, 20, ui.small(), Mint, l.width - 56 );
+    ui.text( eyebrow, 28, 20, ui.small(), Gold, l.width - 56 );
     ui.text( title, 28, 48 * ui.scale, 36 * ui.scale, Ink, l.width - 56 );
 }
 Rectangle menuBody( const Layout& l ) { return { 28, 108 * l.scale, l.width - 56, l.height - 186 * l.scale }; }
@@ -416,57 +475,61 @@ void endScroll( App& app, Ui& ui, Rectangle body, float endY )
     if ( height > body.height )
     {
         DrawRectangleRec( { body.x, body.y + body.height - 28 * app.scale, body.width, 28 * app.scale }, Background );
-        ui.text( "Scroll for more", body.x + body.width - 150 * app.scale, body.y + body.height - 28 * app.scale, ui.small(), Mint, 150 * app.scale );
+        ui.text( "SCROLL", body.x + body.width - 150 * app.scale, body.y + body.height - 28 * app.scale, ui.small(), Gold, 150 * app.scale );
     }
+}
+int menuList( App& app, Ui& ui, Rectangle body, const std::string* entries, int count, const bool* enabled = nullptr )
+{
+    const float row = 42 * app.scale;
+    if ( IsKeyPressed( KEY_UP ) || IsKeyPressed( KEY_DOWN ) )
+    {
+        const float top = app.menuIndex * row, bottom = top + row;
+        if ( top < app.scroll ) app.scroll = top;
+        if ( bottom > app.scroll + body.height - 28 * app.scale ) app.scroll = bottom - body.height + 28 * app.scale;
+    }
+    scrollInput( app, ui, body ); int chosen = -1;
+    for ( int i = 0; i < count; ++i )
+    {
+        const bool available = !enabled || enabled[i]; Rectangle r{ body.x, body.y + i * row - app.scroll, body.width, row };
+        if ( ui.menuEntry( r, entries[i], app.menuIndex == i, available ) ) chosen = i;
+    }
+    endScroll( app, ui, body, body.y + count * row - app.scroll ); return chosen;
 }
 Rectangle footerButton( const Layout& l, float preferredWidth, bool right = false )
 {
     const float width = std::min( preferredWidth * l.scale, ( l.width - 72 ) / 2 );
     return { right ? l.width - width - 28 : 28, l.height - 62 * l.scale, width, 46 * l.scale };
 }
-void drawMenus( App& app, Ui& ui, const Layout& l )
+void drawMenus( App& app, Ui& ui, const Layout& l, Texture2D atlas, Font logoFont )
 {
     const float bottom = l.height - 62 * app.scale, buttonHeight = 46 * app.scale;
     if ( app.screen == Screen::Title )
     {
-        menuHeading( ui, l, "THE LAST FREIGHT", "VexFactory" );
-        const Rectangle body = menuBody( l ); scrollInput( app, ui, body );
-        const float cw = std::min( 310 * app.scale, ( body.width - 16 ) / 2 ), gap = 16, top = body.y - app.scroll;
-        const char* titles[] = { "Continue factory", "Campaign", "Sandbox", "Workshop", "How to play", "Quit" };
-        for ( int i = 0; i < 6; ++i )
-        {
-            Rectangle r{ 28 + ( i % 2 ) * ( cw + gap ), top + ( i / 2 ) * ( buttonHeight + 12 ), cw, buttonHeight };
-            if ( ui.button( r, titles[i], i == 1, i != 0 || app.active ) )
-            {
-                if ( i == 0 ) app.resume();
-                if ( i == 1 ) app.change( Screen::Campaign );
-                if ( i == 2 ) { if ( app.active ) app.request( Action::Sandbox ); else app.start( -1 ); }
-                if ( i == 3 ) { app.previous = Screen::Title; app.change( Screen::Workshop ); }
-                if ( i == 4 ) { app.previous = Screen::Title; app.change( Screen::Help ); }
-                if ( i == 5 ) app.quit = true;
-            }
-        }
-        float y = top + 3 * ( buttonHeight + 12 ) + 10;
-        y += paragraph( ui, TextFormat( "%d / 30 stars  |  %d workshop tokens", app.progress.totalStars(), app.progress.tokens ), body.x, y, body.width, Gold );
-        y += paragraph( ui, "The line is broken. The settlements are waiting. Build the factory that brings everyone home.", body.x, y, body.width, Muted );
-        endScroll( app, ui, body, y );
-        if ( ui.button( footerButton( l, 210 ), TextFormat( "Text %d%%", static_cast<int>( app.scale * 100 + .5f ) ) ) ) app.scale = nextTextScale( app.scale );
-        if ( ui.button( footerButton( l, 180, true ), app.muted ? "Sound: off" : "Sound: on" ) ) app.muted = !app.muted;
+        titleBackdrop( atlas, l ); Ui logo = ui; logo.font = logoFont;
+        logo.text( "VEXFACTORY", 66, 58, 80, { 0, 0, 0, 200 }, l.width - 120 );
+        logo.text( "VEXFACTORY", 64, 54, 80, Ink, l.width - 120 );
+        ui.text( "THE LAST FREIGHT", 68, 150, ui.small(), Gold );
+        const Rectangle body{ 64, 206, std::min( 560 * app.scale, l.width - 128 ), l.height - 286 };
+        const std::string names[] = { "Continue", "Play campaign", "Sandbox", "Settings", "Quit" };
+        const bool enabled[] = { app.active, true, true, true, true };
+        const int chosen = menuList( app, ui, body, names, 5, enabled ); if ( chosen >= 0 ) titleAction( app, chosen );
+        ui.text( "UP/DOWN SELECT   ENTER PLAY", 64, l.height - 48, ui.small(), Muted, l.width - 128 );
     }
     else if ( app.screen == Screen::Campaign )
     {
         menuHeading( ui, l, "LUMEN FREIGHT LINE", "Campaign dispatch board" );
         Rectangle body = menuBody( l ); scrollInput( app, ui, body );
-        const float gap = 14, cw = ( body.width - gap ) / 2, rh = 88 * app.scale;
+        const float rh = 58 * app.scale;
+        if ( IsKeyPressed( KEY_UP ) || IsKeyPressed( KEY_DOWN ) ) app.scroll = std::max( 0.0f, app.selected * rh - body.height + rh + 28 * app.scale );
         for ( int id = 0; id < MissionCount; ++id )
         {
-            Rectangle r{ body.x + ( id % 2 ) * ( cw + gap ), body.y + ( id / 2 ) * ( rh + gap ) - app.scroll, cw, rh };
-            const bool enabled = id <= app.progress.unlocked(); ui.box( r, id == app.selected ? Color{ 34, 61, 57, 255 } : Panel );
-            ui.text( TextFormat( "%02d / %s", id + 1, enabled ? missions()[id].title : "Awaiting clearance" ), r.x + 14, r.y + 12, ui.body(), enabled ? Ink : Muted, r.width - 28 );
-            ui.text( !enabled ? "Complete the previous dispatch" : app.progress.stars[id] ? TextFormat( "%s  /  best %.0fs", app.progress.stars[id] == 3 ? "***" : app.progress.stars[id] == 2 ? "**" : "*", app.progress.bestTime[id] ) : missions()[id].place, r.x + 14, r.y + 48 * app.scale, ui.small(), enabled ? Gold : Muted, r.width - 28 );
-            if ( ui.hit( r ) && enabled && IsMouseButtonPressed( MOUSE_BUTTON_LEFT ) ) { app.selected = id; app.change( Screen::Briefing ); break; }
+            Rectangle r{ body.x, body.y + id * rh - app.scroll, body.width, rh };
+            const bool enabled = id <= app.progress.unlocked();
+            const std::string title = TextFormat( "%02d  %s", id + 1, enabled ? missions()[id].title : "LOCKED" );
+            if ( ui.menuEntry( { r.x, r.y, r.width, 34 * app.scale }, title, id == app.selected, enabled ) ) { app.selected = id; app.change( Screen::Briefing ); break; }
+            ui.text( !enabled ? "Complete the previous dispatch" : app.progress.stars[id] ? TextFormat( "%s  /  best %.0fs", app.progress.stars[id] == 3 ? "***" : app.progress.stars[id] == 2 ? "**" : "*", app.progress.bestTime[id] ) : missions()[id].place, r.x + 32 * app.scale, r.y + 34 * app.scale, ui.small(), enabled ? Muted : Border, r.width - 40 * app.scale );
         }
-        endScroll( app, ui, body, body.y + 5 * ( rh + gap ) - app.scroll );
+        endScroll( app, ui, body, body.y + MissionCount * rh - app.scroll );
         if ( ui.button( { 28, bottom, 180 * app.scale, buttonHeight }, "Back" ) ) app.change( Screen::Title );
         if ( ui.button( { 220 * app.scale, bottom, 250 * app.scale, buttonHeight }, "Workshop" ) ) { app.previous = Screen::Campaign; app.change( Screen::Workshop ); }
     }
@@ -477,7 +540,7 @@ void drawMenus( App& app, Ui& ui, const Layout& l )
         const float width = std::min( body.width, 1050.0f ); y += paragraph( ui, mission.briefing, body.x, y, width );
         y += paragraph( ui, TextFormat( "Budget %d credits  /  Base power %d  /  Dispatch allowance %d seconds", mission.credits, mission.power, mission.deadline ), body.x, y, width, Gold );
         std::string order = "Required: "; for ( int i = 0; i < ItemCount; ++i ) if ( mission.goals[i] ) order += std::to_string( mission.goals[i] ) + " " + itemName( static_cast<Item>( i ) ) + "  ";
-        y += paragraph( ui, order, body.x, y, width, Mint );
+        y += paragraph( ui, order, body.x, y, width, Ink );
         int income = 0; for ( int i = 0; i < ItemCount; ++i ) income += mission.goals[i] * priceFor( static_cast<Item>( i ) );
         y += paragraph( ui, TextFormat( "Order revenue: %d credits, paid as required cargo arrives. Surplus earns nothing.", income ), body.x, y, width, Gold );
         y += paragraph( ui, mission.hint, body.x, y, width, Muted );
@@ -488,18 +551,21 @@ void drawMenus( App& app, Ui& ui, const Layout& l )
     }
     else if ( app.screen == Screen::Workshop )
     {
-        menuHeading( ui, l, "VALE'S WORKSHOP", TextFormat( "Research / %d tokens", app.progress.tokens ) );
+        menuHeading( ui, l, TextFormat( "VALE'S WORKSHOP / %d TOKENS", app.progress.tokens ), "Research" );
         Rectangle body = menuBody( l ); scrollInput( app, ui, body ); float y = body.y - app.scroll;
         const char* names[] = { "Conveyor bearings", "Precision tooling", "Recovery crews" };
         const char* descriptions[] = { "+25% conveyor speed per tier. Shorter queues and faster transport.", "+15% processing rate per tier, with a small miner-rate increase.", "+5 percentage points of demolition refund per tier, up to 85%. Scrapped cargo is still lost." };
         for ( int track = 0; track < 3; ++track )
         {
-            const float content = ui.wrap( descriptions[track], body.x + 16, y + 46 * app.scale, body.width - 260 * app.scale, ui.body(), Muted, false );
-            Rectangle r{ body.x, y, body.width, std::max( 124 * app.scale, content + 68 * app.scale ) }; ui.box( r );
-            ui.text( std::string( names[track] ) + " / tier " + std::to_string( app.progress.upgrades[track] ) + "/3", r.x + 16, r.y + 14, ui.body(), Mint, r.width - 250 * app.scale );
-            ui.wrap( descriptions[track], r.x + 16, r.y + 46 * app.scale, r.width - 260 * app.scale, ui.body(), Muted );
-            const int price = app.progress.upgradeCost( track );
-            if ( ui.button( { r.x + r.width - 212 * app.scale, r.y + 30 * app.scale, 196 * app.scale, 52 * app.scale }, price ? TextFormat( "Buy / %d tokens", price ) : "Fully upgraded", false, price && app.progress.tokens >= price ) ) { app.progress.purchase( track ); app.save(); app.audio.play( 0, app.muted ); }
+            const int price = app.progress.upgradeCost( track ); const std::string buy = price ? TextFormat( "Buy / %d", price ) : "MAX";
+            const float buyWidth = ui.measure( buy, ui.small() ) + 32 * app.scale;
+            const std::string name = std::string( names[track] ) + " / tier " + std::to_string( app.progress.upgrades[track] ) + "/3";
+            const float nameWidth = body.width - buyWidth - 48, nameHeight = ui.wrap( name, 0, 0, nameWidth, ui.body(), Gold, false );
+            const float textY = y + std::max( 46 * app.scale, nameHeight + 24 ), content = ui.wrap( descriptions[track], 0, 0, body.width - 32, ui.body(), Muted, false );
+            Rectangle r{ body.x, y, body.width, std::max( 124 * app.scale, textY - y + content + 24 ) }; DrawRectangleRec( { r.x, r.y + r.height, r.width, 2 }, Border );
+            ui.wrap( name, r.x + 16, r.y + 14, nameWidth, ui.body(), Gold );
+            ui.wrap( descriptions[track], r.x + 16, textY, r.width - 32, ui.body(), Muted );
+            if ( ui.button( { r.x + r.width - buyWidth - 16, r.y + 30 * app.scale, buyWidth, 52 * app.scale }, buy, false, price && app.progress.tokens >= price ) ) { app.progress.purchase( track ); app.save(); app.audio.play( 0, app.muted ); }
             y += r.height + 16;
         }
         y += paragraph( ui, "First clearance earns two tokens plus your stars. Better medals earn only the difference, so repeating a result cannot farm tokens. Upgrades apply to the next dispatch, not a factory already in progress. Every chapter is solvable without them.", body.x, y, body.width, Gold );
@@ -526,22 +592,18 @@ void drawMenus( App& app, Ui& ui, const Layout& l )
     else if ( app.screen == Screen::Pause )
     {
         menuHeading( ui, l, "DISPATCH CLOCK STOPPED", "Factory menu" );
-        const Rectangle body = menuBody( l ); scrollInput( app, ui, body );
-        const float w = std::min( 360 * app.scale, ( body.width - 16 ) / 2 ), top = body.y - app.scroll;
-        const char* names[] = { "Resume factory", "Save game", "Workshop", "Restart dispatch", "Campaign board", "How to play" };
-        for ( int i = 0; i < 6; ++i ) if ( ui.button( { 28 + ( i % 2 ) * ( w + 16 ), top + ( i / 2 ) * ( buttonHeight + 14 ), w, buttonHeight }, names[i], i == 0 ) )
-        {
-            if ( i == 0 ) app.change( Screen::Playing ); if ( i == 1 ) app.save( true );
-            if ( i == 2 ) { app.previous = Screen::Pause; app.change( Screen::Workshop ); }
-            if ( i == 3 ) app.request( Action::Restart ); if ( i == 4 ) { app.save(); app.change( Screen::Campaign ); }
-            if ( i == 5 ) { app.previous = Screen::Pause; app.change( Screen::Help ); }
-        }
-        const float settings = top + 3 * ( buttonHeight + 14 ) + 18;
-        if ( ui.button( { 28, settings, w, buttonHeight }, TextFormat( "Text size / %d%%", static_cast<int>( app.scale * 100 + .5f ) ) ) ) app.scale = nextTextScale( app.scale );
-        if ( ui.button( { 44 + w, settings, w, buttonHeight }, app.muted ? "Sound / off" : "Sound / on" ) ) app.muted = !app.muted;
-        endScroll( app, ui, body, settings + buttonHeight + 16 );
+        const Rectangle body = menuBody( l );
+        const std::string names[] = { "Resume", "Save", "Workshop", "Restart dispatch", "Campaign", "How to play", "Settings" };
+        const int chosen = menuList( app, ui, body, names, 7 ); if ( chosen >= 0 ) pauseAction( app, chosen );
         if ( ui.button( footerButton( l, 360 ), "Title menu" ) ) { app.save(); app.change( Screen::Title ); }
         if ( ui.button( footerButton( l, 360, true ), "Save and quit" ) ) { app.save(); app.quit = true; }
+    }
+    else if ( app.screen == Screen::Settings )
+    {
+        menuHeading( ui, l, "VEXFACTORY", "Settings" ); const Rectangle body = menuBody( l );
+        const std::string names[] = { TextFormat( "Text size    %d%%", static_cast<int>( app.scale * 100 + .5f ) ), app.muted ? "Sound        OFF" : "Sound        ON", "How to play", "Back" };
+        const int chosen = menuList( app, ui, body, names, 4 ); if ( chosen >= 0 ) settingsAction( app, chosen );
+        if ( ui.button( footerButton( l, 180 ), "Back" ) ) { app.save(); app.change( app.settingsFrom ); }
     }
     else if ( app.screen == Screen::Confirm )
     {
@@ -562,7 +624,7 @@ void drawMenus( App& app, Ui& ui, const Layout& l )
         y += paragraph( ui, TextFormat( "Production %.1fs  /  Net construction %d credits  /  Scrap %u ore units", stats.elapsed, stats.spent - stats.refunds, stats.scrapped ), body.x, y, body.width, Gold );
         if ( won )
         {
-            y += paragraph( ui, TextFormat( "%d / 3 stars. Campaign total: %d / 30.", app.sim.stars(), app.progress.totalStars() ), body.x, y, body.width, Mint );
+            y += paragraph( ui, TextFormat( "%d / 3 stars. Campaign total: %d / 30.", app.sim.stars(), app.progress.totalStars() ), body.x, y, body.width, Gold );
             y += paragraph( ui, TextFormat( "Time star: at most %ds. Efficiency star: no scrap and net construction at most %d credits.", m.parTime, m.parCost ), body.x, y, body.width, Muted );
         }
         else y += paragraph( ui, "Your campaign progress is safe. Retry with a fresh budget and the same deposits. Plan before launch, then inspect buffers and dock requests when a route stops.", body.x, y, body.width, Muted );
@@ -575,10 +637,10 @@ void drawMenus( App& app, Ui& ui, const Layout& l )
     {
         menuHeading( ui, l, "LUMEN LINE / JOURNEY COMPLETE", "Homebound" ); Rectangle body = menuBody( l ); scrollInput( app, ui, body ); float y = body.y - app.scroll;
         y += paragraph( ui, missions()[9].completion, body.x, y, body.width );
-        y += paragraph( ui, "At the coast, the passengers step onto a dry platform. The dog from the lift gets there first. Vale promises that the next factory will have better coffee. Iona asks for a window seat. For once, nobody asks you to build anything.", body.x, y, body.width, Mint );
+        y += paragraph( ui, "At the coast, the passengers step onto a dry platform. The dog from the lift gets there first. Vale promises that the next factory will have better coffee. Iona asks for a window seat. For once, nobody asks you to build anything.", body.x, y, body.width, Ink );
         y += paragraph( ui, TextFormat( "All ten dispatches cleared. %d of 30 stars earned.", app.progress.totalStars() ), body.x, y, body.width, Gold );
         if ( app.progress.totalStars() >= 27 ) y += paragraph( ui, "You leave a clean set of plans for the engineers who will rebuild Lumen. In the margins, someone has drawn a little sun.", body.x, y, body.width );
-        y += paragraph( ui, "VexFactory: The Last Freight\nBuilt with Vecs, raylib and GLFW. Art: Kenney Tiny Factory, CC0. Interface font: your system's font. Music is the noise you made along the way.", body.x, y, body.width, Muted );
+        y += paragraph( ui, "VexFactory: The Last Freight\nBuilt with Vecs, raylib and GLFW. Art: Kenney Tiny Factory, CC0. Fonts: Kenney Pixel and Kenney Pixel Square, CC0. Music is the noise you made along the way.", body.x, y, body.width, Muted );
         endScroll( app, ui, body, y ); if ( ui.button( footerButton( l, 230 ), "Replay campaign" ) ) app.change( Screen::Campaign );
         if ( ui.button( footerButton( l, 230, true ), "Title menu", true ) ) app.change( Screen::Title );
     }
@@ -604,7 +666,7 @@ int parse( int argc, char** argv, Options& o )
         {
             int major = 0, minor = 0, revision = 0; glfwGetVersion( &major, &minor, &revision );
             std::printf( "VexFactory: The Last Freight / raylib %s / GLFW %d.%d.%d\n", RAYLIB_VERSION, major, minor, revision );
-            std::puts( "--assets DIR  --save-dir DIR  --font FILE.ttf  --ui-scale 1.0..2.0\n--no-save  --no-audio  --mission 1..10  --size WIDTH HEIGHT  --frames N\n--smoke-test  --screenshot FILE.png  --screen title|campaign|briefing|play|ending\nSpace: launch/pause; 1-9: parts; R: rotate; F: sorter filter; E: inspect; Tab: speed.\nWheel: zoom/scroll; middle mouse/WASD: pan; Home: fit; B: info; O: orders; Esc: close/menu; F1: help.\nCtrl/Cmd+S: save; Ctrl/Cmd+Z: planning undo; Ctrl/Cmd +/-: text size; M: mute.\nFetch artwork: cmake -P demos/vexfactory/fetch_assets.cmake" ); return 1;
+            std::puts( "--assets DIR  --save-dir DIR  --font FILE.ttf  --ui-scale 1.0..2.0\n--no-save  --no-audio  --mission 1..10  --size WIDTH HEIGHT  --frames N\n--smoke-test  --screenshot FILE.png  --screen title|campaign|briefing|play|pause|settings|workshop|help|ending\nSpace: launch/pause; 1-9: parts; R: rotate; F: sorter filter; E: inspect; Tab: speed.\nWheel: zoom/scroll; middle mouse/WASD: pan; Home: fit; B: info; O: orders; Esc: close/menu; F1: help.\nCtrl/Cmd+S: save; Ctrl/Cmd+Z: planning undo; Ctrl/Cmd +/-: text size; M: mute.\nFetch artwork: cmake -P demos/vexfactory/fetch_assets.cmake" ); return 1;
         }
         if ( argument == "--smoke-test" ) o.smoke = true;
         else if ( argument == "--no-save" ) o.noSave = true;
@@ -620,7 +682,7 @@ int parse( int argc, char** argv, Options& o )
         else if ( argument == "--ui-scale" && i + 1 < argc ) { char* end = nullptr; o.scale = std::strtof( argv[++i], &end ); if ( *end || !std::isfinite( o.scale ) || o.scale < MinUiScale || o.scale > MaxUiScale ) return -1; }
         else { std::fprintf( stderr, "Unknown or incomplete argument: %s\n", argv[i] ); return -1; }
     }
-    if ( !o.scene.empty() && o.scene != "title" && o.scene != "campaign" && o.scene != "briefing" && o.scene != "play" && o.scene != "ending" ) return -1;
+    if ( !o.scene.empty() && o.scene != "title" && o.scene != "campaign" && o.scene != "briefing" && o.scene != "play" && o.scene != "ending" && o.scene != "pause" && o.scene != "settings" && o.scene != "workshop" && o.scene != "help" ) return -1;
     if ( !o.scene.empty() && !o.smoke ) { std::fprintf( stderr, "--screen is a smoke/screenshot option.\n" ); return -1; }
     if ( o.smoke ) { o.noSave = o.noAudio = true; if ( !o.frames ) o.frames = 4; } return 0;
 }
@@ -634,6 +696,8 @@ int main( int argc, char** argv )
         if ( FileExists( ( portable + "/Tilemap/tilemap_packed.png" ).c_str() ) ) options.assets = portable;
     }
     const std::string tilemap = options.assets + "/Tilemap/tilemap_packed.png";
+    const std::string pixelFont = options.assets + "/Fonts/Kenney Pixel.ttf", logoFont = options.assets + "/Fonts/Kenney Pixel Square.ttf";
+    if ( !FileExists( pixelFont.c_str() ) || !FileExists( logoFont.c_str() ) ) { std::fprintf( stderr, "VexFactory pixel fonts are missing. Run: cmake -P demos/vexfactory/fetch_assets.cmake\n" ); return 1; }
     if ( !FileExists( tilemap.c_str() ) ) { std::fprintf( stderr, "VexFactory artwork is missing: %s\nRun: cmake -P demos/vexfactory/fetch_assets.cmake\nOr build the explicit vex_factory_assets target.\n", tilemap.c_str() ); return 1; }
     Image image = LoadImage( tilemap.c_str() );
     if ( !image.data || image.width != 192 || image.height != 176 ) { if ( image.data ) UnloadImage( image ); std::fprintf( stderr, "Fetch the pinned Tiny Factory tilemap (192 x 176).\n" ); return 1; }
@@ -656,7 +720,8 @@ int main( int argc, char** argv )
     if ( !IsTextureValid( atlas ) ) { CloseWindow(); return 1; } SetTextureFilter( atlas, TEXTURE_FILTER_POINT );
     const Surface initialSurface = windowSurface();
     SetWindowMinSize( static_cast<int>( 960 * initialSurface.windowWidth / initialSurface.width ), static_cast<int>( 640 * initialSurface.windowHeight / initialSurface.height ) );
-    FontFace font; font.choose( options.font, std::max( initialSurface.densityX(), initialSurface.densityY() ) );
+    const float initialDensity = std::max( initialSurface.densityX(), initialSurface.densityY() );
+    FontFace font, titleFont; font.choose( options.font.empty() ? pixelFont : options.font, options.font.empty(), initialDensity ); titleFont.choose( logoFont, true, initialDensity );
     App app; app.noSave = options.noSave; app.saveDirectory = options.directory; app.load();
     if ( options.scale ) app.scale = options.scale;
     app.audio.initialize( options.noAudio || options.smoke ); app.saveClock = GetTime();
@@ -674,6 +739,10 @@ int main( int argc, char** argv )
         }
         else { app.start( -1 ); for ( int i = 0; i < 60 * 35; ++i ) app.sim.step(); }
         if ( options.scene == "title" ) app.change( Screen::Title );
+        if ( options.scene == "pause" ) app.change( Screen::Pause );
+        if ( options.scene == "settings" ) app.change( Screen::Settings );
+        if ( options.scene == "workshop" ) { app.progress.reward( 0, 3, 20 ); app.change( Screen::Workshop ); }
+        if ( options.scene == "help" ) app.change( Screen::Help );
         if ( options.scene == "campaign" ) app.change( Screen::Campaign );
         if ( options.scene == "briefing" ) { app.selected = std::max( 0, options.mission ); app.change( Screen::Briefing ); }
         if ( options.scene == "ending" ) { for ( int i = 0; i < 10; ++i ) app.progress.reward( i, 3, 100 ); app.change( Screen::Ending ); }
@@ -684,12 +753,12 @@ int main( int argc, char** argv )
         app.surface = windowSurface(); app.mouse = logicalMouse( app.surface );
         font.update( std::max( app.surface.densityX(), app.surface.densityY() ) ); const float delta = std::min( GetFrameTime(), .15f );
         app.toastTime = std::max( 0.0f, app.toastTime - delta );
-        Layout layout = Layout::make( app.surface.width, app.surface.height, app.scale ); fitCamera( app, layout );
+        Layout layout = Layout::make( app.surface.width, app.surface.height, app.scale, orderKinds( app ) ); fitCamera( app, layout );
         if ( !options.smoke )
         {
             globalInput( app );
             app.surface = windowSurface(); app.mouse = logicalMouse( app.surface );
-            layout = Layout::make( app.surface.width, app.surface.height, app.scale );
+            layout = Layout::make( app.surface.width, app.surface.height, app.scale, orderKinds( app ) );
             fitCamera( app, layout ); worldInput( app, layout );
         }
         if ( app.screen == Screen::Playing && !app.paused && !options.smoke )
@@ -702,17 +771,17 @@ int main( int argc, char** argv )
         BeginDrawing(); ClearBackground( Background ); beginCanvas( app.surface );
         Ui ui{ font.font, app.scale, options.smoke ? Vector2{ -100, -100 } : app.mouse, !options.smoke }; ui.surface = app.surface;
         if ( app.screen == Screen::Playing ) { drawFactory( app, layout, atlas ); drawHud( app, ui, layout, atlas ); }
-        else drawMenus( app, ui, layout );
+        else drawMenus( app, ui, layout, atlas, titleFont.font );
         if ( app.toastTime > 0 )
         {
             const float width = std::min( layout.width - 32, 760.0f * app.scale );
             const float height = ui.wrap( app.toast, 0, 0, width - 28, ui.body(), Ink, false ) + 24;
-            Rectangle r{ 16, layout.height - layout.footer.height - height - 12, width, height }; ui.box( r, { 34, 56, 64, 250 } ); ui.wrap( app.toast, r.x + 14, r.y + 12, width - 28, ui.body(), Ink );
+            Rectangle r{ 16, layout.height - layout.footer.height - height - 12, width, height }; DrawRectangleRec( r, { 22, 20, 23, 240 } ); ui.wrap( app.toast, r.x + 14, r.y + 12, width - 28, ui.body(), Ink );
         }
         endCanvas(); EndDrawing(); ++frames;
         if ( frames == 1 ) { std::printf( "VIEW: logical %.0fx%.0f / window %.0fx%.0f / framebuffer %.0fx%.0f\nGAME: Ready\n", app.surface.width, app.surface.height, app.surface.windowWidth, app.surface.windowHeight, app.surface.framebufferWidth, app.surface.framebufferHeight ); std::fflush( stdout ); }
         if ( !options.screenshot.empty() && frames == options.frames ) { Image shot = LoadImageFromScreen(); screenshotWritten = ExportImage( shot, options.screenshot.c_str() ); UnloadImage( shot ); }
     }
-    app.save(); app.audio.release(); font.release(); UnloadTexture( atlas ); CloseWindow();
+    app.save(); app.audio.release(); font.release(); titleFont.release(); UnloadTexture( atlas ); CloseWindow();
     if ( !screenshotWritten ) { std::fprintf( stderr, "The screenshot was not written.\n" ); return 1; } return 0;
 }

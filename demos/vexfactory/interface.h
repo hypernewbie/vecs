@@ -8,8 +8,8 @@
 
 namespace vexfactory
 {
-inline const Color Background = { 17, 23, 30, 255 }, Panel = { 29, 38, 48, 255 }, Border = { 61, 77, 90, 255 };
-inline const Color Ink = { 240, 238, 225, 255 }, Muted = { 177, 190, 201, 255 }, Mint = { 105, 222, 180, 255 }, Gold = { 252, 196, 93, 255 }, Coral = { 255, 143, 124, 255 };
+inline const Color Background = { 22, 20, 23, 255 }, Panel = { 34, 30, 32, 255 }, Border = { 84, 72, 65, 255 };
+inline const Color Ink = { 245, 227, 199, 255 }, Muted = { 172, 159, 143, 255 }, Mint = { 105, 222, 180, 255 }, Gold = { 235, 183, 103, 255 }, Coral = { 255, 143, 124, 255 };
 inline const Color ProductColors[] = { Muted, { 146, 212, 248, 255 }, Gold, Mint };
 inline Rectangle rect( Box b ) { return { b.x, b.y, b.width, b.height }; }
 inline constexpr int ToolTiles[] = { 26, 96, 75, 87, 99, 123, 121, 58, 111, 90 };
@@ -49,34 +49,29 @@ inline void beginClip( Rectangle r, const Surface& surface )
 class FontFace
 {
 public:
-    Font font{}; bool owned = false; float density = 0; std::string source;
-    void choose( const std::string& overridePath, float dpi )
-    {
-        if ( !overridePath.empty() && FileExists( overridePath.c_str() ) ) source = overridePath;
-        if ( source.empty() ) for ( const char* path : {
-#ifdef _WIN32
-            "C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf",
-#elif defined( __APPLE__ )
-            "/System/Library/Fonts/Supplemental/Arial.ttf", "/Library/Fonts/Arial.ttf", "/System/Library/Fonts/Supplemental/Verdana.ttf",
-#else
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-#endif
-            "" } ) if ( *path && FileExists( path ) ) { source = path; break; }
-        update( dpi );
-    }
+    Font font{}; bool owned = false, pixel = true; float density = 0; std::string source;
+    void choose( const std::string& path, bool pixelFace, float dpi ) { source = path; pixel = pixelFace; update( dpi ); }
     void update( float dpi )
     {
         dpi = std::max( 1.0f, dpi );
-        if ( font.texture.id && std::abs( density - dpi ) < .05f ) return;
+        if ( font.texture.id && ( pixel || std::abs( density - dpi ) < .05f ) ) { density = dpi; return; }
         if ( owned ) UnloadFont( font ); owned = false; density = dpi;
         if ( !source.empty() )
         {
             int points[95]; for ( int i = 0; i < 95; ++i ) points[i] = i + 32;
-            font = LoadFontEx( source.c_str(), static_cast<int>( 56 * dpi ), points, 95 );
+            font = LoadFontEx( source.c_str(), pixel ? 12 : static_cast<int>( 56 * dpi ), points, 95 );
             owned = IsFontValid( font ) && font.texture.id != GetFontDefault().texture.id;
+            if ( owned && pixel )
+            {
+                // Kenney's faces have a 12-unit pixel grid and a 7-pixel cap height.
+                // Normalize the top bearing and make UI sizes refer to an 8-pixel line.
+                const int top = font.glyphs[GetGlyphIndex( font, 'H' )].offsetY;
+                for ( int i = 0; i < font.glyphCount; ++i ) font.glyphs[i].offsetY -= top;
+                font.baseSize = 8;
+            }
         }
         if ( !owned ) font = GetFontDefault();
-        SetTextureFilter( font.texture, owned ? TEXTURE_FILTER_BILINEAR : TEXTURE_FILTER_POINT );
+        SetTextureFilter( font.texture, owned && !pixel ? TEXTURE_FILTER_BILINEAR : TEXTURE_FILTER_POINT );
     }
     void release() { if ( owned ) UnloadFont( font ); owned = false; }
 };
@@ -85,7 +80,13 @@ struct Ui
     Font font; float scale; Vector2 mouse; bool input = true, clipped = false; Rectangle clip{}; Surface surface{};
     float body() const { return 24 * scale; }
     float small() const { return 20 * scale; }
-    float measure( const std::string& text, float size ) const { return MeasureTextEx( font, text.c_str(), size, .3f ).x; }
+    float fontSize( float size ) const
+    {
+        if ( font.baseSize != 8 ) return size;
+        const float dpi = std::max( 1.0f, surface.densityX() );
+        return std::max( 1.0f, std::round( size * dpi / 8 ) ) * 8 / dpi;
+    }
+    float measure( const std::string& text, float size ) const { return MeasureTextEx( font, text.c_str(), fontSize( size ), 0 ).x; }
     void box( Rectangle r, Color color = Panel ) const { DrawRectangleRec( r, color ); DrawRectangleLinesEx( r, 1, Border ); }
     bool hit( Rectangle r ) const { return input && CheckCollisionPointRec( mouse, r ) && ( !clipped || CheckCollisionPointRec( mouse, clip ) ); }
     void text( std::string text, float x, float y, float size, Color color = Ink, float width = 0 ) const
@@ -95,7 +96,8 @@ struct Ui
             while ( !text.empty() && measure( text + "...", size ) > width ) { int bytes = 1; GetCodepointPrevious( text.c_str() + text.size(), &bytes ); text.resize( text.size() - std::min( text.size(), static_cast<size_t>( std::max( 1, bytes ) ) ) ); }
             text += "...";
         }
-        DrawTextEx( font, text.c_str(), { x, y }, size, .3f, color );
+        const float dpiX = std::max( 1.0f, surface.densityX() ), dpiY = std::max( 1.0f, surface.densityY() );
+        DrawTextEx( font, text.c_str(), { std::round( x * dpiX ) / dpiX, std::round( y * dpiY ) / dpiY }, fontSize( size ), 0, color );
     }
     float wrap( const std::string& source, float x, float y, float width, float size, Color color = Ink, bool draw = true ) const
     {
@@ -122,10 +124,17 @@ struct Ui
     }
     bool button( Rectangle r, const std::string& title, bool active = false, bool enabled = true ) const
     {
-        const bool hover = enabled && hit( r ); box( r, active ? Color{ 39, 74, 67, 255 } : hover ? Color{ 50, 66, 80, 255 } : Panel );
-        if ( active ) DrawRectangle( static_cast<int>( r.x ), static_cast<int>( r.y ), 3, static_cast<int>( r.height ), Mint );
+        const bool hover = enabled && hit( r );
+        if ( active || hover ) DrawRectangleRec( { r.x + 8, r.y + r.height - 4, r.width - 16, 2 }, Gold );
         const float size = small(), w = std::min( measure( title, size ), r.width - 20 );
-        text( title, r.x + ( r.width - w ) / 2, r.y + ( r.height - size ) / 2, size, enabled ? ( active ? Mint : Ink ) : Muted, r.width - 20 );
+        text( title, r.x + ( r.width - w ) / 2, r.y + ( r.height - size ) / 2, size, enabled ? ( active || hover ? Gold : Ink ) : Muted, r.width - 20 );
+        return hover && IsMouseButtonPressed( MOUSE_BUTTON_LEFT );
+    }
+    bool menuEntry( Rectangle r, const std::string& title, bool selected = false, bool enabled = true ) const
+    {
+        const bool hover = enabled && hit( r ); const bool marked = enabled && selected;
+        if ( marked ) text( ">", r.x, r.y + ( r.height - body() ) / 2, body(), Gold );
+        text( title, r.x + 32 * scale, r.y + ( r.height - body() ) / 2, body(), enabled ? marked || hover ? Gold : Ink : Muted, r.width - 40 * scale );
         return hover && IsMouseButtonPressed( MOUSE_BUTTON_LEFT );
     }
     void beginClip( Rectangle r ) { clipped = true; clip = r; vexfactory::beginClip( r, surface ); }

@@ -18,7 +18,7 @@ The implementation passed these local checks:
 - X11 input tests pass at 1x and 2x DPI, including borderless mode and clicks through optional detail panels.
 - Pixel probes check that conveyor placement changes the rendered tile under the pointer, not a smaller or offset map.
 - Coordinate tests cover Retina/Wayland points and Windows/X11 pixels at 1x, 1.5x, 2x, and 3x DPI.
-- The Windows Release ZIP includes the executable, CC0 tilemap, instructions, and library license notices.
+- The Windows Release ZIP includes the executable, CC0 tilemap and pixel fonts, their licenses, instructions, and library license notices.
 - The packaged Linux executable finds its nearby artwork and passes the graphical smoke check.
 - A default Vecs configuration and the asset-free test configuration do not download graphics dependencies.
 
@@ -34,8 +34,9 @@ A native Retina playtest is not replaced by those checks.
 The factory view now uses the full window width, without a permanent sidebar or large status cards.
 Rendering and mouse input share an explicit logical projection.
 This corrects the earlier 2D-camera bug: raylib discarded DPI scaling during factory rendering, but input still used logical coordinates.
-The font atlas uses framebuffer density. Factory zoom does not change text size.
-macOS uses the system Arial font when available and accepts `--font FILE.ttf` as an override.
+The Kenney pixel fonts use a small bitmap atlas with nearest-neighbor sampling.
+Glyph sizes and positions align to framebuffer pixels. Factory zoom does not change text size.
+All platforms use the same CC0 fonts and accept `--font FILE.ttf` as a body-text override.
 Campaign data, production rules, and the existing version-1 save format remain unchanged.
 
 ## Deliberate limits
@@ -43,6 +44,6 @@ Campaign data, production rules, and the existing version-1 save format remain u
 - The campaign has ten chapters and one story ending, with optional medal text and replay.
 - The original sandbox retains its one-to-one recipes.
 - Packages are platform-specific ZIP archives, not installers or notarized macOS bundles.
-- The game uses installed system fonts. It does not distribute font files.
+- Fonts come from the opt-in Kenney CC0 download. Normal Vecs builds do not fetch them.
 - Saves are versioned local files, not cloud saves.
 - No network access occurs during gameplay.

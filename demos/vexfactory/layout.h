@@ -30,12 +30,12 @@ struct Layout
 {
     float width, height, scale;
     Box header, world, panel, panelTabs, panelBody, footer;
-    static Layout make( float width, float height, float textScale )
+    static Layout make( float width, float height, float textScale, int cargoKinds = 4 )
     {
         Layout l{}; l.width = width; l.height = height; l.scale = std::clamp( textScale, MinUiScale, MaxUiScale );
         const float pad = 12, head = 8 + 68 * l.scale, foot = 64 + 28 * l.scale;
         // Large text can put orders on a third line. No persistent sidebar.
-        const float orders = width < 1200 && l.scale > 1.4f ? 28 * l.scale : 0;
+        const float orders = width < 1200 && ( l.scale > 1.4f || ( cargoKinds >= 3 && l.scale >= 1.25f ) ) ? 28 * l.scale : 0;
         l.header = { 0, 0, width, head + orders };
         l.footer = { 0, height - foot, width, foot };
         l.world = { pad, l.header.height + 8, width - pad * 2, height - l.header.height - foot - 16 };

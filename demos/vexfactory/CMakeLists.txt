@@ -54,7 +54,7 @@ file( TO_CMAKE_PATH "${VEX_FACTORY_ASSET_DIR}" VEX_FACTORY_ASSET_DIR )
 add_custom_target( vex_factory_assets
     COMMAND "${CMAKE_COMMAND}" "-DVEX_FACTORY_ASSET_DIR=${VEX_FACTORY_ASSET_DIR}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/fetch_assets.cmake"
-    COMMENT "Fetch the pinned CC0 Tiny Factory pack (explicit opt-in)"
+    COMMENT "Fetch the pinned CC0 Tiny Factory artwork and Kenney pixel fonts (explicit opt-in)"
     VERBATIM
 )
 
@@ -75,6 +75,6 @@ add_custom_target( vex_factory_package
         "-DGLFW_LICENSE=${glfw3_SOURCE_DIR}/LICENSE.md"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/package_game.cmake"
     DEPENDS vex_factory vex_factory_assets
-    COMMENT "Package VexFactory with its opt-in CC0 artwork and license notices"
+    COMMENT "Package VexFactory with its opt-in CC0 artwork, pixel fonts and license notices"
     VERBATIM
 )
