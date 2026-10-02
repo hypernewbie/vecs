@@ -227,6 +227,27 @@ try:
     assert before["mission"] == 0 and before["phase"] == 1 and before["credits"] == 240
     assert before["elapsed"] == 0
     key("1")
+    # A single held stroke makes both clockwise and counterclockwise corners.
+    corner_outside = pixel(8.9 * 40, -8 + 5.1 * 40)
+    corner_inside = pixel(8.36 * 40, -8 + 5.66 * 40)
+    move(4.5 * 40, -8 + 5.5 * 40)
+    button(True)
+    move(8.5 * 40, -8 + 5.5 * 40)
+    move(8.5 * 40, -8 + 7.5 * 40)
+    move(10.5 * 40, -8 + 7.5 * 40)
+    button(False)
+    corners = snapshot()
+    assert corners["credits"] == 186 and len(corners["buildings"]) == len(before["buildings"]) + 9
+    assert all(corners["buildings"][px, 5][1] == 0 for px in range(4, 8))
+    assert corners["buildings"][8, 5][1] == 1 and corners["buildings"][8, 6][1] == 1
+    assert all(corners["buildings"][px, 7][1] == 0 for px in range(8, 11))
+    assert corners["buildings"][2, 3] == before["buildings"][2, 3]  # No neighbor rewiring.
+    assert pixel(8.9 * 40, -8 + 5.1 * 40) == corner_outside, "A corner still renders as a rotated straight belt."
+    assert pixel(8.36 * 40, -8 + 5.66 * 40)[2] > corner_inside[2], "The curved belt track is missing."
+    capture("automatic-belt-corners-%dx" % args.density, 960, 640)
+    key("z", command=True)
+    corner_undo = snapshot()
+    assert corner_undo["buildings"] == before["buildings"] and corner_undo["credits"] == 240
     # The full-width viewport uses readable 40-point cells, not a shrunken map.
     # Same logical positions at 1x and 2x DPI; native input is scaled above.
     def paint_route():
@@ -323,7 +344,7 @@ try:
     key("Escape")  # Back to pause.
     click(1036, 673)  # Save and quit at 1280x720 / 120% text.
     assert process.wait(timeout=5) == 0
-    print("Graphical campaign test passed at %dx DPI: pixel menus, keyboard navigation, minimal HUD, rendered/clicked tile alignment, planning, fast paint, undo, production, atomic save/reload, resize, large text, zoom, victory, next chapter, confirmation and research." % args.density)
+    print("Graphical campaign test passed at %dx DPI: automatic belt turns and corner rendering, stroke undo, pixel menus, keyboard navigation, minimal HUD, rendered/clicked tile alignment, planning, fast paint, undo, production, atomic save/reload, resize, large text, zoom, victory, next chapter, confirmation and research." % args.density)
     print("Artifacts:", output)
 finally:
     if process is not None and process.poll() is None:

@@ -1,5 +1,6 @@
 #pragma once
 #include "layout.h"
+#include "belts.h"
 #include "raylib.h"
 #include "rlgl.h"
 #include <cmath>
@@ -18,6 +19,31 @@ inline void sprite( Texture2D atlas, int tile, Rectangle dest, float rotation = 
 {
     Rectangle src = { static_cast<float>( tile % 12 * 16 ), static_cast<float>( tile / 12 * 16 ), 16, 16 };
     DrawTexturePro( atlas, src, { dest.x + dest.width / 2, dest.y + dest.height / 2, dest.width, dest.height }, { dest.width / 2, dest.height / 2 }, rotation, tint );
+}
+// Bend the two Kenney straight-belt frames into quarter circles at load time.
+// No additional artwork download or generated file is needed.
+inline Texture2D makeBeltCorners( Image atlas )
+{
+    Image corners = GenImageColor( 64, 16, BLANK );
+    for ( int frame = 0; frame < 2; ++frame ) for ( int hand = 0; hand < 2; ++hand )
+        for ( int y = 0; y < 16; ++y ) for ( int x = 0; x < 16; ++x )
+        {
+            const float px = x + .5f, py = y + .5f - 16;
+            const int across = static_cast<int>( std::floor( 16 - std::sqrt( px * px + py * py ) ) );
+            if ( across < 0 || across >= 16 ) continue;
+            const int along = static_cast<int>( ( std::atan2( py, px ) + 1.57079632679f ) * 8 ) % 16;
+            const int tile = 26 + 12 * frame;
+            ImageDrawPixel( &corners, ( frame * 2 + hand ) * 16 + x, hand ? 15 - y : y, GetImageColor( atlas, tile % 12 * 16 + along, tile / 12 * 16 + across ) );
+        }
+    Texture2D texture = LoadTextureFromImage( corners ); UnloadImage( corners ); SetTextureFilter( texture, TEXTURE_FILTER_POINT ); return texture;
+}
+inline void beltSprite( Texture2D atlas, Texture2D corners, Rectangle dest, int entry, int output, int frame, Color tint = WHITE )
+{
+    if ( !beltCorner( entry, output ) ) { sprite( atlas, 26 + frame * 12, dest, output * 90.0f, tint ); return; }
+    const bool clockwise = entry == ( output + 1 ) % 4;
+    const int rotation = ( output + ( clockwise ? 3 : 1 ) ) % 4;
+    DrawTexturePro( corners, { static_cast<float>( ( frame * 2 + ( clockwise ? 0 : 1 ) ) * 16 ), 0, 16, 16 },
+        { dest.x + dest.width / 2, dest.y + dest.height / 2, dest.width, dest.height }, { dest.width / 2, dest.height / 2 }, rotation * 90.0f, tint );
 }
 inline void arrow( Vector2 center, int direction, Color color, float size )
 {

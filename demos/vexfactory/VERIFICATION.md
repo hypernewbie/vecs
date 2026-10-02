@@ -17,6 +17,9 @@ The implementation passed these local checks:
 - Software-rendered title, campaign, briefing, game, and ending screens render at 960x640 with 200% text.
 - X11 input tests pass at 1x and 2x DPI, including borderless mode and clicks through optional detail panels.
 - Pixel probes check that conveyor placement changes the rendered tile under the pointer, not a smaller or offset map.
+- X11 input tests paint clockwise and counterclockwise conveyor corners at 1x and 2x DPI, check their rendered tracks, and undo the entire stroke.
+- Asset-free tests cover automatic conveyor placement in all four directions, skipped cells, multiple turns, protected dock connections, budgets, obstacles, and neighboring lines.
+- Geometry tests cover all eight corner orientations and continuous cargo positions through each turn.
 - Coordinate tests cover Retina/Wayland points and Windows/X11 pixels at 1x, 1.5x, 2x, and 3x DPI.
 - The Windows Release ZIP includes the executable, CC0 tilemap and pixel fonts, their licenses, instructions, and library license notices.
 - The packaged Linux executable finds its nearby artwork and passes the graphical smoke check.
@@ -43,6 +46,7 @@ Campaign data, production rules, and the existing version-1 save format remain u
 
 - The campaign has ten chapters and one story ending, with optional medal text and replay.
 - The original sandbox retains its one-to-one recipes.
+- Conveyors have one cargo slot per tile, not two independently reserved lanes.
 - Packages are platform-specific ZIP archives, not installers or notarized macOS bundles.
 - Fonts come from the opt-in Kenney CC0 download. Normal Vecs builds do not fetch them.
 - Saves are versioned local files, not cloud saves.

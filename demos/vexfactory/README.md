@@ -119,10 +119,10 @@ Use `--font FILE.ttf` to select a different font for body text.
 | `7`-`9` | Splitter, sorter, generator |
 | `0` | Demolition brush |
 | Left mouse | Place a part |
-| Hold left mouse | Paint conveyors or demolish tiles |
+| Hold left mouse | Paint conveyors with automatic turns, or demolish tiles |
 | Shift + left mouse | Replace a different part |
 | Right mouse | Demolish a tile |
-| `R` | Rotate the selected output direction clockwise |
+| `R` | Rotate the brush clockwise for machines and single conveyor tiles |
 | `E` | Pick the tile under the pointer and toggle its inspector |
 | `B` | Toggle information for the selected part |
 | `O` | Toggle the orders panel |
@@ -147,6 +147,24 @@ The title menu includes Continue, Play campaign, Sandbox, Settings, and Quit.
 Settings includes text size, sound, and the field notes.
 The pause menu includes save, restart, research, and return to the campaign board.
 Restart and replacement actions require confirmation.
+
+## Conveyor placement
+
+Hold the left mouse button and drag in the direction of cargo flow.
+Release the button to finish the run.
+For a single tile, use `R` to set its output direction before placement.
+
+Each step turns the previous conveyor toward the next tile, including at corners.
+Fast drags fill skipped cells. Diagonal jumps make a horizontal run followed by a vertical run.
+A run can finish at a machine input or a protected freight dock without replacing it.
+Obstacles and insufficient credits stop the run. Unrelated neighboring conveyors keep their direction.
+One planning undo restores the entire stroke, including turns and construction costs.
+
+The Kenney pack contains straight conveyor frames, but no curved conveyor set.
+The game bends those frames into corner sprites in memory and animates them during production.
+Cargo follows the curves. Paused conveyors do not animate.
+This does not add another asset download or change the save format.
+Conveyors still have one cargo slot per tile, not Factorio's two lanes.
 
 ## Production rules
 

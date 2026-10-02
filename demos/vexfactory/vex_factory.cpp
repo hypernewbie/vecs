@@ -36,6 +36,7 @@ struct App
     int mission = -1, selected = 0, speed = 1, page = 1, direction = 0, menuIndex = 1;
     int hoverX = -1, hoverY = -1, lastX = -1, lastY = -1;
     Tool tool = Tool::Belt;
+    BeltStroke beltStroke;
     bool active = false, paused = true, quit = false, muted = false, noSave = false, saveBlocked = false, fit = true, fitAll = false, details = false, strokeSaved = false;
     float scale = 1, accumulator = 0, scroll = 0, panelScroll = 0, toastTime = 0;
     double saveClock = 0;
@@ -46,7 +47,7 @@ struct App
     std::vector<FactoryState> undo;
     Audio audio;
     void message( const std::string& text ) { toast = text; toastTime = 6; }
-    void change( Screen next ) { screen = next; scroll = 0; accumulator = 0; lastX = lastY = -1; menuIndex = next == Screen::Title && !active ? 1 : 0; }
+    void change( Screen next ) { screen = next; scroll = 0; accumulator = 0; lastX = lastY = -1; beltStroke.reset(); strokeSaved = false; menuIndex = next == Screen::Title && !active ? 1 : 0; }
     SaveGame capture()
     {
         SaveGame game; game.progress = progress; game.hasFactory = active; game.mission = mission;
@@ -176,9 +177,9 @@ void worldInput( App& app, const Layout& layout )
     const Vector2 mouse = app.mouse;
     const bool inWorld = CheckCollisionPointRec( mouse, rect( layout.world ) ) && !( app.details && CheckCollisionPointRec( mouse, rect( layout.panel ) ) );
     constexpr Tool shortcuts[] = { Tool::Belt, Tool::Miner, Tool::Smelter, Tool::Press, Tool::Assembler, Tool::Shipping, Tool::Splitter, Tool::Sorter, Tool::Generator };
-    for ( int i = 0; i < 9; ++i ) if ( IsKeyPressed( KEY_ONE + i ) ) { app.tool = shortcuts[i]; app.page = 0; }
-    if ( IsKeyPressed( KEY_ZERO ) ) app.tool = Tool::Erase;
-    if ( IsKeyPressed( KEY_R ) ) app.direction = ( app.direction + 1 ) % 4;
+    for ( int i = 0; i < 9; ++i ) if ( IsKeyPressed( KEY_ONE + i ) ) { app.tool = shortcuts[i]; app.page = 0; app.beltStroke.reset(); app.lastX = app.lastY = -1; }
+    if ( IsKeyPressed( KEY_ZERO ) ) { app.tool = Tool::Erase; app.beltStroke.reset(); app.lastX = app.lastY = -1; }
+    if ( IsKeyPressed( KEY_R ) ) { app.direction = ( app.direction + 1 ) % 4; app.beltStroke.reset(); app.lastX = app.lastY = -1; }
     if ( IsKeyPressed( KEY_SPACE ) ) app.toggleRun();
     if ( IsKeyPressed( KEY_TAB ) ) app.speed = app.speed == 4 ? 1 : app.speed * 2;
     if ( IsKeyPressed( KEY_HOME ) ) { app.fit = true; app.fitAll = true; }
@@ -189,7 +190,7 @@ void worldInput( App& app, const Layout& layout )
     if ( IsKeyPressed( KEY_N ) && app.mission < 0 ) { app.request( Action::EmptySandbox ); return; }
     const bool command = IsKeyDown( KEY_LEFT_CONTROL ) || IsKeyDown( KEY_RIGHT_CONTROL ) || IsKeyDown( KEY_LEFT_SUPER ) || IsKeyDown( KEY_RIGHT_SUPER );
     if ( command && IsKeyPressed( KEY_Z ) && !app.undo.empty() && app.sim.phase() == Phase::Planning )
-    { app.sim.restore( app.undo.back() ); app.undo.pop_back(); app.message( "Planning edit undone." ); }
+    { app.sim.restore( app.undo.back() ); app.undo.pop_back(); app.beltStroke.reset(); app.lastX = app.lastY = -1; app.message( "Planning edit undone." ); }
     if ( inWorld )
     {
         const float wheel = GetMouseWheelMove();
@@ -208,37 +209,45 @@ void worldInput( App& app, const Layout& layout )
     if ( panX || panY ) { app.fit = false; app.camera.target.x += panX * GetFrameTime() * 12; app.camera.target.y += panY * GetFrameTime() * 12; }
     if ( IsKeyPressed( KEY_E ) && inWorld && Simulation::inside( app.hoverX, app.hoverY ) )
     {
+        app.beltStroke.reset(); app.lastX = app.lastY = -1;
         const auto e = app.sim.at( app.hoverX, app.hoverY );
         if ( e != VECS_INVALID_ENTITY ) { app.tool = vecsGet<Building>( app.sim.world(), e )->tool; app.direction = vecsGet<Cell>( app.sim.world(), e )->direction; }
         app.details = !( app.details && app.page == 2 ); app.page = 2; app.panelScroll = 0;
     }
     if ( IsKeyPressed( KEY_F ) && inWorld ) app.sim.cycleFilter( app.hoverX, app.hoverY );
-    if ( !IsMouseButtonDown( MOUSE_BUTTON_LEFT ) && !IsMouseButtonDown( MOUSE_BUTTON_RIGHT ) ) { app.lastX = app.lastY = -1; app.strokeSaved = false; }
-    if ( !inWorld || !Simulation::inside( app.hoverX, app.hoverY ) || IsMouseButtonDown( MOUSE_BUTTON_MIDDLE ) ) return;
-    if ( ( IsKeyDown( KEY_LEFT_ALT ) || IsKeyDown( KEY_RIGHT_ALT ) ) && IsMouseButtonPressed( MOUSE_BUTTON_LEFT ) ) { app.details = true; app.page = 2; app.panelScroll = 0; return; }
+    if ( !IsMouseButtonDown( MOUSE_BUTTON_LEFT ) && !IsMouseButtonDown( MOUSE_BUTTON_RIGHT ) ) { app.lastX = app.lastY = -1; app.beltStroke.reset(); app.strokeSaved = false; }
+    if ( !inWorld || !Simulation::inside( app.hoverX, app.hoverY ) || IsMouseButtonDown( MOUSE_BUTTON_MIDDLE ) ) { app.lastX = app.lastY = -1; app.beltStroke.reset(); return; }
+    if ( IsMouseButtonPressed( MOUSE_BUTTON_LEFT ) || IsMouseButtonPressed( MOUSE_BUTTON_RIGHT ) ) { app.lastX = app.lastY = -1; app.beltStroke.reset(); }
+    if ( ( IsKeyDown( KEY_LEFT_ALT ) || IsKeyDown( KEY_RIGHT_ALT ) ) && IsMouseButtonDown( MOUSE_BUTTON_LEFT ) ) { app.beltStroke.reset(); app.lastX = app.lastY = -1; app.details = true; app.page = 2; app.panelScroll = 0; return; }
     const bool erase = IsMouseButtonDown( MOUSE_BUTTON_RIGHT );
     const bool paint = IsMouseButtonPressed( MOUSE_BUTTON_LEFT ) || ( IsMouseButtonDown( MOUSE_BUTTON_LEFT ) && ( app.tool == Tool::Belt || app.tool == Tool::Erase ) );
     if ( !erase && !paint ) return;
     if ( app.lastX == app.hoverX && app.lastY == app.hoverY && !IsMouseButtonPressed( MOUSE_BUTTON_LEFT ) && !IsMouseButtonPressed( MOUSE_BUTTON_RIGHT ) ) return;
     FactoryState before; const bool canUndo = app.sim.phase() == Phase::Planning && !app.strokeSaved;
     if ( canUndo ) before = app.sim.capture(); bool changed = false;
-    const auto apply = [&]( int x, int y )
+    const bool replace = IsKeyDown( KEY_LEFT_SHIFT ) || IsKeyDown( KEY_RIGHT_SHIFT );
+    if ( !erase && app.tool == Tool::Belt )
     {
-        const Tool tool = erase ? Tool::Erase : app.tool; const auto existing = app.sim.at( x, y );
-        if ( existing != VECS_INVALID_ENTITY && tool != Tool::Erase && vecsGet<Building>( app.sim.world(), existing )->tool != tool && !( IsKeyDown( KEY_LEFT_SHIFT ) || IsKeyDown( KEY_RIGHT_SHIFT ) ) )
-        { app.message( "Occupied. Shift-click replaces a part; right-click demolishes it." ); return; }
-        std::string reason;
-        if ( !app.sim.canPlace( x, y, tool, &reason ) ) { app.message( reason ); return; }
-        if ( app.sim.place( x, y, tool, app.direction ) ) changed = true;
-    };
-    // Fill cells skipped by a fast mouse stroke; don't depend on frame rate.
-    if ( ( app.tool == Tool::Belt || erase || app.tool == Tool::Erase ) && Simulation::inside( app.lastX, app.lastY ) )
-    {
-        int x = app.lastX, y = app.lastY;
-        while ( x != app.hoverX ) { x += x < app.hoverX ? 1 : -1; apply( x, y ); }
-        while ( y != app.hoverY ) { y += y < app.hoverY ? 1 : -1; apply( x, y ); }
+        std::string reason; changed = app.beltStroke.paint( app.sim, app.hoverX, app.hoverY, app.direction, replace, &reason );
+        if ( !reason.empty() ) app.message( reason );
     }
-    else apply( app.hoverX, app.hoverY );
+    else
+    {
+        app.beltStroke.reset();
+        const auto apply = [&]( int x, int y )
+        {
+            std::string reason; changed |= placePart( app.sim, x, y, erase ? Tool::Erase : app.tool, app.direction, replace, &reason );
+            if ( !reason.empty() ) app.message( reason );
+        };
+        // Fill cells skipped by a fast demolition stroke; don't depend on frame rate.
+        if ( ( erase || app.tool == Tool::Erase ) && Simulation::inside( app.lastX, app.lastY ) )
+        {
+            int x = app.lastX, y = app.lastY;
+            while ( x != app.hoverX ) { x += x < app.hoverX ? 1 : -1; apply( x, y ); }
+            while ( y != app.hoverY ) { y += y < app.hoverY ? 1 : -1; apply( x, y ); }
+        }
+        else apply( app.hoverX, app.hoverY );
+    }
     if ( changed )
     {
         if ( canUndo ) { if ( app.undo.size() == 24 ) app.undo.erase( app.undo.begin() ); app.undo.push_back( std::move( before ) ); app.strokeSaved = true; }
@@ -247,7 +256,7 @@ void worldInput( App& app, const Layout& layout )
     else app.audio.play( 2, app.muted );
     app.lastX = app.hoverX; app.lastY = app.hoverY;
 }
-void drawFactory( App& app, const Layout& layout, Texture2D atlas )
+void drawFactory( App& app, const Layout& layout, Texture2D atlas, Texture2D beltCorners )
 {
     Rectangle viewport = rect( layout.world ); DrawRectangleRec( viewport, { 36, 41, 45, 255 } );
     beginClip( viewport, app.surface );
@@ -276,7 +285,8 @@ void drawFactory( App& app, const Layout& layout, Texture2D atlas )
         const float x = static_cast<float>( cell.x ), y = static_cast<float>( cell.y );
         if ( isTransport( b.tool ) )
         {
-            sprite( atlas, 26, { x, y, 1, 1 }, cell.direction * 90.0f );
+            const int frame = static_cast<int>( app.sim.stats().elapsed * 8 * ( 1 + .25f * app.sim.scenario().beltTier ) ) % 2;
+            beltSprite( atlas, beltCorners, { x, y, 1, 1 }, b.tool == Tool::Belt ? beltEntry( app.sim, cell.x, cell.y ) : -1, cell.direction, frame );
             if ( const auto* router = vecsGet<Router>( app.sim.world(), e ) )
             {
                 DrawRectangleRec( { x + .1f, y + .1f, .8f, .8f }, Fade( router->splitter ? Gold : Mint, .22f ) );
@@ -310,7 +320,7 @@ void drawFactory( App& app, const Layout& layout, Texture2D atlas )
     } );
     app.sim.parcels( [&]( vecsEntity, Parcel& parcel, Transit& t )
     {
-        const float x = t.fromX + ( t.x - t.fromX ) * t.progress + .5f, y = t.fromY + ( t.y - t.fromY ) * t.progress + .5f;
+        const auto point = parcelPoint( app.sim, t ); const float x = point.x, y = point.y;
         DrawCircleV( { x, y + .2f }, .22f, { 0, 0, 0, 55 } );
         sprite( atlas, ItemTiles[static_cast<int>( parcel.kind )], { x - .31f, y - .31f, .62f, .62f } );
         if ( t.progress >= 1 ) DrawRectangleLinesEx( { x - .34f, y - .34f, .68f, .68f }, .035f, Coral );
@@ -320,7 +330,8 @@ void drawFactory( App& app, const Layout& layout, Texture2D atlas )
         const bool legal = app.sim.canPlace( app.hoverX, app.hoverY, app.tool ); const Color color = legal ? Mint : Coral;
         Rectangle cell{ static_cast<float>( app.hoverX ), static_cast<float>( app.hoverY ), 1, 1 };
         DrawRectangleRec( cell, Fade( color, .22f ) ); DrawRectangleLinesEx( cell, .06f, color );
-        sprite( atlas, ToolTiles[static_cast<int>( app.tool )], cell, app.tool == Tool::Belt ? app.direction * 90.0f : 0, Fade( WHITE, .4f ) );
+        if ( app.tool == Tool::Belt ) beltSprite( atlas, beltCorners, cell, beltEntry( app.sim, app.hoverX, app.hoverY ), app.direction, 0, Fade( WHITE, .4f ) );
+        else sprite( atlas, ToolTiles[static_cast<int>( app.tool )], cell, 0, Fade( WHITE, .4f ) );
     }
     EndMode2D(); rlLoadIdentity(); EndScissorMode(); DrawRectangleLinesEx( viewport, 1, Border );
 }
@@ -382,7 +393,7 @@ void drawHud( App& app, Ui& ui, const Layout& l, Texture2D atlas )
         y += paragraph( ui, toolName( app.tool ), x, y, width, Mint );
         if ( app.mission >= 0 ) y += paragraph( ui, TextFormat( "%d credits / %d power", costFor( app.tool ), powerFor( app.tool ) ), x, y, width, Gold );
         y += paragraph( ui, std::string( "Output: " ) + directions[app.direction] + ". R rotates the brush.", x, y, width, Gold );
-        std::string recipe = app.tool == Tool::Miner ? "Miners need ore deposits. Their output needs a conveyor." : app.tool == Tool::Smelter ? "1 ore -> 1 plate" : app.tool == Tool::Press ? ( app.mission < 0 ? "1 plate -> 1 gear" : "2 plates -> 1 gear" ) : app.tool == Tool::Assembler ? ( app.mission < 0 ? "1 gear -> 1 engine" : "2 gears + 1 plate -> 1 engine. Feed both inputs from different sides." ) : app.tool == Tool::Splitter ? "Forward and left outputs alternate. A blocked exit sends cargo through the other exit." : app.tool == Tool::Sorter ? "Selected cargo goes forward; other cargo goes left. F changes the filter under the pointer." : app.tool == Tool::Generator ? "+12 power. You cannot remove power committed to machines." : app.tool == Tool::Erase ? "Demolition scraps cargo. Purchased parts refund 70-85%; free prefabs refund nothing." : "Drag straight conveyor runs. Items follow arrows. Right-click demolishes; Shift-click replaces.";
+        std::string recipe = app.tool == Tool::Miner ? "Miners need ore deposits. Their output needs a conveyor." : app.tool == Tool::Smelter ? "1 ore -> 1 plate" : app.tool == Tool::Press ? ( app.mission < 0 ? "1 plate -> 1 gear" : "2 plates -> 1 gear" ) : app.tool == Tool::Assembler ? ( app.mission < 0 ? "1 gear -> 1 engine" : "2 gears + 1 plate -> 1 engine. Feed both inputs from different sides." ) : app.tool == Tool::Splitter ? "Forward and left outputs alternate. A blocked exit sends cargo through the other exit." : app.tool == Tool::Sorter ? "Selected cargo goes forward; other cargo goes left. F changes the filter under the pointer." : app.tool == Tool::Generator ? "+12 power. You cannot remove power committed to machines." : app.tool == Tool::Erase ? "Demolition scraps cargo. Purchased parts refund 70-85%; free prefabs refund nothing." : "Drag conveyors in the direction of flow. Belts turn at each bend. Finish a run at a machine or dock to connect it. R sets single-tile direction. Right-click demolishes; Shift-click replaces.";
         y += paragraph( ui, recipe, x, y, width );
         if ( app.sim.phase() == Phase::Planning ) y += paragraph( ui, "Ctrl/Cmd+Z undoes planning edits. Launch clears undo history.", x, y, width, Muted );
     }
@@ -580,7 +591,7 @@ void drawMenus( App& app, Ui& ui, const Layout& l, Texture2D atlas, Font logoFon
             "Power is reserved by installed machines: miners 2, smelters 3, presses 4, assemblers 5. Generators provide 12. You cannot demolish a generator while its power is in use.",
             "Splitters alternate forward and left, using the other port when one is blocked. Sorters send their selected product forward and other cargo left. Point at a sorter and press F to change its filter.",
             "Docks are protected. Their cargo icon shows the requested product. Wrong cargo or a filled quota blocks incoming belts. Only needed deliveries pay credits; there is no surplus-income exploit.",
-            "1-9 selects parts. 0 demolishes. R rotates the brush. E picks and inspects a tile. Alt-click inspects without building. Right-click demolishes. Shift-click replaces a different part. Drag to paint conveyors.",
+            "1-9 selects parts. 0 demolishes. R rotates the brush. E picks and inspects a tile. Alt-click inspects without building. Right-click demolishes. Shift-click replaces a different part. Drag conveyors in the direction of flow; corners turn automatically. Finish at a machine or dock to connect. R sets single-tile direction.",
             "Space launches or pauses. Tab cycles production speed. Wheel over the floor zooms; middle-drag or WASD pans. Home fits the floor. Wheel over a panel scrolls its contents. B opens part info. O opens orders. Esc closes details. The factory view stays full-width.",
             "Ctrl/Cmd+Z undoes planning edits. Undo ends at launch. Ctrl/Cmd+S saves. Ctrl/Cmd +/- changes text size. M mutes sound. Esc closes details or opens the menu. F1 opens these notes.",
             "Demolition refunds 70% of the price you actually paid, rising to 85% with research. Ore in conveyors and machine buffers is scrapped. A failed dispatch can always be retried; campaign rewards and completed chapters remain.",
@@ -716,8 +727,8 @@ int main( int argc, char** argv )
     InitWindow( options.width, options.height, "VexFactory: The Last Freight" );
     if ( !IsWindowReady() ) { UnloadImage( image ); return 1; }
     SetWindowMinSize( 960, 640 ); SetExitKey( KEY_NULL ); SetTargetFPS( 60 );
-    Texture2D atlas = LoadTextureFromImage( image ); UnloadImage( image );
-    if ( !IsTextureValid( atlas ) ) { CloseWindow(); return 1; } SetTextureFilter( atlas, TEXTURE_FILTER_POINT );
+    Texture2D atlas = LoadTextureFromImage( image ), beltCorners = makeBeltCorners( image ); UnloadImage( image );
+    if ( !IsTextureValid( atlas ) || !IsTextureValid( beltCorners ) ) { UnloadTexture( atlas ); UnloadTexture( beltCorners ); CloseWindow(); return 1; } SetTextureFilter( atlas, TEXTURE_FILTER_POINT );
     const Surface initialSurface = windowSurface();
     SetWindowMinSize( static_cast<int>( 960 * initialSurface.windowWidth / initialSurface.width ), static_cast<int>( 640 * initialSurface.windowHeight / initialSurface.height ) );
     const float initialDensity = std::max( initialSurface.densityX(), initialSurface.densityY() );
@@ -770,7 +781,7 @@ int main( int argc, char** argv )
         if ( GetTime() - app.saveClock > 20 ) app.save();
         BeginDrawing(); ClearBackground( Background ); beginCanvas( app.surface );
         Ui ui{ font.font, app.scale, options.smoke ? Vector2{ -100, -100 } : app.mouse, !options.smoke }; ui.surface = app.surface;
-        if ( app.screen == Screen::Playing ) { drawFactory( app, layout, atlas ); drawHud( app, ui, layout, atlas ); }
+        if ( app.screen == Screen::Playing ) { drawFactory( app, layout, atlas, beltCorners ); drawHud( app, ui, layout, atlas ); }
         else drawMenus( app, ui, layout, atlas, titleFont.font );
         if ( app.toastTime > 0 )
         {
@@ -782,6 +793,6 @@ int main( int argc, char** argv )
         if ( frames == 1 ) { std::printf( "VIEW: logical %.0fx%.0f / window %.0fx%.0f / framebuffer %.0fx%.0f\nGAME: Ready\n", app.surface.width, app.surface.height, app.surface.windowWidth, app.surface.windowHeight, app.surface.framebufferWidth, app.surface.framebufferHeight ); std::fflush( stdout ); }
         if ( !options.screenshot.empty() && frames == options.frames ) { Image shot = LoadImageFromScreen(); screenshotWritten = ExportImage( shot, options.screenshot.c_str() ); UnloadImage( shot ); }
     }
-    app.save(); app.audio.release(); font.release(); titleFont.release(); UnloadTexture( atlas ); CloseWindow();
+    app.save(); app.audio.release(); font.release(); titleFont.release(); UnloadTexture( beltCorners ); UnloadTexture( atlas ); CloseWindow();
     if ( !screenshotWritten ) { std::fprintf( stderr, "The screenshot was not written.\n" ); return 1; } return 0;
 }
